@@ -1,0 +1,12 @@
+node_modules/
+dist/
+main.js
+styles.css
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+.tmp/
+.obsidian/
