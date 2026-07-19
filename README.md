@@ -8,7 +8,7 @@ MDX Relay is a desktop Obsidian plugin for profile-driven Markdown-to-MDX publis
 
 **Approved design, pre-implementation scaffold.**
 
-The first engineering plan and implementation issues will be tracked in the [MDX Relay Linear project](https://linear.app/critterhaus/project/obsidian-publishing-plugin-fbd65a52c426). APP-475 is the approved design/root issue.
+The first engineering plan and implementation issues will be tracked in the [MDX Relay Linear project](https://linear.app/critterhaus/project/mdx-relay-fbd65a52c426). APP-475 is the approved design/root issue.
 
 ## V1 shape
 
