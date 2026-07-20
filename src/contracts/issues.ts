@@ -384,7 +384,7 @@ if (import.meta.vitest) {
       expect(Object.isFrozen(issue)).toBe(true);
     });
 
-    it("lint rejects every frozen contract shape and static issue-code syntax", async () => {
+    it("lint rejects adversarial contract, issue, and limit redefinitions", async () => {
       const { ESLint } = await import("eslint");
       const eslint = new ESLint({
         cwd: process.cwd(),
@@ -394,11 +394,18 @@ if (import.meta.vitest) {
       });
       const [result] = await eslint.lintText(
         [
+          "export function ok() {}",
+          "export function err() {}",
+          "export function createIssue() {}",
+          "export const generationTokenBrand = Symbol();",
+          "export function matchesPlanIdentity() {}",
           "export interface SourceRange {}",
           'export type ExportPlanState = "ready";',
           "export class WorkerProcessRequest {}",
           "export const ISSUE_CODES = {};",
           "export const ISSUE_REGISTRY = {};",
+          "export const MDX_RELAY_LIMITS = {};",
+          "export type MdxRelayLimits = {};",
           "export const templateCode = `STALE_DURING_PLANNING`;",
           'export const concatenatedCode = "STALE_" + "DURING_PLANNING";',
         ].join("\n"),
@@ -408,7 +415,58 @@ if (import.meta.vitest) {
         ({ ruleId }) => ruleId === "contracts/freeze-contracts",
       );
 
-      expect(boundaryMessages).toHaveLength(7);
+      expect(boundaryMessages).toHaveLength(14);
+    });
+
+    it("lint rejects every currently exported contract API name downstream", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const ts = await import("typescript");
+      const { ESLint } = await import("eslint");
+      const contractsRoot = path.join(process.cwd(), "src", "contracts");
+      const contractFiles = fs
+        .readdirSync(contractsRoot, { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
+        .map((entry) => path.join(entry.parentPath, entry.name));
+      const program = ts.createProgram(contractFiles, {
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        target: ts.ScriptTarget.ES2022,
+      });
+      const checker = program.getTypeChecker();
+      const exportedNames = [
+        ...new Set(
+          contractFiles.flatMap((filename) => {
+            const sourceFile = program.getSourceFile(filename);
+            const moduleSymbol =
+              sourceFile && checker.getSymbolAtLocation(sourceFile);
+            return moduleSymbol
+              ? checker
+                  .getExportsOfModule(moduleSymbol)
+                  .map((symbol) => symbol.getName())
+              : [];
+          }),
+        ),
+      ].sort();
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
+      });
+      const [result] = await eslint.lintText(
+        exportedNames
+          .map((name) => `export const ${name} = undefined;`)
+          .join("\n"),
+        { filePath: "src/planning/full-contract-api-probe.ts" },
+      );
+      const rejectedNames = result?.messages
+        .filter(({ ruleId }) => ruleId === "contracts/freeze-contracts")
+        .map(({ message }) => message.split(" is frozen", 1)[0])
+        .sort();
+
+      expect(exportedNames.length).toBeGreaterThan(0);
+      expect(rejectedNames).toEqual(exportedNames);
     });
 
     it("lint allows downstream imports and references to frozen contracts", async () => {
@@ -422,12 +480,18 @@ if (import.meta.vitest) {
       const [result] = await eslint.lintText(
         [
           'import type { SourceRange, WorkerProcessRequest } from "../contracts";',
-          'import { ISSUE_CODES } from "../contracts/issues";',
+          'import { createIssue, ISSUE_CODES } from "../contracts/issues";',
+          'import { matchesPlanIdentity } from "../contracts/export-plan";',
+          'import { err, ok } from "../contracts/result";',
           "export type PlanningInput = Readonly<{",
           "  range: SourceRange;",
           "  request: WorkerProcessRequest;",
           "  code: typeof ISSUE_CODES.staleDuringPlanning;",
           "}>;",
+          "void createIssue;",
+          "void matchesPlanIdentity;",
+          "void err;",
+          "void ok;",
         ].join("\n"),
         { filePath: "src/planning/contract-reference-probe.ts" },
       );

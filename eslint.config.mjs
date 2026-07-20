@@ -17,70 +17,33 @@ const normalizedContractsRoot = `${normalizePath(CONTRACTS_ROOT)}/`;
 const normalizedIssuesFile = normalizePath(ISSUES_FILE);
 const normalizedLimitsFile = normalizePath(LIMITS_FILE);
 
-const hasExportModifier = (node) =>
-  ts.canHaveModifiers(node) &&
-  (ts.getModifiers(node) ?? []).some(
-    ({ kind }) => kind === ts.SyntaxKind.ExportKeyword,
-  );
-
-const exportedTypeNames = (sourceFile) => {
-  const names = [];
-  for (const statement of sourceFile.statements) {
-    if (
-      hasExportModifier(statement) &&
-      (ts.isInterfaceDeclaration(statement) ||
-        ts.isTypeAliasDeclaration(statement) ||
-        ts.isEnumDeclaration(statement) ||
-        ts.isClassDeclaration(statement)) &&
-      statement.name
-    ) {
-      names.push(statement.name.text);
-    }
-  }
-  return names;
-};
-
-const exportedVariableNames = (sourceFile) => {
-  const names = [];
-  for (const statement of sourceFile.statements) {
-    if (!hasExportModifier(statement) || !ts.isVariableStatement(statement)) {
-      continue;
-    }
-    for (const declaration of statement.declarationList.declarations) {
-      if (ts.isIdentifier(declaration.name)) {
-        names.push(declaration.name.text);
-      }
-    }
-  }
-  return names;
-};
-
-const parseSourceFile = (filename) =>
-  ts.createSourceFile(
-    filename,
-    fs.readFileSync(filename, "utf8"),
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-
 const contractFiles = fs
   .readdirSync(CONTRACTS_ROOT, { recursive: true, withFileTypes: true })
   .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
   .map((entry) => path.join(entry.parentPath, entry.name));
+const exportProgram = ts.createProgram({
+  rootNames: [...contractFiles, LIMITS_FILE],
+  options: {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022,
+  },
+});
+const exportChecker = exportProgram.getTypeChecker();
+const exportedNames = (filename) => {
+  const sourceFile = exportProgram.getSourceFile(filename);
+  const moduleSymbol =
+    sourceFile && exportChecker.getSymbolAtLocation(sourceFile);
+  return moduleSymbol
+    ? exportChecker
+        .getExportsOfModule(moduleSymbol)
+        .map((symbol) => symbol.getName())
+    : [];
+};
 
-const frozenContractNames = new Set(
-  contractFiles.flatMap((filename) =>
-    exportedTypeNames(parseSourceFile(filename)),
-  ),
-);
-const frozenIssueValueNames = new Set(
-  exportedVariableNames(parseSourceFile(ISSUES_FILE)),
-);
-const frozenLimitNames = new Set([
-  ...exportedTypeNames(parseSourceFile(LIMITS_FILE)),
-  ...exportedVariableNames(parseSourceFile(LIMITS_FILE)),
-]);
+const frozenContractNames = new Set(contractFiles.flatMap(exportedNames));
+const frozenIssueValueNames = new Set(exportedNames(ISSUES_FILE));
+const frozenLimitNames = new Set(exportedNames(LIMITS_FILE));
 
 const staticStringValue = (node) => {
   if (node.type === "Literal") {

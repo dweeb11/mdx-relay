@@ -94,6 +94,44 @@ export function matchesPlanIdentity(
   );
 }
 
+function matchesRepositoryFingerprint(
+  actual: RepositoryFingerprint,
+  expected: RepositoryFingerprint,
+): boolean {
+  return (
+    actual.repositoryIdentitySha256 === expected.repositoryIdentitySha256 &&
+    actual.gitDirectoryIdentitySha256 === expected.gitDirectoryIdentitySha256 &&
+    actual.branchName === expected.branchName &&
+    actual.headOid === expected.headOid &&
+    actual.upstreamOid === expected.upstreamOid &&
+    actual.remoteTipOid === expected.remoteTipOid &&
+    actual.indexSha256 === expected.indexSha256 &&
+    actual.worktreeStatusSha256 === expected.worktreeStatusSha256 &&
+    actual.gitConfigurationSha256 === expected.gitConfigurationSha256 &&
+    actual.effectivePushDestinationSha256 ===
+      expected.effectivePushDestinationSha256
+  );
+}
+
+export function matchesApprovalContext(
+  plan: ExportPlan,
+  approval: ApprovalRecord,
+  currentRepositoryFingerprint: RepositoryFingerprint,
+): boolean {
+  const approvedRepositoryFingerprint = plan.captureFingerprint.repository;
+  return (
+    matchesPlanIdentity(approval, plan) &&
+    matchesRepositoryFingerprint(
+      approval.repositoryFingerprint,
+      approvedRepositoryFingerprint,
+    ) &&
+    matchesRepositoryFingerprint(
+      currentRepositoryFingerprint,
+      approvedRepositoryFingerprint,
+    )
+  );
+}
+
 if (import.meta.vitest) {
   const { describe, expect, it } = import.meta.vitest;
 
@@ -146,6 +184,88 @@ if (import.meta.vitest) {
           },
           expected,
         ),
+      ).toBe(false);
+    });
+
+    it("requires approval for the exact current repository fingerprint", () => {
+      const generationToken = "generation-1" as GenerationToken;
+      const planId = "plan-1" as PlanId;
+      const digest = "sha256:fixture" as Sha256Digest;
+      const repositoryFingerprint = {
+        repositoryIdentitySha256: digest,
+        gitDirectoryIdentitySha256: digest,
+        branchName: "feat/app-560-bootstrap-contracts",
+        headOid: "a".repeat(40),
+        upstreamOid: "b".repeat(40),
+        remoteTipOid: "b".repeat(40),
+        indexSha256: digest,
+        worktreeStatusSha256: digest,
+        gitConfigurationSha256: digest,
+        effectivePushDestinationSha256: digest,
+      } satisfies RepositoryFingerprint;
+      const plan = {
+        schemaVersion: 1,
+        generationToken,
+        planId,
+        state: "ready",
+        captureFingerprint: {
+          noteSha256: digest,
+          sourceImages: [],
+          candidateSetSha256: digest,
+          profileSnapshotSha256: digest,
+          repository: repositoryFingerprint,
+        },
+        actions: [],
+        blobs: {},
+        issues: [],
+        createdAtUtc: "2026-07-19T12:00:00.000Z",
+        expiresAtUtc: "2026-07-26T12:00:00.000Z",
+      } satisfies ExportPlan;
+      const approval = {
+        generationToken,
+        planId,
+        repositoryFingerprint,
+        approvedAtUtc: "2026-07-19T12:01:00.000Z",
+      } satisfies ApprovalRecord;
+
+      expect(
+        matchesApprovalContext(plan, approval, repositoryFingerprint),
+      ).toBe(true);
+      expect(
+        matchesApprovalContext(
+          plan,
+          {
+            ...approval,
+            generationToken: "generation-stale" as GenerationToken,
+          },
+          repositoryFingerprint,
+        ),
+      ).toBe(false);
+      expect(
+        matchesApprovalContext(
+          plan,
+          { ...approval, planId: "plan-stale" as PlanId },
+          repositoryFingerprint,
+        ),
+      ).toBe(false);
+      expect(
+        matchesApprovalContext(plan, approval, {
+          ...repositoryFingerprint,
+          headOid: "c".repeat(40),
+        }),
+      ).toBe(false);
+      expect(
+        matchesApprovalContext(plan, approval, {
+          ...repositoryFingerprint,
+          gitConfigurationSha256: "sha256:changed-config" as Sha256Digest,
+        }),
+      ).toBe(false);
+      expect(
+        matchesApprovalContext(plan, approval, {
+          ...repositoryFingerprint,
+          effectivePushDestinationSha256:
+            "sha256:changed-push-destination" as Sha256Digest,
+        }),
       ).toBe(false);
     });
   });
