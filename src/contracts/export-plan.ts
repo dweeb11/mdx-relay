@@ -461,11 +461,31 @@ const isIsoUtc = (value: unknown): value is string => {
     new Date(milliseconds).toISOString() === value
   );
 };
+const isPlanRelativePath = (value: unknown): value is string => {
+  if (
+    !isNonemptyString(value) ||
+    value.startsWith("/") ||
+    value.startsWith("plans/") ||
+    value.includes("\\") ||
+    /^[A-Za-z]:/u.test(value) ||
+    Array.from(value).some((character) => {
+      const codePoint = character.codePointAt(0);
+      return (
+        codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)
+      );
+    })
+  )
+    return false;
+
+  return value
+    .split("/")
+    .every(
+      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+    );
+};
 const isSealedOutput = (value: unknown): value is SealedOutput =>
   exactObject(value, ["planRelativePath", "byteLength", "contentSha256"]) &&
-  isNonemptyString(value.planRelativePath) &&
-  !value.planRelativePath.startsWith("/") &&
-  !value.planRelativePath.startsWith("plans/") &&
+  isPlanRelativePath(value.planRelativePath) &&
   isNonnegativeInteger(value.byteLength) &&
   isNonemptyString(value.contentSha256);
 const isPlanIdentity = (value: unknown): value is PlanIdentity =>
@@ -1566,6 +1586,51 @@ if (import.meta.vitest) {
           JSON.stringify(malformed),
         ).toBe(false);
       }
+    });
+
+    it("rejects unsafe sealed output paths before approval", () => {
+      const transition = { generationToken, planId };
+      const now = "2026-07-20T01:00:00.000Z";
+      const invalidPaths = [
+        "../recovery.json",
+        "./blob",
+        "outputs/../escape",
+        "outputs//0001",
+        "outputs/",
+        "C:/temp/blob",
+        "C:\\temp\\blob",
+        "\\\\server\\share\\blob",
+        "outputs\\0001",
+        "outputs/\u0000blob",
+        "/absolute/blob",
+        "plans/plan-1/blob",
+      ] as const;
+
+      for (const planRelativePath of invalidPaths) {
+        const plan = completeReadyPlan();
+        const malformed = {
+          ...plan,
+          commitMessage: { ...plan.commitMessage, planRelativePath },
+        } as VerifiedReadyExportPlan;
+        expect(
+          matchesApprovalContext(
+            malformed,
+            transition,
+            plan.approvalFingerprint,
+            now,
+          ),
+          planRelativePath,
+        ).toBe(false);
+      }
+
+      expect(
+        matchesApprovalContext(
+          completeReadyPlan(),
+          transition,
+          approvalFingerprint(),
+          now,
+        ),
+      ).toBe(true);
     });
 
     it("keeps durable approval plan-only and post-seal transition dual-bound", () => {
