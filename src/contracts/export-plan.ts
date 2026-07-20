@@ -449,6 +449,9 @@ const sameValue = (left: unknown, right: unknown): boolean => {
   );
 };
 
+const compareCodeUnitStrings = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
 const isIsoUtc = (value: unknown): value is string => {
   if (
     typeof value !== "string" ||
@@ -657,6 +660,33 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
     !isApprovalFingerprint(value.approvalFingerprint)
   )
     return false;
+
+  const approvalFingerprint = value.approvalFingerprint;
+  const sourceNoteFingerprint: ApprovalSourceNoteFingerprint = {
+    byteLength: value.sourceNote.byteLength,
+    contentSha256: value.sourceNote.contentSha256,
+  };
+  const sourceImageFingerprints: ApprovalSourceImageFingerprint[] =
+    value.sourceImages.map(
+      ({ sourceId, byteLength, contentSha256, transformedOutputSha256 }) => ({
+        sourceId,
+        byteLength,
+        contentSha256,
+        transformedOutputSha256,
+      }),
+    );
+  if (
+    value.profileSnapshotSha256 !== approvalFingerprint.profileSnapshotSha256 ||
+    !sameValue(sourceNoteFingerprint, approvalFingerprint.sourceNote) ||
+    value.dependencySnapshotSha256 !==
+      approvalFingerprint.dependencySnapshotSha256 ||
+    !sameValue(sourceImageFingerprints, approvalFingerprint.sourceImages) ||
+    !sameValue(
+      value.repositoryFingerprint,
+      approvalFingerprint.repositoryFingerprint,
+    )
+  )
+    return false;
   if (
     !isSealedOutput(value.generatedMdx) ||
     !isRecord(value.blobs) ||
@@ -706,7 +736,7 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
     return false;
 
   const orderedBlobOutputs = Object.values(blobs).sort((left, right) =>
-    left.planRelativePath.localeCompare(right.planRelativePath),
+    compareCodeUnitStrings(left.planRelativePath, right.planRelativePath),
   );
   if (!sameValue(orderedBlobOutputs, value.approvalFingerprint.sealedOutputs))
     return false;
@@ -740,7 +770,8 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
   if (
     !exactObject(value.author, ["name", "email"]) ||
     !isNonemptyString(value.author.name) ||
-    !isNonemptyString(value.author.email)
+    !isNonemptyString(value.author.email) ||
+    !sameValue(value.author, value.repositoryFingerprint.canonicalCommitAuthor)
   )
     return false;
   return (
@@ -1061,7 +1092,7 @@ if (import.meta.vitest) {
       );
       expect(plan.approvalFingerprint.sealedOutputs).toEqual(
         Object.values(plan.blobs).sort((left, right) =>
-          left.planRelativePath.localeCompare(right.planRelativePath),
+          compareCodeUnitStrings(left.planRelativePath, right.planRelativePath),
         ),
       );
     });
@@ -1775,6 +1806,117 @@ if (import.meta.vitest) {
           JSON.stringify(malformed),
         ).toBe(false);
       }
+    });
+
+    it("rejects plans whose top-level duplicates diverge from approval", () => {
+      const transition = { generationToken, planId };
+      const now = "2026-07-20T01:00:00.000Z";
+      type PlanMutation = (plan: VerifiedReadyExportPlan) => void;
+      const mutations: readonly [string, PlanMutation][] = [
+        [
+          "profileSnapshotSha256",
+          (plan) => {
+            (
+              plan as unknown as { profileSnapshotSha256: Sha256Digest }
+            ).profileSnapshotSha256 = digest;
+          },
+        ],
+        [
+          "sourceNote.byteLength",
+          (plan) => {
+            (plan.sourceNote as { byteLength: number }).byteLength += 1;
+          },
+        ],
+        [
+          "dependencySnapshotSha256",
+          (plan) => {
+            (
+              plan as unknown as { dependencySnapshotSha256: Sha256Digest }
+            ).dependencySnapshotSha256 = digest;
+          },
+        ],
+        [
+          "sourceImages[0].contentSha256",
+          (plan) => {
+            (
+              plan.sourceImages[0] as { contentSha256: Sha256Digest }
+            ).contentSha256 = digest;
+          },
+        ],
+        [
+          "repositoryFingerprint.branch.currentBranch",
+          (plan) => {
+            (
+              plan.repositoryFingerprint.branch as { currentBranch: string }
+            ).currentBranch = "other";
+          },
+        ],
+        [
+          "author.name",
+          (plan) => {
+            (plan.author as { name: string }).name = "Other Author";
+          },
+        ],
+      ];
+
+      for (const [label, mutate] of mutations) {
+        const plan = structuredClone(
+          completeReadyPlan(),
+        ) as VerifiedReadyExportPlan;
+        mutate(plan);
+        expect(
+          matchesApprovalContext(
+            plan,
+            transition,
+            plan.approvalFingerprint,
+            now,
+          ),
+          label,
+        ).toBe(false);
+      }
+    });
+
+    it("orders sealed output paths by deterministic code-unit order", () => {
+      const plan = completeReadyPlan();
+      const generatedMdx = {
+        ...plan.generatedMdx,
+        planRelativePath: "z-output",
+      };
+      const imageOutput = {
+        ...plan.actions[1]!.sealedOutput,
+        planRelativePath: "ä-output",
+      };
+      const commitMessage = {
+        ...plan.commitMessage,
+        planRelativePath: "a-commit",
+      };
+      const deterministicPlan = {
+        ...plan,
+        generatedMdx,
+        actions: [
+          { ...plan.actions[0], sealedOutput: generatedMdx },
+          { ...plan.actions[1], sealedOutput: imageOutput },
+        ],
+        blobs: {
+          [generatedMdx.contentSha256]: generatedMdx,
+          [imageOutput.contentSha256]: imageOutput,
+          [commitMessage.contentSha256]: commitMessage,
+        },
+        commitMessage,
+        approvalFingerprint: {
+          ...plan.approvalFingerprint,
+          sealedOutputs: [commitMessage, generatedMdx, imageOutput],
+        },
+      } as unknown as VerifiedReadyExportPlan;
+
+      expect(
+        matchesApprovalContext(
+          deterministicPlan,
+          { generationToken, planId },
+          deterministicPlan.approvalFingerprint,
+          "2026-07-20T01:00:00.000Z",
+        ),
+      ).toBe(true);
     });
 
     it("keeps durable approval plan-only and post-seal transition dual-bound", () => {
