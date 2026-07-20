@@ -419,7 +419,7 @@ const isRepositoryFingerprint = (
         "symlinkStatus",
         "approvedPriorTarget",
       ]) ||
-      !isNonemptyString(target.normalizedPath) ||
+      !isRepositoryTargetPath(target.normalizedPath) ||
       target.symlinkStatus !== "not-symlink" ||
       !isPriorTarget(target.approvedPriorTarget) ||
       target.normalizedPath <= previous
@@ -461,11 +461,10 @@ const isIsoUtc = (value: unknown): value is string => {
     new Date(milliseconds).toISOString() === value
   );
 };
-const isPlanRelativePath = (value: unknown): value is string => {
+const hasPortableRelativePathShape = (value: unknown): value is string => {
   if (
     !isNonemptyString(value) ||
     value.startsWith("/") ||
-    value.startsWith("plans/") ||
     value.includes("\\") ||
     /^[A-Za-z]:/u.test(value) ||
     Array.from(value).some((character) => {
@@ -483,6 +482,11 @@ const isPlanRelativePath = (value: unknown): value is string => {
       (segment) => segment.length > 0 && segment !== "." && segment !== "..",
     );
 };
+const isPlanRelativePath = (value: unknown): value is string =>
+  hasPortableRelativePathShape(value) && !value.startsWith("plans/");
+const isRepositoryTargetPath = (value: unknown): value is string =>
+  hasPortableRelativePathShape(value) &&
+  !value.split("/").some((segment) => segment.toLowerCase() === ".git");
 const isSealedOutput = (value: unknown): value is SealedOutput =>
   exactObject(value, ["planRelativePath", "byteLength", "contentSha256"]) &&
   isPlanRelativePath(value.planRelativePath) &&
@@ -589,7 +593,7 @@ const isExportAction = (value: unknown): value is ExportAction =>
   ]) &&
   (value.kind === "create" || value.kind === "update") &&
   isNonnegativeInteger(value.documentOrder) &&
-  isNonemptyString(value.targetPath) &&
+  isRepositoryTargetPath(value.targetPath) &&
   (value.expectedGitMode === "100644" || value.expectedGitMode === "100755") &&
   isSealedOutput(value.sealedOutput) &&
   isNonnegativeInteger(value.sourceOccurrence) &&
@@ -669,6 +673,63 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
     !value.actions.every(isExportAction)
   )
     return false;
+
+  const blobs = value.blobs as Record<string, SealedOutput>;
+  const generatedMdx = value.generatedMdx as SealedOutput;
+  const commitMessage = value.commitMessage as SealedOutput;
+  const matchesBlob = (sealedOutput: SealedOutput): boolean => {
+    const blob = blobs[sealedOutput.contentSha256];
+    return blob !== undefined && sameValue(blob, sealedOutput);
+  };
+  if (
+    !matchesBlob(generatedMdx) ||
+    !matchesBlob(commitMessage) ||
+    !value.actions.every((action) => matchesBlob(action.sealedOutput))
+  )
+    return false;
+
+  const actionOutputHashes = new Set(
+    value.actions.map((action) => action.sealedOutput.contentSha256),
+  );
+  const expectedActionOutputHashes = new Set(
+    Object.keys(blobs).filter(
+      (contentSha256) => contentSha256 !== commitMessage.contentSha256,
+    ),
+  );
+  if (
+    !actionOutputHashes.has(generatedMdx.contentSha256) ||
+    actionOutputHashes.size !== expectedActionOutputHashes.size ||
+    ![...actionOutputHashes].every((contentSha256) =>
+      expectedActionOutputHashes.has(contentSha256),
+    )
+  )
+    return false;
+
+  const orderedBlobOutputs = Object.values(blobs).sort((left, right) =>
+    left.planRelativePath.localeCompare(right.planRelativePath),
+  );
+  if (!sameValue(orderedBlobOutputs, value.approvalFingerprint.sealedOutputs))
+    return false;
+
+  const repositoryTargets = new Map(
+    value.repositoryFingerprint.targets.map((target) => [
+      target.normalizedPath,
+      target,
+    ]),
+  );
+  const actionTargetPaths = new Set<string>();
+  if (repositoryTargets.size !== value.actions.length) return false;
+  for (const action of value.actions) {
+    const target = repositoryTargets.get(action.targetPath);
+    if (
+      actionTargetPaths.has(action.targetPath) ||
+      target === undefined ||
+      !sameValue(target.approvedPriorTarget, action.approvedPriorTarget)
+    )
+      return false;
+    actionTargetPaths.add(action.targetPath);
+  }
+
   if (
     !Array.isArray(value.issues) ||
     !value.issues.every(
@@ -1631,6 +1692,89 @@ if (import.meta.vitest) {
           now,
         ),
       ).toBe(true);
+    });
+
+    it("rejects unsafe repository action target paths before approval", () => {
+      const transition = { generationToken, planId };
+      const now = "2026-07-20T01:00:00.000Z";
+      const invalidPaths = [
+        "../outside.mdx",
+        "./post.mdx",
+        "content/../outside.mdx",
+        "content//post.mdx",
+        "content/",
+        "C:/temp/post.mdx",
+        "C:\\temp\\post.mdx",
+        "\\\\server\\share\\post.mdx",
+        "content\\post.mdx",
+        "content/\u0000post.mdx",
+        "/tmp/post.mdx",
+        ".git/config",
+        "content/.GIT/config",
+      ] as const;
+
+      for (const targetPath of invalidPaths) {
+        const plan = completeReadyPlan();
+        const malformed = {
+          ...plan,
+          actions: [
+            { ...plan.actions[0], targetPath },
+            plan.actions[1]!,
+          ] as typeof plan.actions,
+        } as VerifiedReadyExportPlan;
+        expect(
+          matchesApprovalContext(
+            malformed,
+            transition,
+            plan.approvalFingerprint,
+            now,
+          ),
+          targetPath,
+        ).toBe(false);
+      }
+    });
+
+    it("requires approved roles and actions to match the exact blob set", () => {
+      const transition = { generationToken, planId };
+      const now = "2026-07-20T01:00:00.000Z";
+      const plan = completeReadyPlan();
+      const imageOutput = plan.actions[1]!.sealedOutput;
+      const mismatchedPlans = [
+        {
+          ...plan,
+          generatedMdx: {
+            ...plan.generatedMdx,
+            planRelativePath: "outputs/0003",
+          },
+        },
+        { ...plan, commitMessage: plan.generatedMdx },
+        {
+          ...plan,
+          actions: [
+            { ...plan.actions[0], sealedOutput: imageOutput },
+            plan.actions[1]!,
+          ],
+        },
+        {
+          ...plan,
+          approvalFingerprint: {
+            ...plan.approvalFingerprint,
+            sealedOutputs: plan.approvalFingerprint.sealedOutputs.slice(1),
+          },
+        },
+      ] as const;
+
+      for (const malformed of mismatchedPlans) {
+        expect(
+          matchesApprovalContext(
+            malformed as VerifiedReadyExportPlan,
+            transition,
+            malformed.approvalFingerprint,
+            now,
+          ),
+          JSON.stringify(malformed),
+        ).toBe(false);
+      }
     });
 
     it("keeps durable approval plan-only and post-seal transition dual-bound", () => {
