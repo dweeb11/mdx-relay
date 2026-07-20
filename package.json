@@ -8,15 +8,16 @@
     "node": ">=22 <23"
   },
   "scripts": {
-    "format:check": "prettier --check \"src/**/*.ts\" \"*.{json,ts,mjs}\"",
+    "format:check": "prettier --check --no-error-on-unmatched-pattern \"src/**/*.ts\" \"tests/**/*.ts\" \"*.{json,ts,mjs}\"",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test:unit": "vitest run --project unit --project jsdom --coverage",
+    "test:unit": "vitest run --project unit --project jsdom",
+    "test:coverage": "vitest run --project unit --project jsdom --coverage",
     "test:integration": "vitest run --project integration --passWithNoTests",
     "test:bundle": "npm run build && node esbuild.config.mjs probe-node-builtins && node -e \"const fs=require('node:fs'); const path=require('node:path'); const root='dist'; if(!fs.existsSync(path.join(root,'main.js'))) throw new Error('dist/main.js is missing'); const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):[path.join(d,e.name)]); const native=walk(root).filter(f=>f.endsWith('.node')); if(native.length) throw new Error('native .node files: '+native.join(', ')); console.log('bundle: dist/main.js present; 0 native .node files');\"",
     "test:private-baseline": "vitest run --project private-baseline --passWithNoTests",
     "build": "node esbuild.config.mjs production",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit && npm run test:integration && npm run test:bundle"
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run test:integration && npm run test:bundle"
   },
   "dependencies": {
     "micromark": "4.0.2",

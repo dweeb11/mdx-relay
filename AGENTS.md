@@ -32,6 +32,7 @@ npm run format:check
 npm run lint
 npm run typecheck
 npm run test:unit
+npm run test:coverage
 npm run test:integration
 npm run test:bundle
 npm run test:private-baseline
@@ -39,7 +40,7 @@ npm run build
 npm run verify
 ```
 
-`test:private-baseline` currently reports Vitest's explicit no-tests-yet result; T7 adds the external fixture resolver and tests. Set `MDX_RELAY_PRIVATE_FIXTURE_ROOT` only when those tests exist. `verify` runs every public T0 gate and excludes the private baseline because it requires machine-local data.
+Use `test:unit` for focused or scoped development runs. Use `test:coverage` or `verify` for the full unit and JSDOM coverage gate. `test:private-baseline` currently reports Vitest's explicit no-tests-yet result; T7 adds the external fixture resolver and tests. Set `MDX_RELAY_PRIVATE_FIXTURE_ROOT` only when those tests exist. `verify` runs every public T0 gate and excludes the private baseline because it requires machine-local data.
 
 ## Skill routing
 
