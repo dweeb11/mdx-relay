@@ -384,7 +384,7 @@ if (import.meta.vitest) {
       expect(Object.isFrozen(issue)).toBe(true);
     });
 
-    it("lint rejects downstream contract and issue-code redefinitions", async () => {
+    it("lint rejects every frozen contract shape and static issue-code syntax", async () => {
       const { ESLint } = await import("eslint");
       const eslint = new ESLint({
         cwd: process.cwd(),
@@ -393,14 +393,49 @@ if (import.meta.vitest) {
         },
       });
       const [result] = await eslint.lintText(
-        'export type Result<T> = T; export const code = "STALE_DURING_PLANNING";',
+        [
+          "export interface SourceRange {}",
+          'export type ExportPlanState = "ready";',
+          "export class WorkerProcessRequest {}",
+          "export const ISSUE_CODES = {};",
+          "export const ISSUE_REGISTRY = {};",
+          "export const templateCode = `STALE_DURING_PLANNING`;",
+          'export const concatenatedCode = "STALE_" + "DURING_PLANNING";',
+        ].join("\n"),
         { filePath: "src/planning/contract-boundary-probe.ts" },
       );
       const boundaryMessages = result?.messages.filter(
         ({ ruleId }) => ruleId === "contracts/freeze-contracts",
       );
 
-      expect(boundaryMessages).toHaveLength(2);
+      expect(boundaryMessages).toHaveLength(7);
+    });
+
+    it("lint allows downstream imports and references to frozen contracts", async () => {
+      const { ESLint } = await import("eslint");
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
+      });
+      const [result] = await eslint.lintText(
+        [
+          'import type { SourceRange, WorkerProcessRequest } from "../contracts";',
+          'import { ISSUE_CODES } from "../contracts/issues";',
+          "export type PlanningInput = Readonly<{",
+          "  range: SourceRange;",
+          "  request: WorkerProcessRequest;",
+          "  code: typeof ISSUE_CODES.staleDuringPlanning;",
+          "}>;",
+        ].join("\n"),
+        { filePath: "src/planning/contract-reference-probe.ts" },
+      );
+      const boundaryMessages = result?.messages.filter(
+        ({ ruleId }) => ruleId === "contracts/freeze-contracts",
+      );
+
+      expect(boundaryMessages).toHaveLength(0);
     });
   });
 }

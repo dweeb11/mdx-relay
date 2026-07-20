@@ -8,6 +8,11 @@ export type GenerationToken = string & {
 export declare const planIdBrand: unique symbol;
 export type PlanId = string & { readonly [planIdBrand]: "PlanId" };
 
+export interface PlanIdentity {
+  readonly generationToken: GenerationToken;
+  readonly planId: PlanId;
+}
+
 export declare const sha256Brand: unique symbol;
 export type Sha256Digest = string & { readonly [sha256Brand]: "Sha256Digest" };
 
@@ -60,7 +65,7 @@ export type ExportPlanState = "ready" | "no-changes" | "blocked";
  *
  * capture -> transform -> seal -> verify -> approve
  */
-export interface ExportPlan {
+export interface ExportPlan extends PlanIdentity {
   readonly schemaVersion: 1;
   readonly generationToken: GenerationToken;
   readonly planId: PlanId;
@@ -74,11 +79,19 @@ export interface ExportPlan {
   readonly expiresAtUtc: string;
 }
 
-export interface ApprovalRecord {
-  readonly generationToken: GenerationToken;
-  readonly planId: PlanId;
+export interface ApprovalRecord extends PlanIdentity {
   readonly repositoryFingerprint: RepositoryFingerprint;
   readonly approvedAtUtc: string;
+}
+
+export function matchesPlanIdentity(
+  actual: PlanIdentity,
+  expected: PlanIdentity,
+): boolean {
+  return (
+    actual.generationToken === expected.generationToken &&
+    actual.planId === expected.planId
+  );
 }
 
 if (import.meta.vitest) {
@@ -110,15 +123,30 @@ if (import.meta.vitest) {
       expect(new Set(actions.map(({ targetPath }) => targetPath)).size).toBe(2);
     });
 
-    it("binds approval to the same generation and plan identities", () => {
+    it("rejects stale generation and plan identities", () => {
       const generationToken = "generation-1" as GenerationToken;
       const planId = "plan-1" as PlanId;
-      const approval = {
-        generationToken,
-        planId,
-      } satisfies Pick<ApprovalRecord, "generationToken" | "planId">;
+      const expected = { generationToken, planId } satisfies PlanIdentity;
 
-      expect(approval).toEqual({ generationToken, planId });
+      expect(matchesPlanIdentity(expected, expected)).toBe(true);
+      expect(
+        matchesPlanIdentity(
+          {
+            generationToken: "stale-generation" as GenerationToken,
+            planId,
+          },
+          expected,
+        ),
+      ).toBe(false);
+      expect(
+        matchesPlanIdentity(
+          {
+            generationToken,
+            planId: "stale-plan" as PlanId,
+          },
+          expected,
+        ),
+      ).toBe(false);
     });
   });
 }
