@@ -691,11 +691,17 @@ if (import.meta.vitest) {
       });
       const [result] = await eslint.lintText(
         [
-          "function downstream(ok) { return ok; }",
-          "const localHandler = function ok(err) { return err; };",
+          "const ok = undefined;",
+          "function downstream() {",
+          "  const ok = undefined;",
+          "  const { err } = { err: undefined };",
+          "  const localHandler = function createIssue() { return err; };",
+          "  const LocalPlan = class ExportPlan {};",
+          "  return { ok, localHandler, LocalPlan };",
+          "}",
           "try { throw { err: undefined }; } catch ({ err }) { void err; }",
+          "void ok;",
           "void downstream;",
-          "void localHandler;",
         ].join("\n"),
         { filePath: "src/planning/local-binding-probe.ts" },
       );
@@ -704,6 +710,54 @@ if (import.meta.vitest) {
       );
 
       expect(boundaryMessages).toHaveLength(0);
+    });
+
+    it("lint rejects canonical contract wildcard re-exports uniformly", async () => {
+      const { ESLint } = await import("eslint");
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
+      });
+
+      for (const [name, probe] of Object.entries({
+        namespace: 'export * as resultContracts from "../contracts/result";',
+        wildcard: 'export * from "../contracts/result";',
+      })) {
+        const [result] = await eslint.lintText(probe, {
+          filePath: `src/planning/canonical-${name}-re-export-probe.ts`,
+        });
+        const boundaryMessages = result?.messages.filter(
+          ({ ruleId }) => ruleId === "contracts/freeze-contracts",
+        );
+
+        expect(boundaryMessages, name).toHaveLength(1);
+      }
+    });
+
+    it("lint allows unrelated wildcard re-exports", async () => {
+      const { ESLint } = await import("eslint");
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
+      });
+
+      for (const [name, probe] of Object.entries({
+        local: 'export * from "./unrelated-local-module";',
+        package: 'export * from "some-package";',
+      })) {
+        const [result] = await eslint.lintText(probe, {
+          filePath: `src/planning/unrelated-${name}-re-export-probe.ts`,
+        });
+        const boundaryMessages = result?.messages.filter(
+          ({ ruleId }) => ruleId === "contracts/freeze-contracts",
+        );
+
+        expect(boundaryMessages, name).toHaveLength(0);
+      }
     });
 
     it("lint allows downstream imports and references to frozen contracts", async () => {

@@ -149,6 +149,8 @@ const freezeContractsRule = {
       issueCode:
         "Reference ISSUE_CODES; issue-code literals are defined only in src/contracts/issues.ts.",
       contract: "{{name}} is frozen and may only be declared in {{location}}.",
+      wildcard:
+        "Wildcard re-exports from src/contracts/** are frozen at the canonical contract boundary.",
     },
     schema: [],
   },
@@ -211,6 +213,27 @@ const freezeContractsRule = {
           data: { name, location },
         });
       }
+    };
+
+    const isCanonicalContractSource = (source) => {
+      if (typeof source !== "string" || !source.startsWith(".")) {
+        return false;
+      }
+
+      const resolvedSource = path.resolve(path.dirname(filename), source);
+      const candidates = [
+        resolvedSource,
+        `${resolvedSource}.ts`,
+        path.join(resolvedSource, "index.ts"),
+      ];
+      return candidates.some((candidate) => {
+        const normalizedCandidate = normalizePath(candidate);
+        return (
+          normalizedCandidate.startsWith(normalizedContractsRoot) &&
+          fs.existsSync(candidate) &&
+          fs.statSync(candidate).isFile()
+        );
+      });
     };
 
     const checkBindingPattern = (node) => {
@@ -277,6 +300,11 @@ const freezeContractsRule = {
           }
         }
       },
+      ExportAllDeclaration(node) {
+        if (isCanonicalContractSource(node.source.value)) {
+          context.report({ node, messageId: "wildcard" });
+        }
+      },
       TSInterfaceDeclaration: checkNamedDeclaration,
       TSTypeAliasDeclaration: checkNamedDeclaration,
       TSEnumDeclaration: checkNamedDeclaration,
@@ -286,10 +314,16 @@ const freezeContractsRule = {
         }
       },
       ClassDeclaration: checkNamedDeclaration,
-      ClassExpression: checkNamedDeclaration,
       FunctionDeclaration: checkNamedDeclaration,
       VariableDeclarator(node) {
-        checkBindingPattern(node.id);
+        const declaration = node.parent;
+        if (
+          declaration.type === "VariableDeclaration" &&
+          declaration.parent.type === "ExportNamedDeclaration" &&
+          declaration.parent.declaration === declaration
+        ) {
+          checkBindingPattern(node.id);
+        }
       },
     };
   },
