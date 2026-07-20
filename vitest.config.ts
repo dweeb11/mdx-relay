@@ -44,6 +44,12 @@ export default defineConfig({
       reportsDirectory: "coverage",
       include: ["src/contracts/**/*.ts", "src/core/**/*.ts"],
       exclude: ["src/main.ts"],
+      thresholds: {
+        statements: 99,
+        lines: 99,
+        branches: 95,
+        functions: 100,
+      },
     },
   },
 });

@@ -84,10 +84,42 @@ export interface ApprovalRecord extends PlanIdentity {
   readonly approvedAtUtc: string;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object";
+
+const isPlanIdentity = (
+  value: unknown,
+): value is PlanIdentity & Record<string, unknown> =>
+  isRecord(value) &&
+  typeof value.generationToken === "string" &&
+  typeof value.planId === "string";
+
+const repositoryFingerprintKeys = [
+  "repositoryIdentitySha256",
+  "gitDirectoryIdentitySha256",
+  "branchName",
+  "headOid",
+  "upstreamOid",
+  "remoteTipOid",
+  "indexSha256",
+  "worktreeStatusSha256",
+  "gitConfigurationSha256",
+  "effectivePushDestinationSha256",
+] as const satisfies readonly (keyof RepositoryFingerprint)[];
+
+const isRepositoryFingerprint = (
+  value: unknown,
+): value is RepositoryFingerprint =>
+  isRecord(value) &&
+  repositoryFingerprintKeys.every((key) => typeof value[key] === "string");
+
 export function matchesPlanIdentity(
-  actual: PlanIdentity,
-  expected: PlanIdentity,
+  actual: unknown,
+  expected: unknown,
 ): boolean {
+  if (!isPlanIdentity(actual) || !isPlanIdentity(expected)) {
+    return false;
+  }
   return (
     actual.generationToken === expected.generationToken &&
     actual.planId === expected.planId
@@ -114,10 +146,20 @@ function matchesRepositoryFingerprint(
 }
 
 export function matchesApprovalContext(
-  plan: ExportPlan,
-  approval: ApprovalRecord,
-  currentRepositoryFingerprint: RepositoryFingerprint,
+  plan: unknown,
+  approval: unknown,
+  currentRepositoryFingerprint: unknown,
 ): boolean {
+  if (
+    !isPlanIdentity(plan) ||
+    !isPlanIdentity(approval) ||
+    !isRecord(plan.captureFingerprint) ||
+    !isRepositoryFingerprint(plan.captureFingerprint.repository) ||
+    !isRepositoryFingerprint(approval.repositoryFingerprint) ||
+    !isRepositoryFingerprint(currentRepositoryFingerprint)
+  ) {
+    return false;
+  }
   const approvedRepositoryFingerprint = plan.captureFingerprint.repository;
   return (
     matchesPlanIdentity(approval, plan) &&
@@ -138,27 +180,62 @@ if (import.meta.vitest) {
   describe("ExportPlan contract", () => {
     it("represents duplicate embed actions sharing one sealed blob", () => {
       const blob = "sha256:shared" as Sha256Digest;
-      const actions: readonly ExportAction[] = [
-        {
-          kind: "create",
-          documentOrder: 1,
-          targetPath: "post/img-1.webp",
-          mode: "100644",
-          blobSha256: blob,
-          sourceOccurrence: 1,
+      const fingerprintDigest = "sha256:fingerprint" as Sha256Digest;
+      const plan = {
+        schemaVersion: 1,
+        generationToken: "generation-1" as GenerationToken,
+        planId: "plan-1" as PlanId,
+        state: "ready",
+        captureFingerprint: {
+          noteSha256: fingerprintDigest,
+          sourceImages: [],
+          candidateSetSha256: fingerprintDigest,
+          profileSnapshotSha256: fingerprintDigest,
+          repository: {
+            repositoryIdentitySha256: fingerprintDigest,
+            gitDirectoryIdentitySha256: fingerprintDigest,
+            branchName: "feat/app-560-bootstrap-contracts",
+            headOid: "a".repeat(40),
+            upstreamOid: "",
+            remoteTipOid: "",
+            indexSha256: fingerprintDigest,
+            worktreeStatusSha256: fingerprintDigest,
+            gitConfigurationSha256: fingerprintDigest,
+            effectivePushDestinationSha256: fingerprintDigest,
+          },
         },
-        {
-          kind: "create",
-          documentOrder: 2,
-          targetPath: "post/img-2.webp",
-          mode: "100644",
-          blobSha256: blob,
-          sourceOccurrence: 2,
+        actions: [
+          {
+            kind: "create",
+            documentOrder: 1,
+            targetPath: "post/img-1.webp",
+            mode: "100644",
+            blobSha256: blob,
+            sourceOccurrence: 1,
+          },
+          {
+            kind: "create",
+            documentOrder: 2,
+            targetPath: "post/img-2.webp",
+            mode: "100644",
+            blobSha256: blob,
+            sourceOccurrence: 2,
+          },
+        ],
+        blobs: {
+          [blob]: { sha256: blob, byteLength: 1234 },
         },
-      ];
+        issues: [],
+        createdAtUtc: "2026-07-19T12:00:00.000Z",
+        expiresAtUtc: "2026-07-26T12:00:00.000Z",
+      } satisfies ExportPlan;
 
-      expect(actions.map(({ blobSha256 }) => blobSha256)).toEqual([blob, blob]);
-      expect(new Set(actions.map(({ targetPath }) => targetPath)).size).toBe(2);
+      expect(plan.actions[0]?.targetPath).not.toBe(plan.actions[1]?.targetPath);
+      expect(plan.actions.map(({ blobSha256 }) => blobSha256)).toEqual([
+        blob,
+        blob,
+      ]);
+      expect(Object.keys(plan.blobs)).toEqual([blob]);
     });
 
     it("rejects stale generation and plan identities", () => {
@@ -185,6 +262,31 @@ if (import.meta.vitest) {
           expected,
         ),
       ).toBe(false);
+    });
+
+    it("fails closed for malformed and partial plan identities", () => {
+      const valid = {
+        generationToken: "generation-1" as GenerationToken,
+        planId: "plan-1" as PlanId,
+      } satisfies PlanIdentity;
+      const malformed = [
+        null,
+        undefined,
+        false,
+        0,
+        "identity",
+        {},
+        { generationToken: valid.generationToken },
+        { planId: valid.planId },
+        { ...valid, generationToken: 1 },
+        { ...valid, planId: 1 },
+      ];
+
+      for (const value of malformed) {
+        expect(matchesPlanIdentity(value, valid)).toBe(false);
+        expect(matchesPlanIdentity(valid, value)).toBe(false);
+      }
+      expect(matchesPlanIdentity(valid, { ...valid })).toBe(true);
     });
 
     it("requires approval for the exact current repository fingerprint", () => {
@@ -292,6 +394,47 @@ if (import.meta.vitest) {
           ),
           `stored approval fingerprint: ${key}`,
         ).toBe(false);
+      }
+
+      const partialFingerprint = { ...repositoryFingerprint } as Record<
+        string,
+        unknown
+      >;
+      delete partialFingerprint.remoteTipOid;
+      const malformedCases: readonly [unknown, unknown, unknown][] = [
+        [null, approval, repositoryFingerprint],
+        [{}, approval, repositoryFingerprint],
+        [
+          { ...plan, captureFingerprint: null },
+          approval,
+          repositoryFingerprint,
+        ],
+        [{ ...plan, captureFingerprint: {} }, approval, repositoryFingerprint],
+        [plan, null, repositoryFingerprint],
+        [plan, {}, repositoryFingerprint],
+        [
+          plan,
+          { ...approval, repositoryFingerprint: {} },
+          repositoryFingerprint,
+        ],
+        [
+          { ...plan, captureFingerprint: { repository: partialFingerprint } },
+          approval,
+          repositoryFingerprint,
+        ],
+        [
+          plan,
+          { ...approval, repositoryFingerprint: partialFingerprint },
+          repositoryFingerprint,
+        ],
+        [plan, approval, null],
+        [plan, approval, {}],
+        [plan, approval, partialFingerprint],
+        [plan, approval, { ...repositoryFingerprint, branchName: 1 }],
+      ];
+
+      for (const values of malformedCases) {
+        expect(matchesApprovalContext(...values)).toBe(false);
       }
     });
   });

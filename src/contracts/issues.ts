@@ -1,4 +1,4 @@
-export const RECOVERY_ACTIONS = {
+export const RECOVERY_ACTIONS = Object.freeze({
   selectProfile: "select-profile",
   editNote: "edit-note",
   replaceImage: "replace-image",
@@ -14,7 +14,7 @@ export const RECOVERY_ACTIONS = {
   verifyRemote: "verify-remote",
   openTerminal: "open-terminal",
   leaveLocalCommit: "leave-local-commit",
-} as const;
+} as const);
 
 export type RecoveryAction =
   (typeof RECOVERY_ACTIONS)[keyof typeof RECOVERY_ACTIONS];
@@ -36,7 +36,7 @@ export type IssueStage =
   | "recovery"
   | "remote";
 
-export const ISSUE_CODES = {
+export const ISSUE_CODES = Object.freeze({
   invalidProfile: "INVALID_PROFILE",
   unsafePath: "UNSAFE_PATH",
   credentialUrl: "CREDENTIAL_URL",
@@ -75,7 +75,7 @@ export const ISSUE_CODES = {
   recoveryRequired: "RECOVERY_REQUIRED",
   localCommitOnly: "LOCAL_COMMIT_ONLY",
   remoteStatusUnknown: "REMOTE_STATUS_UNKNOWN",
-} as const;
+} as const);
 
 export type IssueCode = (typeof ISSUE_CODES)[keyof typeof ISSUE_CODES];
 
@@ -338,19 +338,40 @@ export interface MdxRelayIssue {
   readonly safePathLabel?: string;
 }
 
+const cloneSourcePoint = (point: SourcePoint): SourcePoint =>
+  Object.freeze({
+    line: point.line,
+    column: point.column,
+    offset: point.offset,
+  });
+
+const cloneSourceRange = (range: SourceRange): SourceRange =>
+  Object.freeze({
+    start: cloneSourcePoint(range.start),
+    end: cloneSourcePoint(range.end),
+  });
+
 export function createIssue(
   code: IssueCode,
   displayDetails: RedactedDisplayDetails,
   location: IssueLocation = {},
 ): MdxRelayIssue {
   const definition = ISSUE_REGISTRY[code];
+  const sourceRange = location.sourceRange
+    ? { sourceRange: cloneSourceRange(location.sourceRange) }
+    : {};
+  const safePathLabel =
+    typeof location.safePathLabel === "string"
+      ? { safePathLabel: location.safePathLabel }
+      : {};
   return Object.freeze({
     code,
     severity: definition.severity,
     stage: definition.stage,
     displayDetails: Object.freeze({ ...displayDetails }),
     recoveryActions: definition.recoveryActions,
-    ...location,
+    ...sourceRange,
+    ...safePathLabel,
   });
 }
 
@@ -363,6 +384,8 @@ if (import.meta.vitest) {
 
       expect(new Set(codes).size).toBe(codes.length);
       expect(Object.keys(ISSUE_REGISTRY).sort()).toEqual([...codes].sort());
+      expect(Object.isFrozen(ISSUE_CODES)).toBe(true);
+      expect(Object.isFrozen(RECOVERY_ACTIONS)).toBe(true);
       expect(Object.isFrozen(ISSUE_REGISTRY)).toBe(true);
       for (const definition of Object.values(ISSUE_REGISTRY)) {
         expect(Object.isFrozen(definition)).toBe(true);
@@ -382,6 +405,92 @@ if (import.meta.vitest) {
         recoveryActions: [RECOVERY_ACTIONS.previewAgain],
       });
       expect(Object.isFrozen(issue)).toBe(true);
+      expect(Object.isFrozen(issue.displayDetails)).toBe(true);
+    });
+
+    it("copies only allowlisted location fields from adversarial input", () => {
+      const issue = createIssue(
+        ISSUE_CODES.staleDuringPlanning,
+        { summary: "The note changed while planning." },
+        {
+          code: ISSUE_CODES.summaryMissing,
+          severity: "warning",
+          stage: "markdown",
+          displayDetails: { summary: "unsafe override" },
+          recoveryActions: [RECOVERY_ACTIONS.cancel],
+          safePathLabel: 123,
+        } as unknown as IssueLocation,
+      );
+
+      expect(issue).toEqual({
+        code: ISSUE_CODES.staleDuringPlanning,
+        severity: "blocker",
+        stage: "planning",
+        displayDetails: { summary: "The note changed while planning." },
+        recoveryActions: [RECOVERY_ACTIONS.previewAgain],
+      });
+    });
+
+    it("deeply clones and freezes constructed issue data", () => {
+      const displayDetails = {
+        summary: "The note changed while planning.",
+        safeContext: "line 3",
+      };
+      const sourceRange = {
+        start: { line: 3, column: 2, offset: 14 },
+        end: { line: 3, column: 8, offset: 20 },
+      };
+      const issue = createIssue(
+        ISSUE_CODES.staleDuringPlanning,
+        displayDetails,
+        { sourceRange, safePathLabel: "notes/example.md" },
+      );
+
+      displayDetails.summary = "mutated";
+      sourceRange.start.line = 99;
+      sourceRange.end.offset = 99;
+
+      expect(issue.displayDetails.summary).toBe(
+        "The note changed while planning.",
+      );
+      expect(issue.sourceRange).toEqual({
+        start: { line: 3, column: 2, offset: 14 },
+        end: { line: 3, column: 8, offset: 20 },
+      });
+      expect(Object.isFrozen(issue)).toBe(true);
+      expect(Object.isFrozen(issue.displayDetails)).toBe(true);
+      expect(Object.isFrozen(issue.sourceRange)).toBe(true);
+      expect(Object.isFrozen(issue.sourceRange?.start)).toBe(true);
+      expect(Object.isFrozen(issue.sourceRange?.end)).toBe(true);
+      expect(() => {
+        (issue.displayDetails as { summary: string }).summary = "mutated";
+      }).toThrow(TypeError);
+      expect(() => {
+        (issue as unknown as { code: string }).code =
+          ISSUE_CODES.summaryMissing;
+      }).toThrow(TypeError);
+      expect(() => {
+        (issue.sourceRange as unknown as { start: SourcePoint }).start = {
+          line: 99,
+          column: 99,
+          offset: 99,
+        };
+      }).toThrow(TypeError);
+      expect(() => {
+        (issue.sourceRange?.start as { line: number }).line = 99;
+      }).toThrow(TypeError);
+      expect(() => {
+        (issue.sourceRange?.end as { offset: number }).offset = 99;
+      }).toThrow(TypeError);
+      expect(() => {
+        (
+          ISSUE_CODES as unknown as { staleDuringPlanning: string }
+        ).staleDuringPlanning = "MUTATED";
+      }).toThrow(TypeError);
+      expect(() => {
+        (RECOVERY_ACTIONS as unknown as { previewAgain: string }).previewAgain =
+          "mutated";
+      }).toThrow(TypeError);
     });
 
     it("lint rejects adversarial contract, issue, and limit redefinitions", async () => {
@@ -756,7 +865,10 @@ if (import.meta.vitest) {
 
       for (const [name, probe] of Object.entries({
         namespace: 'export * as resultContracts from "../contracts/result";',
+        namespaceJs:
+          'export * as resultContracts from "../contracts/result.js";',
         wildcard: 'export * from "../contracts/result";',
+        wildcardJs: 'export * from "../contracts/result.js";',
       })) {
         const [result] = await eslint.lintText(probe, {
           filePath: `src/planning/canonical-${name}-re-export-probe.ts`,

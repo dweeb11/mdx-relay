@@ -221,11 +221,28 @@ const freezeContractsRule = {
       }
 
       const resolvedSource = path.resolve(path.dirname(filename), source);
-      const candidates = [
-        resolvedSource,
-        `${resolvedSource}.ts`,
-        path.join(resolvedSource, "index.ts"),
-      ];
+      const typedExtensionCandidates = {
+        ".cjs": [".cts"],
+        ".js": [".ts", ".tsx"],
+        ".jsx": [".tsx"],
+        ".mjs": [".mts"],
+      }[path.extname(resolvedSource)];
+      const sourceExtension = path.extname(resolvedSource);
+      const sourceStem = sourceExtension
+        ? resolvedSource.slice(0, -sourceExtension.length)
+        : resolvedSource;
+      const candidates = typedExtensionCandidates
+        ? [
+            resolvedSource,
+            ...typedExtensionCandidates.map(
+              (extension) => `${sourceStem}${extension}`,
+            ),
+          ]
+        : [
+            resolvedSource,
+            `${resolvedSource}.ts`,
+            path.join(resolvedSource, "index.ts"),
+          ];
       return candidates.some((candidate) => {
         const normalizedCandidate = normalizePath(candidate);
         return (
