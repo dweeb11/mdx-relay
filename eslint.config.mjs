@@ -314,7 +314,16 @@ const freezeContractsRule = {
         }
       },
       ClassDeclaration: checkNamedDeclaration,
-      FunctionDeclaration: checkNamedDeclaration,
+      FunctionDeclaration(node) {
+        const declaration = node.parent;
+        if (
+          (declaration.type === "ExportNamedDeclaration" ||
+            declaration.type === "ExportDefaultDeclaration") &&
+          declaration.declaration === node
+        ) {
+          checkNamedDeclaration(node);
+        }
+      },
       VariableDeclarator(node) {
         const declaration = node.parent;
         if (

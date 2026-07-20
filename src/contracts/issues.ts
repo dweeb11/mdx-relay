@@ -443,6 +443,39 @@ if (import.meta.vitest) {
       expect(rejectedNames).toEqual(["err", "ok"]);
     });
 
+    it("lint freezes exported function APIs but allows local declarations", async () => {
+      const { ESLint } = await import("eslint");
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
+      });
+      const [result] = await eslint.lintText(
+        [
+          "function ok() {}",
+          "function downstream() { function err() {} void err; }",
+          "export function createIssue() {}",
+          "export default function matchesPlanIdentity() {}",
+          "function localAlias() {}",
+          "export { localAlias as generationTokenBrand };",
+          "void ok;",
+          "void downstream;",
+        ].join("\n"),
+        { filePath: "src/planning/function-boundary-probe.ts" },
+      );
+      const rejectedNames = result?.messages
+        .filter(({ ruleId }) => ruleId === "contracts/freeze-contracts")
+        .map(({ message }) => message.split(" is frozen", 1)[0])
+        .sort();
+
+      expect(rejectedNames).toEqual([
+        "createIssue",
+        "generationTokenBrand",
+        "matchesPlanIdentity",
+      ]);
+    });
+
     it("lint rejects nested destructured frozen bindings", async () => {
       const { ESLint } = await import("eslint");
       const eslint = new ESLint({
