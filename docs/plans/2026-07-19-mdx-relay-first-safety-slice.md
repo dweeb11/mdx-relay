@@ -6,7 +6,7 @@
 
 **Root issue:** APP-475
 
-**Status:** Engineering review complete; ready for implementation
+**Status:** Engineering and Claude adversarial reviews complete; ready for implementation
 
 **Scope mode:** Reduced safety slice
 
@@ -86,7 +86,7 @@ Every boundary returns `Result<T, MdxRelayIssue[]>`. An issue contains:
 - Individual sealed output: 25 MiB.
 - Total sealed output: 100 MiB.
 - Cumulative decoded work: 400 megapixels.
-- Worker wall time: 60 seconds per image, 10 minutes per plan.
+- Worker wall time: 60 seconds per image, bounded by the remaining 10-minute plan budget. The plan timeout wins; diagnostics identify the active image and exhausted plan budget.
 
 ### Duplicate embeds
 
@@ -95,6 +95,8 @@ A canonical source image is decoded/transformed once per plan. Its bytes occupy 
 ### Coherent capture
 
 Immediately before a plan becomes visible, the host re-reads/re-hashes the note, each source image, candidate set, profile snapshot, and repository fingerprint. Any change discards all generated output and returns `STALE_DURING_PLANNING`.
+
+Approval records the sealed plan only after revalidating its repository fingerprint. Any future executor must repeat repository preflight and compare the exact approved fingerprint immediately before mutation. This contract and its stale-approval tests land in this slice even though live execution remains disconnected.
 
 ### Preview identity
 
@@ -106,6 +108,7 @@ Every planning run has an immutable generation token. Worker events, persisted p
 - macOS alpha root under `~/Library/Application Support/MDXRelay/`.
 - Directories `0700`; files `0600`.
 - Atomic temp write, fsync, rename, parent fsync, reopen/hash verification.
+- Plan load rechecks owner-only directory/file modes and rejects widened permissions as tampering, in addition to content-hash verification.
 - Successful artifacts retained seven days; unresolved recovery artifacts retained until resolved.
 - UI discloses local temporary note/image copies and does not promise secure SSD erasure.
 - No custom encryption in the alpha.
@@ -225,7 +228,7 @@ Expected: all compatibility rows and explicit CLI divergences pass; bytes outsid
 - Create: `tests/unit/worker/processing-client.test.ts`
 - Create: sanitized image vectors under `tests/fixtures/images/`
 
-**Implementation:** First land a spike proving PNG/JPEG/WebP decode, EXIF rotation, no-upscale 2000px resize, WebP quality 85, deterministic output, esbuild WASM packaging, and clean Obsidian worker startup. If jSquash fails any gate, retain `ImageCodec` and write an ADR before choosing another portable implementation. Then implement sequential processing, transferred buffers, intra-plan work deduplication, progress, generation binding, hard termination, and parent-enforced budgets.
+**Implementation:** First land a spike proving PNG/JPEG/WebP decode, EXIF rotation, no-upscale 2000px resize, WebP quality 85, deterministic output, esbuild WASM packaging, and clean Obsidian worker startup. Verify fixture hashes on both x86_64 and arm64 macOS with the exact pinned codec/WASM versions. If hashes differ, scope hash fixtures by architecture and record that limitation in the codec contract and ADR. If jSquash fails any gate, retain `ImageCodec` and write an ADR before choosing another portable implementation. Then implement sequential processing, transferred buffers, intra-plan work deduplication, progress, generation binding, hard termination, and parent-enforced budgets.
 
 **Verification:**
 
@@ -234,7 +237,7 @@ npm run test:unit -- tests/unit/images tests/unit/worker
 npm run test:bundle
 ```
 
-Expected: repeat runs hash identically; timeout/cancel kills the worker; late events are ignored; bundle includes required worker/WASM assets and no `.node` file.
+Expected: repeat runs hash identically on both supported macOS architectures or use explicitly architecture-scoped expected hashes; timeout/cancel kills the worker; late events are ignored; a production-bundle integration test starts the built worker and successfully instantiates/runs the WASM codec; bundle includes required worker/WASM assets and no `.node` file.
 
 ### T4 (P1, human: ~4–6 days / CC: ~1 day) — Build deterministic planning and owner-only storage
 
@@ -276,7 +279,7 @@ Expected: deterministic IDs; boundary limits pass/fail exactly; every injected w
 - Create: `tests/integration/git/verify-remote.test.ts`
 - Create: `tests/integration/git/recovery.test.ts`
 
-**Implementation:** Implement the approved repository fingerprint and unsupported-form checks; sanitized process adapter; operation lock; durable backup/write journal; private `GIT_INDEX_FILE`; batch object verification; `write-tree`; `commit-tree`; expected-old-OID `update-ref`; explicit push; exact remote classification. Fault-inject every journal/write/index/tree/commit/ref/push boundary. Do not compose this executor into live production approval.
+**Implementation:** Implement the approved repository fingerprint and unsupported-form checks; sanitized process adapter; in-app operation lock; durable backup/write journal; private `GIT_INDEX_FILE`; batch object verification; `write-tree`; `commit-tree`; expected-old-OID `update-ref`; explicit push; exact remote classification. The in-app lock prevents duplicate MDX Relay operations but is not trusted to exclude external Git clients; compare-and-swap `update-ref` is the concurrency guard. Fault-inject every journal/write/index/tree/commit/ref/push boundary, including an external ref update between `commit-tree` and `update-ref`, which must fail closed without overwriting the competing commit. Do not compose this executor into live production approval.
 
 **Verification:** `npm run test:integration -- tests/integration/git`
 
@@ -297,11 +300,11 @@ Expected: exact create/update/no-change proof succeeds against local bare remote
 - Create: `tests/jsdom/obsidian/preview-command.test.ts`
 - Create: `tests/jsdom/obsidian/preview-modal.test.ts`
 
-**Implementation:** Capture active Markdown through one host adapter; show Ready/No Changes/Blocked; display exact file list, MDX diff, asset hashes/sizes, warnings, blockers, profile/repository identity, and local-copy disclosure. Bind all state to generation token + plan ID. Default approval disabled. Approval records once but does not call live executor in this slice.
+**Implementation:** Capture active Markdown through one host adapter; show Ready/No Changes/Blocked; display exact file list, MDX diff, asset hashes/sizes, warnings, blockers, profile/repository identity, and local-copy disclosure. Bind all state to generation token + plan ID. Default approval disabled. Approval revalidates the repository fingerprint, records once, and does not call the live executor in this slice.
 
 **Verification:** `npm run test:unit -- tests/jsdom/obsidian`
 
-Expected: every transition, late response, double click, close/reopen, expiry, cancellation, and unload preserves one visible plan identity and starts no production Git mutation.
+Expected: every transition, late response, double click, close/reopen, expiry, cancellation, stale approval, and unload preserves one visible plan identity and starts no production Git mutation.
 
 ### T7 (P1, human: ~4–6 days / CC: ~1 day) — Add cross-module, private-baseline, and secret-leak gates
 
@@ -340,7 +343,7 @@ Expected: public and private output contracts pass; repository status shows no p
 - Modify: `AGENTS.md`
 - Modify: `.claude/skills/verify/SKILL.md`
 
-**Implementation:** Build the production archive; enforce artifact allowlist, worker/WASM presence, no native binaries, version alignment, and clean-vault plugin load. Run the command/modal/unload smoke and disposable Git proof. Document that live publishing remains disabled and link the next milestone in `TODOS.md`.
+**Implementation:** Build the production archive; enforce artifact allowlist, worker/WASM presence, no native binaries, version alignment, and clean-vault plugin load. Do not treat asset existence as proof: the packaged smoke must start the built worker and execute one real WASM codec operation through production asset resolution. Run the command/modal/unload smoke and disposable Git proof. Document that live publishing remains disabled and link the next milestone in `TODOS.md`.
 
 **Verification:**
 
@@ -353,7 +356,7 @@ MDX_RELAY_PRIVATE_FIXTURE_ROOT="$HOME/.gstack/projects/app-475/fixtures/dpw-mind
 Expected evidence:
 
 - Tests: all pass, 0 fail.
-- Coverage: 100% statements, branches, functions, and lines for pure core/contracts; approved adapter exclusions documented.
+- Coverage: 100% statements, branches, functions, and lines for `src/contracts/`, `src/core/`, `src/profiles/`, `src/planning/`, `src/markdown/`, `src/images/`, `src/git/`, `src/recovery/`, and pure state logic extracted from `src/obsidian/preview-state.ts`; UI/host/process adapters may have explicit line-level exclusions with written justification.
 - Build: exit 0.
 - Bundle inspection: exit 0; approved files only; worker/WASM present; no `.node`.
 - Packaged macOS smoke: every checklist item checked with actual Obsidian version recorded.
@@ -361,7 +364,7 @@ Expected evidence:
 
 ## Worktree execution
 
-Wave 0 is sequential. Then run three lanes in parallel: Profiles+Markdown, Codec+Worker, Git+Recovery. Merge and run the full available suite after each lane. Then run Planner+Store and Host+Preview in parallel. Final integration/packaging is sequential. See `~/.gstack/projects/dweeb11-mdx-relay/bot-top-main-eng-review-parallelization-20260719.md`.
+Wave 0 is sequential. Then run three lanes in parallel: Profiles+Markdown, Codec+Worker, Git+Recovery. Merge and run the full available suite after each lane. A lane that discovers a missing shared contract or issue code stops and lands a small sequential contract-amendment commit on `main`; dependent lanes rebase before continuing. Lanes do not invent provisional issue codes or redefine frozen contracts. Then run Planner+Store and Host+Preview in parallel. Final integration/packaging is sequential. See `~/.gstack/projects/dweeb11-mdx-relay/bot-top-main-eng-review-parallelization-20260719.md`.
 
 ## NOT in scope
 
@@ -388,6 +391,7 @@ None.
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | Product design was approved through `/office-hours` |
 | Codex Review | `/codex review` | Independent second opinion | 0 | — | Not run; isolated subagent challenge used instead |
+| Claude Challenge | `/claude challenge` | Adversarial failure-mode review | 1 | CLEAR | 8 findings reconciled: stale approval, Git race/lock semantics, WASM runtime proof, cross-architecture determinism, timeout precedence, permission recheck, coverage boundary, and lane contract amendments |
 | Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | Scope reduced; 30 accepted decisions; 26 failure flows; 0 critical gaps |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | Approved rough three-state interaction exists; full UI review deferred |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | Not run |
