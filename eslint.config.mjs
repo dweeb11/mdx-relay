@@ -58,6 +58,21 @@ const staticStringValue = (
   if (node.type === "Literal") {
     return typeof node.value === "string" ? node.value : undefined;
   }
+  if (
+    node.type === "TSAsExpression" ||
+    node.type === "TSSatisfiesExpression" ||
+    node.type === "TSTypeAssertion" ||
+    node.type === "TSNonNullExpression" ||
+    node.type === "ChainExpression"
+  ) {
+    return staticStringValue(
+      node.expression,
+      resolvedIdentifiers,
+      constInitializers,
+      visited,
+      depth + 1,
+    );
+  }
   if (node.type === "Identifier") {
     const variable = resolvedIdentifiers.get(node);
     const initializer = variable && constInitializers.get(variable);

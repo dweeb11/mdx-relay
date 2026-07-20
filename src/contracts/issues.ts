@@ -482,6 +482,55 @@ if (import.meta.vitest) {
         target: ts.ScriptTarget.ES2022,
       });
       const checker = program.getTypeChecker();
+      // Intentional approval gate: contract API changes must update this exact snapshot.
+      const lockedContractExportNames = [
+        "ApprovalRecord",
+        "CaptureFingerprint",
+        "ExportAction",
+        "ExportPlan",
+        "ExportPlanState",
+        "GenerationToken",
+        "ISSUE_CODES",
+        "ISSUE_REGISTRY",
+        "IssueCode",
+        "IssueDefinition",
+        "IssueLocation",
+        "IssueSeverity",
+        "IssueStage",
+        "MdxRelayIssue",
+        "MdxRelayResult",
+        "PlanId",
+        "PlanIdentity",
+        "RECOVERY_ACTIONS",
+        "RecoveryAction",
+        "RedactedDisplayDetails",
+        "RepositoryFingerprint",
+        "Result",
+        "SealedBlob",
+        "Sha256Digest",
+        "SourceImageFingerprint",
+        "SourcePoint",
+        "SourceRange",
+        "WorkerBlockedEvent",
+        "WorkerCancelRequest",
+        "WorkerCancelledEvent",
+        "WorkerCompletedEvent",
+        "WorkerEvent",
+        "WorkerImageInput",
+        "WorkerImageOutput",
+        "WorkerProcessRequest",
+        "WorkerProgressEvent",
+        "WorkerRequest",
+        "WorkerStartedEvent",
+        "createIssue",
+        "err",
+        "generationTokenBrand",
+        "matchesApprovalContext",
+        "matchesPlanIdentity",
+        "ok",
+        "planIdBrand",
+        "sha256Brand",
+      ] as const;
       const exportedNames = [
         ...new Set(
           contractFiles.flatMap((filename) => {
@@ -502,25 +551,25 @@ if (import.meta.vitest) {
           languageOptions: { parserOptions: { projectService: false } },
         },
       });
+      expect(exportedNames).toEqual(lockedContractExportNames);
       const probes = {
         alias: [
-          ...exportedNames.map(
+          ...lockedContractExportNames.map(
             (_, index) => `const localContract${index} = undefined;`,
           ),
-          `export { ${exportedNames
+          `export { ${lockedContractExportNames
             .map((name, index) => `localContract${index} as ${name}`)
             .join(", ")} };`,
         ].join("\n"),
         destructure: [
           "const source = {};",
-          `export const { ${exportedNames.join(", ")} } = source;`,
+          `export const { ${lockedContractExportNames.join(", ")} } = source;`,
         ].join("\n"),
-        direct: exportedNames
+        direct: lockedContractExportNames
           .map((name) => `export const ${name} = undefined;`)
           .join("\n"),
       };
 
-      expect(exportedNames.length).toBeGreaterThan(0);
       for (const [syntaxFamily, probe] of Object.entries(probes)) {
         const [result] = await eslint.lintText(probe, {
           filePath: `src/planning/full-contract-${syntaxFamily}-probe.ts`,
@@ -530,7 +579,7 @@ if (import.meta.vitest) {
           .map(({ message }) => message.split(" is frozen", 1)[0])
           .sort();
 
-        expect(rejectedNames, syntaxFamily).toEqual(exportedNames);
+        expect(rejectedNames, syntaxFamily).toEqual(lockedContractExportNames);
       }
     });
 
@@ -561,6 +610,37 @@ if (import.meta.vitest) {
       expect(issueMessages).toHaveLength(3);
     });
 
+    it("lint unwraps transparent TypeScript wrappers in static issue codes", async () => {
+      const { ESLint } = await import("eslint");
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
+      });
+      const [result] = await eslint.lintText(
+        [
+          'const assertedPrefix = "STALE_" as const;',
+          'export const assertedCode = assertedPrefix + "DURING_PLANNING";',
+          'const satisfiedPrefix = "STALE_" satisfies string;',
+          'export const satisfiedCode = satisfiedPrefix + "DURING_PLANNING";',
+          'const angleAssertedPrefix = <const>"STALE_";',
+          'export const angleAssertedCode = angleAssertedPrefix + "DURING_PLANNING";',
+          'const nonNullPrefix = "STALE_"!;',
+          'export const nonNullCode = nonNullPrefix + "DURING_PLANNING";',
+          'const planning = "PLANNING" as const;',
+          "export const templatedCode = `STALE_DURING_${planning}`;",
+        ].join("\n"),
+        { filePath: "src/planning/wrapped-static-issue-probe.ts" },
+      );
+      const issueMessages = result?.messages.filter(
+        ({ messageId, ruleId }) =>
+          ruleId === "contracts/freeze-contracts" && messageId === "issueCode",
+      );
+
+      expect(issueMessages).toHaveLength(5);
+    });
+
     it("lint does not treat mutable or dynamic issue-code expressions as static", async () => {
       const { ESLint } = await import("eslint");
       const eslint = new ESLint({
@@ -586,6 +666,10 @@ if (import.meta.vitest) {
           'export const propertyCode = objectPrefix + "DURING_PLANNING";',
           'const conditionalPrefix = enabled ? "STALE_" : "FRESH_";',
           'export const conditionalCode = conditionalPrefix + "DURING_PLANNING";',
+          "const wrappedDynamicPrefix = getPrefix() as string;",
+          'export const wrappedDynamicCode = wrappedDynamicPrefix + "DURING_PLANNING";',
+          "const satisfiedDynamicPrefix = getPrefix() satisfies string;",
+          'export const satisfiedDynamicCode = satisfiedDynamicPrefix + "DURING_PLANNING";',
         ].join("\n"),
         { filePath: "src/planning/dynamic-issue-alias-probe.ts" },
       );
@@ -595,6 +679,31 @@ if (import.meta.vitest) {
       );
 
       expect(issueMessages).toHaveLength(0);
+    });
+
+    it("lint allows frozen names as ordinary non-exported local bindings", async () => {
+      const { ESLint } = await import("eslint");
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
+      });
+      const [result] = await eslint.lintText(
+        [
+          "function downstream(ok) { return ok; }",
+          "const localHandler = function ok(err) { return err; };",
+          "try { throw { err: undefined }; } catch ({ err }) { void err; }",
+          "void downstream;",
+          "void localHandler;",
+        ].join("\n"),
+        { filePath: "src/planning/local-binding-probe.ts" },
+      );
+      const boundaryMessages = result?.messages.filter(
+        ({ ruleId }) => ruleId === "contracts/freeze-contracts",
+      );
+
+      expect(boundaryMessages).toHaveLength(0);
     });
 
     it("lint allows downstream imports and references to frozen contracts", async () => {

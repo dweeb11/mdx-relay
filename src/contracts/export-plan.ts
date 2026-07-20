@@ -227,6 +227,24 @@ if (import.meta.vitest) {
         repositoryFingerprint,
         approvedAtUtc: "2026-07-19T12:01:00.000Z",
       } satisfies ApprovalRecord;
+      const fingerprintMutations = {
+        repositoryIdentitySha256:
+          "sha256:changed-repository-identity" as Sha256Digest,
+        gitDirectoryIdentitySha256:
+          "sha256:changed-git-directory-identity" as Sha256Digest,
+        branchName: "feat/changed-branch",
+        headOid: "c".repeat(40),
+        upstreamOid: "d".repeat(40),
+        remoteTipOid: "e".repeat(40),
+        indexSha256: "sha256:changed-index" as Sha256Digest,
+        worktreeStatusSha256: "sha256:changed-worktree-status" as Sha256Digest,
+        gitConfigurationSha256:
+          "sha256:changed-git-configuration" as Sha256Digest,
+        effectivePushDestinationSha256:
+          "sha256:changed-push-destination" as Sha256Digest,
+      } satisfies {
+        readonly [Key in keyof RepositoryFingerprint]: RepositoryFingerprint[Key];
+      };
 
       expect(
         matchesApprovalContext(plan, approval, repositoryFingerprint),
@@ -248,25 +266,33 @@ if (import.meta.vitest) {
           repositoryFingerprint,
         ),
       ).toBe(false);
-      expect(
-        matchesApprovalContext(plan, approval, {
-          ...repositoryFingerprint,
-          headOid: "c".repeat(40),
-        }),
-      ).toBe(false);
-      expect(
-        matchesApprovalContext(plan, approval, {
-          ...repositoryFingerprint,
-          gitConfigurationSha256: "sha256:changed-config" as Sha256Digest,
-        }),
-      ).toBe(false);
-      expect(
-        matchesApprovalContext(plan, approval, {
-          ...repositoryFingerprint,
-          effectivePushDestinationSha256:
-            "sha256:changed-push-destination" as Sha256Digest,
-        }),
-      ).toBe(false);
+      for (const key of Object.keys(
+        fingerprintMutations,
+      ) as (keyof RepositoryFingerprint)[]) {
+        const mutation = fingerprintMutations[key];
+        expect(mutation, key).not.toBe(repositoryFingerprint[key]);
+        expect(
+          matchesApprovalContext(plan, approval, {
+            ...repositoryFingerprint,
+            [key]: mutation,
+          }),
+          `current fingerprint: ${key}`,
+        ).toBe(false);
+        expect(
+          matchesApprovalContext(
+            plan,
+            {
+              ...approval,
+              repositoryFingerprint: {
+                ...repositoryFingerprint,
+                [key]: mutation,
+              },
+            },
+            repositoryFingerprint,
+          ),
+          `stored approval fingerprint: ${key}`,
+        ).toBe(false);
+      }
     });
   });
 }
