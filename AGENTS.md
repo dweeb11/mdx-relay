@@ -10,7 +10,7 @@ Read before acting:
 
 ## Project Overview
 
-MDX Relay is a desktop Obsidian plugin written in TypeScript. It converts approved notes and supported inline images into profile-specific MDX, previews a sealed export plan, then performs narrow verified Git operations. Implementation has not started; do not invent build commands or architecture beyond an approved engineering plan.
+MDX Relay is a desktop Obsidian plugin written in TypeScript. It converts approved notes and supported inline images into profile-specific MDX, previews a sealed export plan, then performs narrow verified Git operations. Preserve the approved engineering plan and frozen contracts while implementation proceeds task by task.
 
 ## Conventions
 
@@ -24,7 +24,22 @@ MDX Relay is a desktop Obsidian plugin written in TypeScript. It converts approv
 
 ## Build & Test
 
-No package or test runner is configured in the pre-implementation scaffold. The first approved engineering slice must add exact commands here and in `.claude/skills/verify/SKILL.md`.
+Use Node 22 LTS and npm. Dependencies and the lockfile are exact and committed.
+
+```bash
+npm ci
+npm run format:check
+npm run lint
+npm run typecheck
+npm run test:unit
+npm run test:integration
+npm run test:bundle
+npm run test:private-baseline
+npm run build
+npm run verify
+```
+
+`test:private-baseline` currently reports Vitest's explicit no-tests-yet result; T7 adds the external fixture resolver and tests. Set `MDX_RELAY_PRIVATE_FIXTURE_ROOT` only when those tests exist. `verify` runs every public T0 gate and excludes the private baseline because it requires machine-local data.
 
 ## Skill routing
 
