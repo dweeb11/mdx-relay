@@ -3,6 +3,7 @@
 ## First Session Orientation
 
 Before doing anything, read these files in order:
+
 1. `PITCH.md` — the human's design vision (never modify)
 2. `WORKING_AGREEMENT.md` — how we work together
 3. `WORKING_AGREEMENT.apps.md` — app-specific conventions
@@ -30,7 +31,7 @@ Do not collapse the planner and executor. The executor must never rediscover or 
 
 ## Build & Test Commands
 
-No package or test runner is configured in the pre-implementation scaffold. The first approved engineering slice must establish exact install, check, test, build, and packaged-plugin smoke commands before implementation expands.
+Follow `AGENTS.md` for the current package, test, build, and verification commands. Run `npm run verify` before claiming completion.
 
 ## External Boundaries
 

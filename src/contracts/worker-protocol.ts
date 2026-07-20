@@ -1,43 +1,62 @@
-import {
-  matchesPlanIdentity,
-  type ApprovalRecord,
-  type ExportPlan,
-  type GenerationToken,
-  type PlanId,
-  type RepositoryFingerprint,
-  type Sha256Digest,
+import type {
+  CanonicalDependencySnapshot,
+  GenerationToken,
+  Sha256Digest,
+  ValidatedPortableProfileSnapshot,
 } from "./export-plan";
-import type { MdxRelayIssue } from "./issues";
-import type { MdxRelayResult } from "./result";
+import {
+  createIssue,
+  ISSUE_CODES,
+  toSafePathLabel,
+  type BlockerIssue,
+  type SafePathLabel,
+  type WarningIssue,
+} from "./issues";
+import { mdxRelayErr, mdxRelayOk, type MdxRelayResult } from "./result";
 
-export interface WorkerImageInput {
-  readonly sourceId: string;
-  readonly safePathLabel: string;
+export interface WorkerSourceNoteInput {
+  readonly vaultRelativePath: string;
+  readonly safePathLabel: SafePathLabel;
+  readonly byteLength: number;
   readonly contentSha256: Sha256Digest;
   readonly bytes: ArrayBuffer;
 }
 
+export interface WorkerImageInput {
+  readonly sourceId: string;
+  readonly safePathLabel: SafePathLabel;
+  readonly contentSha256: Sha256Digest;
+  readonly byteLength: number;
+  readonly bytes: ArrayBuffer;
+}
+
+/** Pre-seal requests have no planId; generationToken is their sole identity. */
 export interface WorkerProcessRequest {
   readonly type: "process-plan";
   readonly generationToken: GenerationToken;
-  readonly planId: PlanId;
   readonly planStartedAtMs: number;
   readonly planDeadlineMs: number;
   readonly imageTimeoutMs: number;
+  readonly sourceNote: WorkerSourceNoteInput;
+  /** RFC 8785 canonical JSON validated before crossing the worker boundary. */
+  readonly profileSnapshot: ValidatedPortableProfileSnapshot;
+  readonly profileSnapshotSha256: Sha256Digest;
+  /** RFC 8785 canonical JSON from one coherent dependency capture. */
+  readonly dependencySnapshot: CanonicalDependencySnapshot;
+  readonly dependencySnapshotSha256: Sha256Digest;
+  /** Canonical source images only; duplicate occurrences remain in the snapshot. */
   readonly images: readonly WorkerImageInput[];
 }
 
 export interface WorkerCancelRequest {
   readonly type: "cancel-generation";
   readonly generationToken: GenerationToken;
-  readonly planId: PlanId;
 }
 
 export type WorkerRequest = WorkerProcessRequest | WorkerCancelRequest;
 
 interface GenerationBoundEvent {
   readonly generationToken: GenerationToken;
-  readonly planId: PlanId;
 }
 
 export interface WorkerStartedEvent extends GenerationBoundEvent {
@@ -55,108 +74,290 @@ export interface WorkerProgressEvent extends GenerationBoundEvent {
   readonly remainingPlanBudgetMs: number;
 }
 
-export interface WorkerImageOutput {
-  readonly sourceId: string;
+export interface WorkerGeneratedMdxOutput {
   readonly contentSha256: Sha256Digest;
   readonly byteLength: number;
   readonly bytes: ArrayBuffer;
 }
 
-export interface WorkerCompletedEvent extends GenerationBoundEvent {
-  readonly type: "completed";
-  readonly result: MdxRelayResult<readonly WorkerImageOutput[]>;
+export interface WorkerImageOutput {
+  readonly sourceId: string;
+  readonly decodedMime: "image/png" | "image/jpeg" | "image/webp";
+  readonly width: number;
+  readonly height: number;
+  readonly contentSha256: Sha256Digest;
+  readonly byteLength: number;
+  readonly bytes: ArrayBuffer;
 }
 
+export interface WorkerCompletion {
+  readonly generatedMdx: WorkerGeneratedMdxOutput;
+  readonly transformedImages: readonly WorkerImageOutput[];
+  readonly warnings: readonly WarningIssue[];
+}
+
+/** Raw structured-clone completion payload; result is untrusted until decoded. */
+export interface WorkerCompletedWireEvent extends GenerationBoundEvent {
+  readonly type: "completed";
+  readonly result: unknown;
+}
+
+/**
+ * Host-side completion produced only after the future T3 decoder validates the
+ * event shape, severity channels, byte lengths and hashes, then creates or
+ * restores the nominal boundary result with the mdxRelay constructors.
+ */
+export interface DecodedWorkerCompletedEvent extends GenerationBoundEvent {
+  readonly type: "completed";
+  /** A blocker-first error arm never exposes trusted partial output. */
+  readonly result: MdxRelayResult<WorkerCompletion>;
+}
+
+/** Parent-synthesized terminal failure when no trustworthy worker Result exists. */
 export interface WorkerBlockedEvent extends GenerationBoundEvent {
   readonly type: "blocked";
   readonly activeSourceId?: string;
-  readonly issues: readonly MdxRelayIssue[];
+  readonly issues: readonly [BlockerIssue, ...BlockerIssue[]];
 }
 
 export interface WorkerCancelledEvent extends GenerationBoundEvent {
   readonly type: "cancelled";
 }
 
-export type WorkerEvent =
+/** Raw MessageEvent.data contract. It is not host authority. */
+export type WorkerWireEvent =
   | WorkerStartedEvent
   | WorkerProgressEvent
-  | WorkerCompletedEvent
+  | WorkerCompletedWireEvent
+  | WorkerBlockedEvent
+  | WorkerCancelledEvent;
+
+/**
+ * Host-facing union returned by the future T3 decoder, never by annotating
+ * MessageEvent.data. The decoder validates shape, severity channels, byte
+ * lengths and hashes, and creates/restores nominal boundary results. All
+ * pre-seal variants remain generationToken-only.
+ */
+export type DecodedWorkerEvent =
+  | WorkerStartedEvent
+  | WorkerProgressEvent
+  | DecodedWorkerCompletedEvent
   | WorkerBlockedEvent
   | WorkerCancelledEvent;
 
 if (import.meta.vitest) {
   const { describe, expect, it } = import.meta.vitest;
+  const digest = "sha256:fixture" as Sha256Digest;
+  const generationToken = "generation-1" as GenerationToken;
+  const noteLabel = toSafePathLabel("notes/example.md") as SafePathLabel;
+  const imageLabel = toSafePathLabel("assets/image.png") as SafePathLabel;
+
+  const processRequest = (): WorkerProcessRequest => ({
+    type: "process-plan",
+    generationToken,
+    planStartedAtMs: 100,
+    planDeadlineMs: 5_100,
+    imageTimeoutMs: 1_000,
+    sourceNote: {
+      vaultRelativePath: "notes/example.md",
+      safePathLabel: noteLabel,
+      byteLength: 1,
+      contentSha256: digest,
+      bytes: Uint8Array.of(1).buffer,
+    },
+    profileSnapshot: "{}" as ValidatedPortableProfileSnapshot,
+    profileSnapshotSha256: digest,
+    dependencySnapshot: "{}" as CanonicalDependencySnapshot,
+    dependencySnapshotSha256: digest,
+    images: [
+      {
+        sourceId: "image-1",
+        safePathLabel: imageLabel,
+        contentSha256: digest,
+        byteLength: 1,
+        bytes: Uint8Array.of(2).buffer,
+      },
+    ],
+  });
 
   describe("worker protocol", () => {
-    it("keeps the plan, worker event, and approval on one identity", () => {
-      const generationToken = "generation-1" as GenerationToken;
-      const planId = "plan-1" as PlanId;
-      const digest = "sha256:fixture" as Sha256Digest;
-      const repositoryFingerprint = {
-        repositoryIdentitySha256: digest,
-        gitDirectoryIdentitySha256: digest,
-        branchName: "feat/app-560-bootstrap-contracts",
-        headOid: "a".repeat(40),
-        upstreamOid: "b".repeat(40),
-        remoteTipOid: "b".repeat(40),
-        indexSha256: digest,
-        worktreeStatusSha256: digest,
-        gitConfigurationSha256: digest,
-        effectivePushDestinationSha256: digest,
-      } satisfies RepositoryFingerprint;
-      const plan = {
-        schemaVersion: 1,
+    it("structured-clones all pure transformation input", () => {
+      const request = processRequest();
+      const cloned = structuredClone(request) as WorkerProcessRequest;
+      expect(cloned).toMatchObject({
+        type: "process-plan",
         generationToken,
-        planId,
-        state: "ready",
-        captureFingerprint: {
-          noteSha256: digest,
-          sourceImages: [],
-          candidateSetSha256: digest,
-          profileSnapshotSha256: digest,
-          repository: repositoryFingerprint,
+        sourceNote: { safePathLabel: noteLabel, contentSha256: digest },
+        images: [{ sourceId: "image-1", safePathLabel: imageLabel }],
+      });
+      expect(new Uint8Array(cloned.sourceNote.bytes)).toEqual(Uint8Array.of(1));
+      expect(new Uint8Array(cloned.images[0]!.bytes)).toEqual(Uint8Array.of(2));
+      expect("planId" in cloned).toBe(false);
+    });
+
+    it("binds requests, cancellation, and every event only to generationToken", () => {
+      const request = processRequest();
+      const invalidRequest: WorkerProcessRequest = {
+        ...request,
+        // @ts-expect-error pre-seal worker requests cannot carry a planId
+        planId: "pre-seal-plan",
+      };
+      const cancel = {
+        type: "cancel-generation",
+        generationToken,
+      } satisfies WorkerCancelRequest;
+      const completion: WorkerCompletion = {
+        generatedMdx: {
+          contentSha256: digest,
+          byteLength: 1,
+          bytes: Uint8Array.of(3).buffer,
         },
-        actions: [],
-        blobs: {},
-        issues: [],
-        createdAtUtc: "2026-07-19T12:00:00.000Z",
-        expiresAtUtc: "2026-07-26T12:00:00.000Z",
-      } satisfies ExportPlan;
-      const event = {
-        type: "started",
+        transformedImages: [],
+        warnings: [createIssue(ISSUE_CODES.summaryMissing)],
+      };
+      const events: readonly DecodedWorkerEvent[] = [
+        { type: "started", generationToken, imageCount: 1 },
+        {
+          type: "progress",
+          generationToken,
+          sourceId: "image-1",
+          imageIndex: 0,
+          completedImages: 0,
+          totalImages: 1,
+          elapsedMs: 10,
+          remainingPlanBudgetMs: 990,
+        },
+        { type: "completed", generationToken, result: mdxRelayOk(completion) },
+        {
+          type: "blocked",
+          generationToken,
+          issues: [createIssue(ISSUE_CODES.workerCrashed)],
+        },
+        { type: "cancelled", generationToken },
+      ];
+      const invalidEvent: DecodedWorkerEvent = {
+        type: "cancelled",
         generationToken,
-        planId,
-        imageCount: 1,
-      } satisfies WorkerStartedEvent;
-      const approval = {
-        generationToken,
-        planId,
-        repositoryFingerprint,
-        approvedAtUtc: "2026-07-19T12:01:00.000Z",
-      } satisfies ApprovalRecord;
-
-      expect(matchesPlanIdentity(event, plan)).toBe(true);
-      expect(matchesPlanIdentity(approval, plan)).toBe(true);
-      expect(
-        [plan, event, approval].map(({ generationToken }) => generationToken),
-      ).toEqual([generationToken, generationToken, generationToken]);
-      expect([plan, event, approval].map(({ planId }) => planId)).toEqual([
-        planId,
-        planId,
-        planId,
-      ]);
-
-      const staleEvent = {
-        ...event,
+        // @ts-expect-error pre-seal worker events cannot carry a planId
+        planId: "pre-seal-plan",
+      };
+      for (const value of [request, cancel, ...events]) {
+        expect(value.generationToken).toBe(generationToken);
+        expect("planId" in value).toBe(false);
+      }
+      void invalidRequest;
+      void invalidEvent;
+      const stale = {
+        ...events[0],
         generationToken: "generation-stale" as GenerationToken,
-      } satisfies WorkerStartedEvent;
-      const wrongPlanApproval = {
-        ...approval,
-        planId: "plan-stale" as PlanId,
-      } satisfies ApprovalRecord;
+      };
+      expect(stale.generationToken === request.generationToken).toBe(false);
+    });
 
-      expect(matchesPlanIdentity(staleEvent, plan)).toBe(false);
-      expect(matchesPlanIdentity(wrongPlanApproval, plan)).toBe(false);
+    it("uses nominal result constructors for success and blocker-first failure", () => {
+      const warning = createIssue(ISSUE_CODES.wikilinksFlattened, { count: 1 });
+      const completion = {
+        generatedMdx: {
+          contentSha256: digest,
+          byteLength: 1,
+          bytes: Uint8Array.of(4).buffer,
+        },
+        transformedImages: [],
+        warnings: [warning],
+      } satisfies WorkerCompletion;
+      const success = {
+        type: "completed",
+        generationToken,
+        result: mdxRelayOk(completion),
+      } satisfies DecodedWorkerCompletedEvent;
+      const blocker = createIssue(ISSUE_CODES.imageDecodeFailed);
+      const failure = {
+        type: "completed",
+        generationToken,
+        result: mdxRelayErr([blocker, warning]),
+      } satisfies DecodedWorkerCompletedEvent;
+      expect(success.result.ok).toBe(true);
+      expect(failure.result.ok).toBe(false);
+      if (!failure.result.ok) expect(failure.result.error[0]).toBe(blocker);
+    });
+
+    it("keeps structured-cloned completion data untrusted until decoding", () => {
+      const completion: WorkerCompletion = {
+        generatedMdx: {
+          contentSha256: digest,
+          byteLength: 2,
+          bytes: Uint8Array.of(7, 8).buffer,
+        },
+        transformedImages: [],
+        warnings: [createIssue(ISSUE_CODES.summaryMissing)],
+      };
+      const event = {
+        type: "completed",
+        generationToken,
+        result: mdxRelayOk(completion),
+      } satisfies DecodedWorkerCompletedEvent;
+      const cloned: WorkerCompletedWireEvent = structuredClone(event);
+      const messageEvent = { data: cloned } as MessageEvent<WorkerWireEvent>;
+      // @ts-expect-error raw structured-clone data cannot satisfy decoded authority
+      const decodedCompletion: DecodedWorkerCompletedEvent = cloned;
+      // @ts-expect-error annotating MessageEvent.data as wire data cannot decode it
+      const decodedEvent: DecodedWorkerEvent = messageEvent.data;
+      expect(cloned).toMatchObject({
+        type: "completed",
+        generationToken,
+        result: {
+          ok: true,
+          value: {
+            generatedMdx: { contentSha256: digest, byteLength: 2 },
+            transformedImages: [],
+            warnings: [{ code: ISSUE_CODES.summaryMissing }],
+          },
+        },
+      });
+      const untrustedResult = cloned.result as {
+        ok: true;
+        value: WorkerCompletion;
+      };
+      expect(new Uint8Array(untrustedResult.value.generatedMdx.bytes)).toEqual(
+        Uint8Array.of(7, 8),
+      );
+      expect(Object.getOwnPropertySymbols(event.result)).toHaveLength(1);
+      expect(Object.getOwnPropertySymbols(untrustedResult)).toHaveLength(0);
+      void decodedCompletion;
+      void decodedEvent;
+    });
+
+    it("enforces warning and blocker channels at compile time", () => {
+      const warning = createIssue(ISSUE_CODES.summaryMissing);
+      const blocker = createIssue(ISSUE_CODES.invalidMdx);
+      const generatedMdx = {
+        contentSha256: digest,
+        byteLength: 1,
+        bytes: Uint8Array.of(1).buffer,
+      };
+      const invalidCompletion: WorkerCompletion = {
+        generatedMdx,
+        transformedImages: [],
+        // @ts-expect-error blocker issues cannot be worker success warnings
+        warnings: [blocker],
+      };
+      const invalidBlocked: WorkerBlockedEvent = {
+        type: "blocked",
+        generationToken,
+        // @ts-expect-error warning issues cannot form a blocked event
+        issues: [warning],
+      };
+      const emptyBlocked: WorkerBlockedEvent = {
+        type: "blocked",
+        generationToken,
+        // @ts-expect-error blocked events require at least one blocker
+        issues: [],
+      };
+      void invalidCompletion;
+      void invalidBlocked;
+      void emptyBlocked;
+      expect(blocker.severity).toBe("blocker");
+      expect(warning.severity).toBe("warning");
     });
   });
 }

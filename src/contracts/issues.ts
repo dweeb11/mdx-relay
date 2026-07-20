@@ -18,9 +18,7 @@ export const RECOVERY_ACTIONS = Object.freeze({
 
 export type RecoveryAction =
   (typeof RECOVERY_ACTIONS)[keyof typeof RECOVERY_ACTIONS];
-
 export type IssueSeverity = "warning" | "blocker";
-
 export type IssueStage =
   | "profile"
   | "capture"
@@ -50,6 +48,9 @@ export const ISSUE_CODES = Object.freeze({
   summaryMissing: "SUMMARY_MISSING",
   duplicateMessageField: "DUPLICATE_MESSAGE_FIELD",
   mdxEscaped: "MDX_ESCAPED",
+  wikilinksFlattened: "WIKILINKS_FLATTENED",
+  calloutsConverted: "CALLOUTS_CONVERTED",
+  imageAltTextMissing: "IMAGE_ALT_TEXT_MISSING",
   unsupportedMarkdown: "UNSUPPORTED_MARKDOWN",
   invalidFrontmatter: "INVALID_FRONTMATTER",
   invalidMdx: "INVALID_MDX",
@@ -57,8 +58,11 @@ export const ISSUE_CODES = Object.freeze({
   imageDecodeFailed: "IMAGE_DECODE_FAILED",
   imageEncodeFailed: "IMAGE_ENCODE_FAILED",
   workerImageTimeout: "WORKER_IMAGE_TIMEOUT",
+  workerCrashed: "WORKER_CRASHED",
+  malformedWorkerResponse: "MALFORMED_WORKER_RESPONSE",
   planBudgetExhausted: "PLAN_BUDGET_EXHAUSTED",
   staleDuringPlanning: "STALE_DURING_PLANNING",
+  staleOutputsPresent: "STALE_OUTPUTS_PRESENT",
   planNotFound: "PLAN_NOT_FOUND",
   planExpired: "PLAN_EXPIRED",
   storageTampered: "STORAGE_TAMPERED",
@@ -83,9 +87,13 @@ export interface IssueDefinition {
   readonly severity: IssueSeverity;
   readonly stage: IssueStage;
   readonly recoveryActions: readonly RecoveryAction[];
+  /** Registry-owned display text. Callers cannot provide arbitrary strings. */
+  readonly summary: string;
 }
 
-const defineIssueRegistry = <T extends Record<IssueCode, IssueDefinition>>(
+const defineIssueRegistry = <
+  const T extends Record<IssueCode, IssueDefinition>,
+>(
   registry: T,
 ): Readonly<T> => {
   for (const definition of Object.values(registry)) {
@@ -95,132 +103,192 @@ const defineIssueRegistry = <T extends Record<IssueCode, IssueDefinition>>(
   return Object.freeze(registry);
 };
 
-const editNote = [RECOVERY_ACTIONS.editNote] as RecoveryAction[];
-const replaceImage = [RECOVERY_ACTIONS.replaceImage] as RecoveryAction[];
-const previewAgain = [RECOVERY_ACTIONS.previewAgain] as RecoveryAction[];
-const fixRepository = [RECOVERY_ACTIONS.fixRepository] as RecoveryAction[];
-const inspectRecovery = [RECOVERY_ACTIONS.inspectRecovery] as RecoveryAction[];
+const editNote = [RECOVERY_ACTIONS.editNote] as const;
+const replaceImage = [RECOVERY_ACTIONS.replaceImage] as const;
+const previewAgain = [RECOVERY_ACTIONS.previewAgain] as const;
+const fixRepository = [RECOVERY_ACTIONS.fixRepository] as const;
+const inspectRecovery = [RECOVERY_ACTIONS.inspectRecovery] as const;
 
 export const ISSUE_REGISTRY = defineIssueRegistry({
   [ISSUE_CODES.invalidProfile]: {
     severity: "blocker",
     stage: "profile",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
+    summary: "The selected export profile is invalid.",
   },
   [ISSUE_CODES.unsafePath]: {
     severity: "blocker",
     stage: "profile",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
+    summary: "The configured path is unsafe.",
   },
   [ISSUE_CODES.credentialUrl]: {
     severity: "blocker",
     stage: "profile",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
+    summary: "A repository URL contains embedded credentials.",
   },
   [ISSUE_CODES.noteTooLarge]: {
     severity: "blocker",
     stage: "capture",
     recoveryActions: editNote,
+    summary: "The source note exceeds the supported size limit.",
   },
   [ISSUE_CODES.sourceImageTooLarge]: {
     severity: "blocker",
     stage: "capture",
     recoveryActions: replaceImage,
+    summary: "A source image exceeds the supported size limit.",
   },
   [ISSUE_CODES.decodedImageTooLarge]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
+    summary: "A decoded image exceeds the supported pixel limit.",
   },
   [ISSUE_CODES.outputFileLimitExceeded]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: editNote,
+    summary: "The plan exceeds the supported output file limit.",
   },
   [ISSUE_CODES.outputTooLarge]: {
     severity: "blocker",
     stage: "sealing",
     recoveryActions: editNote,
+    summary: "A sealed output exceeds the supported size limit.",
   },
   [ISSUE_CODES.totalOutputTooLarge]: {
     severity: "blocker",
     stage: "sealing",
     recoveryActions: editNote,
+    summary: "The sealed plan exceeds the total output size limit.",
   },
   [ISSUE_CODES.decodedWorkLimitExceeded]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: editNote,
+    summary: "The plan exceeds the supported decoded-work limit.",
   },
   [ISSUE_CODES.summaryMissing]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
+    summary: "The source note has no summary.",
   },
   [ISSUE_CODES.duplicateMessageField]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
+    summary: "The source note contains duplicate message fields.",
   },
   [ISSUE_CODES.mdxEscaped]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
+    summary: "Unsafe MDX prose characters were escaped.",
+  },
+  [ISSUE_CODES.wikilinksFlattened]: {
+    severity: "warning",
+    stage: "markdown",
+    recoveryActions: editNote,
+    summary: "Obsidian wikilinks were flattened to text.",
+  },
+  [ISSUE_CODES.calloutsConverted]: {
+    severity: "warning",
+    stage: "markdown",
+    recoveryActions: editNote,
+    summary: "Obsidian callouts were converted to blockquotes.",
+  },
+  [ISSUE_CODES.imageAltTextMissing]: {
+    severity: "warning",
+    stage: "markdown",
+    recoveryActions: editNote,
+    summary: "An embedded image has no alt text.",
   },
   [ISSUE_CODES.unsupportedMarkdown]: {
     severity: "blocker",
     stage: "markdown",
     recoveryActions: editNote,
+    summary: "The note contains unsupported Markdown or Obsidian syntax.",
   },
   [ISSUE_CODES.invalidFrontmatter]: {
     severity: "blocker",
     stage: "markdown",
     recoveryActions: editNote,
+    summary: "The note frontmatter is invalid.",
   },
   [ISSUE_CODES.invalidMdx]: {
     severity: "blocker",
     stage: "markdown",
     recoveryActions: editNote,
+    summary: "The generated document is invalid MDX.",
   },
   [ISSUE_CODES.unsupportedImage]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
+    summary: "An embedded image format is unsupported.",
   },
   [ISSUE_CODES.imageDecodeFailed]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
+    summary: "An embedded image could not be decoded.",
   },
   [ISSUE_CODES.imageEncodeFailed]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
+    summary: "An embedded image could not be encoded.",
   },
   [ISSUE_CODES.workerImageTimeout]: {
     severity: "blocker",
     stage: "worker",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.replaceImage],
+    summary: "Image processing exceeded its time budget.",
+  },
+  [ISSUE_CODES.workerCrashed]: {
+    severity: "blocker",
+    stage: "worker",
+    recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
+    summary: "The processing worker stopped unexpectedly.",
+  },
+  [ISSUE_CODES.malformedWorkerResponse]: {
+    severity: "blocker",
+    stage: "worker",
+    recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
+    summary: "The processing worker returned an invalid response.",
   },
   [ISSUE_CODES.planBudgetExhausted]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: previewAgain,
+    summary: "Planning exceeded its total time budget.",
   },
   [ISSUE_CODES.staleDuringPlanning]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: previewAgain,
+    summary: "Captured input changed while the plan was being built.",
+  },
+  [ISSUE_CODES.staleOutputsPresent]: {
+    severity: "warning",
+    stage: "planning",
+    recoveryActions: [RECOVERY_ACTIONS.openTerminal],
+    summary: "Unplanned stale outputs are present in the destination.",
   },
   [ISSUE_CODES.planNotFound]: {
     severity: "blocker",
     stage: "storage",
     recoveryActions: previewAgain,
+    summary: "The sealed export plan could not be found.",
   },
   [ISSUE_CODES.planExpired]: {
     severity: "blocker",
     stage: "storage",
     recoveryActions: previewAgain,
+    summary: "The sealed export plan has expired.",
   },
   [ISSUE_CODES.storageTampered]: {
     severity: "blocker",
@@ -229,56 +297,68 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.restorePermissions,
       RECOVERY_ACTIONS.previewAgain,
     ],
+    summary: "Private plan storage failed integrity or permission checks.",
   },
   [ISSUE_CODES.storageWriteFailed]: {
     severity: "blocker",
     stage: "storage",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
+    summary: "The sealed export plan could not be stored safely.",
   },
   [ISSUE_CODES.staleApproval]: {
     severity: "blocker",
     stage: "approval",
     recoveryActions: previewAgain,
+    summary: "The approval no longer matches the current preview.",
   },
   [ISSUE_CODES.approvalMismatch]: {
     severity: "blocker",
     stage: "approval",
     recoveryActions: previewAgain,
+    summary: "The approval identity does not match the sealed plan.",
   },
   [ISSUE_CODES.repositoryPreflightFailed]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: fixRepository,
+    summary: "Repository preflight could not be completed safely.",
   },
   [ISSUE_CODES.dirtyRepository]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: fixRepository,
+    summary: "The destination repository is not clean.",
   },
   [ISSUE_CODES.unsupportedRepository]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: [RECOVERY_ACTIONS.chooseRepository],
+    summary: "The destination repository form is unsupported.",
   },
   [ISSUE_CODES.hostileGitConfig]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: fixRepository,
+    summary: "Git configuration or attributes could transform reviewed bytes.",
   },
   [ISSUE_CODES.targetChanged]: {
     severity: "blocker",
     stage: "git",
     recoveryActions: previewAgain,
+    summary: "A planned target changed after preview.",
   },
   [ISSUE_CODES.gitExecutionFailed]: {
     severity: "blocker",
     stage: "git",
     recoveryActions: inspectRecovery,
+    summary: "The verified Git operation failed.",
   },
   [ISSUE_CODES.rollbackFailed]: {
     severity: "blocker",
     stage: "recovery",
     recoveryActions: inspectRecovery,
+    summary:
+      "Automatic rollback could not restore the verified original state.",
   },
   [ISSUE_CODES.recoveryRequired]: {
     severity: "blocker",
@@ -287,6 +367,7 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.restoreFromBackup,
       RECOVERY_ACTIONS.openTerminal,
     ],
+    summary: "A prior operation requires verified recovery.",
   },
   [ISSUE_CODES.localCommitOnly]: {
     severity: "blocker",
@@ -296,6 +377,7 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.verifyRemote,
       RECOVERY_ACTIONS.leaveLocalCommit,
     ],
+    summary: "The approved commit exists locally but was not published.",
   },
   [ISSUE_CODES.remoteStatusUnknown]: {
     severity: "blocker",
@@ -304,84 +386,156 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.verifyRemote,
       RECOVERY_ACTIONS.openTerminal,
     ],
+    summary: "The remote publication status could not be verified.",
   },
-});
+} as const);
 
 export interface SourcePoint {
   readonly line: number;
   readonly column: number;
   readonly offset: number;
 }
-
 export interface SourceRange {
   readonly start: SourcePoint;
   readonly end: SourcePoint;
 }
 
+export declare const safePathLabelBrand: unique symbol;
+export type SafePathLabel = string & {
+  readonly [safePathLabelBrand]: "SafePathLabel";
+};
+
+export interface IssueDisplayContext {
+  /** The only caller-controlled display detail: a finite nonnegative integer. */
+  readonly count?: number;
+}
+
 export interface RedactedDisplayDetails {
   readonly summary: string;
-  readonly safeContext?: string;
+  readonly count?: number;
 }
 
 export interface IssueLocation {
   readonly sourceRange?: SourceRange;
-  readonly safePathLabel?: string;
+  readonly safePathLabel?: SafePathLabel;
 }
 
-export interface MdxRelayIssue {
-  readonly code: IssueCode;
-  readonly severity: IssueSeverity;
-  readonly stage: IssueStage;
-  readonly displayDetails: RedactedDisplayDetails;
-  readonly recoveryActions: readonly RecoveryAction[];
-  readonly sourceRange?: SourceRange;
-  readonly safePathLabel?: string;
+type IssueForCode<C extends IssueCode> = C extends IssueCode
+  ? Readonly<{
+      readonly code: C;
+      readonly severity: (typeof ISSUE_REGISTRY)[C]["severity"];
+      readonly stage: (typeof ISSUE_REGISTRY)[C]["stage"];
+      readonly displayDetails: RedactedDisplayDetails;
+      readonly recoveryActions: (typeof ISSUE_REGISTRY)[C]["recoveryActions"];
+      readonly sourceRange?: SourceRange;
+      readonly safePathLabel?: SafePathLabel;
+    }>
+  : never;
+
+/** A distributive code-specific union whose policy is owned by ISSUE_REGISTRY. */
+export type MdxRelayIssue<C extends IssueCode = IssueCode> = IssueForCode<C>;
+export type WarningIssue = Extract<MdxRelayIssue, { severity: "warning" }>;
+export type BlockerIssue = Extract<MdxRelayIssue, { severity: "blocker" }>;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object";
+const isSafeInteger = (value: unknown): value is number =>
+  typeof value === "number" &&
+  Number.isFinite(value) &&
+  Number.isInteger(value) &&
+  value >= 0;
+
+/** Returns a branded label only for bounded normalized relative display paths. */
+export function toSafePathLabel(value: unknown): SafePathLabel | undefined {
+  if (typeof value !== "string") return undefined;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return undefined;
+  }
+  if (
+    value.length === 0 ||
+    value.length > 240 ||
+    /^[a-z][a-z0-9+.-]*:/iu.test(value) ||
+    /^[\\/]/u.test(value) ||
+    /^[a-z]:[\\/]/iu.test(value) ||
+    value.includes("\\") ||
+    /^(?:[^/@:\s]+@)?[^/@:\s]+:.+/u.test(value)
+  ) {
+    return undefined;
+  }
+  const segments = value.split("/");
+  if (
+    segments.some(
+      (segment) => segment.length === 0 || segment === "." || segment === "..",
+    )
+  ) {
+    return undefined;
+  }
+  return value as SafePathLabel;
 }
 
-const cloneSourcePoint = (point: SourcePoint): SourcePoint =>
-  Object.freeze({
-    line: point.line,
-    column: point.column,
-    offset: point.offset,
-  });
+const clonePoint = (value: unknown): SourcePoint | undefined => {
+  if (!isRecord(value)) return undefined;
+  const { line, column, offset } = value;
+  return isSafeInteger(line) && isSafeInteger(column) && isSafeInteger(offset)
+    ? Object.freeze({ line, column, offset })
+    : undefined;
+};
 
-const cloneSourceRange = (range: SourceRange): SourceRange =>
-  Object.freeze({
-    start: cloneSourcePoint(range.start),
-    end: cloneSourcePoint(range.end),
-  });
+const cloneRange = (value: unknown): SourceRange | undefined => {
+  if (!isRecord(value)) return undefined;
+  const start = clonePoint(value.start);
+  const end = clonePoint(value.end);
+  if (
+    !start ||
+    !end ||
+    end.offset < start.offset ||
+    end.line < start.line ||
+    (end.line === start.line && end.column < start.column)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ start, end });
+};
 
-export function createIssue(
-  code: IssueCode,
-  displayDetails: RedactedDisplayDetails,
-  location: IssueLocation = {},
-): MdxRelayIssue {
-  const definition = ISSUE_REGISTRY[code];
-  const sourceRange = location.sourceRange
-    ? { sourceRange: cloneSourceRange(location.sourceRange) }
+export function createIssue<C extends IssueCode>(
+  code: C,
+  context: IssueDisplayContext = {},
+  location: unknown = {},
+): MdxRelayIssue<C> {
+  const safeCode =
+    typeof code === "string" &&
+    Object.prototype.hasOwnProperty.call(ISSUE_REGISTRY, code)
+      ? code
+      : ISSUE_CODES.malformedWorkerResponse;
+  const definition = ISSUE_REGISTRY[safeCode];
+  const runtimeContext = isRecord(context) ? context : {};
+  const count = isSafeInteger(runtimeContext.count)
+    ? { count: runtimeContext.count }
     : {};
-  const safePathLabel =
-    typeof location.safePathLabel === "string"
-      ? { safePathLabel: location.safePathLabel }
-      : {};
+  const runtimeLocation = isRecord(location) ? location : {};
+  const sourceRange = cloneRange(runtimeLocation.sourceRange);
+  const safePathLabel = toSafePathLabel(runtimeLocation.safePathLabel);
   return Object.freeze({
-    code,
+    code: safeCode,
     severity: definition.severity,
     stage: definition.stage,
-    displayDetails: Object.freeze({ ...displayDetails }),
+    displayDetails: Object.freeze({ summary: definition.summary, ...count }),
     recoveryActions: definition.recoveryActions,
-    ...sourceRange,
-    ...safePathLabel,
-  });
+    ...(sourceRange ? { sourceRange } : {}),
+    ...(safePathLabel ? { safePathLabel } : {}),
+  }) as MdxRelayIssue<C>;
 }
 
 if (import.meta.vitest) {
   const { describe, expect, it } = import.meta.vitest;
 
-  describe("issue registry", () => {
-    it("defines every code exactly once with immutable policy", () => {
+  describe("issue registry and construction", () => {
+    it("locks every code, policy, summary, and approved snapshot", async () => {
+      const { createHash } = await import("node:crypto");
+      const snapshotHash = (value: unknown): string =>
+        createHash("sha256").update(JSON.stringify(value)).digest("hex");
       const codes = Object.values(ISSUE_CODES);
-
       expect(new Set(codes).size).toBe(codes.length);
       expect(Object.keys(ISSUE_REGISTRY).sort()).toEqual([...codes].sort());
       expect(Object.isFrozen(ISSUE_CODES)).toBe(true);
@@ -390,110 +544,299 @@ if (import.meta.vitest) {
       for (const definition of Object.values(ISSUE_REGISTRY)) {
         expect(Object.isFrozen(definition)).toBe(true);
         expect(Object.isFrozen(definition.recoveryActions)).toBe(true);
+        expect(definition.summary.length).toBeGreaterThan(0);
+      }
+      const policy = Object.entries(ISSUE_REGISTRY)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([code, definition]) => [
+          code,
+          definition.severity,
+          definition.stage,
+          [...definition.recoveryActions],
+          definition.summary,
+        ]);
+      expect(snapshotHash([...codes].sort())).toBe(
+        "35d1dac7ff51deb44300e383837787cddc82df329f75956dc8cf02e5c2bc11db",
+      );
+      expect(snapshotHash(Object.values(RECOVERY_ACTIONS).sort())).toBe(
+        "235a3f3eb94625c1087d70b1687d03e3ed54725c88c57a23de77aec4faa36a1d",
+      );
+      // Intentional approval gate: fixed summaries are part of the exact policy snapshot.
+      expect(snapshotHash(policy)).toBe(
+        "dd0833b00016a6d0efee16bdf348a9c8c6348026b209e0add6b993ce3e9fe019",
+      );
+    });
+
+    it("derives exact code policy and only accepts finite nonnegative counts", () => {
+      const warning = createIssue(ISSUE_CODES.wikilinksFlattened, { count: 2 });
+      const blocker = createIssue(ISSUE_CODES.invalidMdx);
+      expect(warning).toMatchObject({
+        code: ISSUE_CODES.wikilinksFlattened,
+        severity: "warning",
+        stage: "markdown",
+        displayDetails: {
+          summary: ISSUE_REGISTRY.WIKILINKS_FLATTENED.summary,
+          count: 2,
+        },
+      });
+      expect(blocker).toMatchObject({
+        code: ISSUE_CODES.invalidMdx,
+        severity: "blocker",
+        stage: "markdown",
+      });
+      for (const malformed of [
+        null,
+        "secret",
+        { count: -1 },
+        { count: 1.5 },
+        { count: Infinity },
+        { count: "2" },
+        { summary: "private note", safeContext: "token" },
+      ]) {
+        const issue = createIssue(ISSUE_CODES.invalidMdx, malformed as never);
+        expect(issue.displayDetails).toEqual({
+          summary: ISSUE_REGISTRY.INVALID_MDX.summary,
+        });
+      }
+      expect(Object.isFrozen(warning)).toBe(true);
+      expect(Object.isFrozen(warning.displayDetails)).toBe(true);
+    });
+
+    it("fails closed without leaking or throwing for an unknown runtime code", () => {
+      const canary = "CALLER_SECRET_UNKNOWN_CODE";
+      const issue = createIssue(canary as never, { summary: canary } as never, {
+        safePathLabel: `https://user:token@example.test/${canary}`,
+      });
+      expect(issue).toMatchObject({
+        code: ISSUE_CODES.malformedWorkerResponse,
+        severity: "blocker",
+        stage: "worker",
+        displayDetails: {
+          summary: ISSUE_REGISTRY.MALFORMED_WORKER_RESPONSE.summary,
+        },
+      });
+      expect(JSON.stringify(issue)).not.toContain(canary);
+    });
+
+    it("validates safe path labels and rejects secret-bearing canaries", () => {
+      const valid = [
+        "notes/example.md",
+        "assets/image-1.webp",
+        "notes/reviewer@example.test.md",
+        "a",
+      ];
+      for (const label of valid) expect(toSafePathLabel(label)).toBe(label);
+      const invalid = [
+        "",
+        "/private/note.md",
+        "\\\\server\\share",
+        "C:\\secret.txt",
+        "../secret",
+        "notes/../secret",
+        "notes//secret",
+        "./secret",
+        "https://user:token@example.test/repo",
+        "git@example.test:owner/repo.git",
+        "notes\\secret",
+        "nul\0byte",
+        "unit\u001fseparator",
+        "delete\u007fcharacter",
+        `notes/${"x".repeat(241)}`,
+      ];
+      for (const label of invalid)
+        expect(toSafePathLabel(label), label).toBeUndefined();
+      const canary = "https://user:token@example.test/private-note";
+      const issue = createIssue(
+        ISSUE_CODES.invalidMdx,
+        { summary: canary, safeContext: canary } as never,
+        { safePathLabel: canary, credentialUrl: canary },
+      );
+      expect(JSON.stringify(issue)).not.toContain(canary);
+    });
+
+    it("clones coherent source ranges and omits malformed optional locations", () => {
+      const range = {
+        start: { line: 1, column: 2, offset: 3 },
+        end: { line: 2, column: 0, offset: 9 },
+      };
+      const label = toSafePathLabel("notes/example.md");
+      expect(label).toBeDefined();
+      const issue = createIssue(
+        ISSUE_CODES.invalidMdx,
+        {},
+        { sourceRange: range, safePathLabel: label },
+      );
+      range.start.line = 99;
+      expect(issue.sourceRange).toEqual({
+        start: { line: 1, column: 2, offset: 3 },
+        end: { line: 2, column: 0, offset: 9 },
+      });
+      expect(issue.safePathLabel).toBe(label);
+      expect(Object.isFrozen(issue.sourceRange)).toBe(true);
+      expect(Object.isFrozen(issue.sourceRange?.start)).toBe(true);
+      for (const location of [
+        null,
+        false,
+        { sourceRange: null },
+        { sourceRange: true },
+        { sourceRange: {} },
+        { sourceRange: { start: {}, end: {} } },
+        {
+          sourceRange: {
+            start: { line: -1, column: 0, offset: 0 },
+            end: { line: 0, column: 0, offset: 0 },
+          },
+        },
+        {
+          sourceRange: {
+            start: { line: 2, column: 0, offset: 9 },
+            end: { line: 1, column: 0, offset: 3 },
+          },
+        },
+        {
+          sourceRange: {
+            start: { line: 1, column: 8, offset: 3 },
+            end: { line: 1, column: 2, offset: 9 },
+          },
+        },
+      ]) {
+        const malformed = createIssue(ISSUE_CODES.invalidMdx, {}, location);
+        expect(malformed.sourceRange).toBeUndefined();
       }
     });
 
-    it("constructs redacted issues only from registry policy", () => {
-      const issue = createIssue(ISSUE_CODES.staleDuringPlanning, {
-        summary: "The note changed while planning.",
+    it("table-drives frozen declaration, export, and re-export boundaries", async () => {
+      const { ESLint } = await import("eslint");
+      const eslint = new ESLint({
+        cwd: process.cwd(),
+        overrideConfig: {
+          languageOptions: { parserOptions: { projectService: false } },
+        },
       });
-
-      expect(issue).toMatchObject({
-        code: ISSUE_CODES.staleDuringPlanning,
-        severity: "blocker",
-        stage: "planning",
-        recoveryActions: [RECOVERY_ACTIONS.previewAgain],
-      });
-      expect(Object.isFrozen(issue)).toBe(true);
-      expect(Object.isFrozen(issue.displayDetails)).toBe(true);
-    });
-
-    it("copies only allowlisted location fields from adversarial input", () => {
-      const issue = createIssue(
-        ISSUE_CODES.staleDuringPlanning,
-        { summary: "The note changed while planning." },
-        {
-          code: ISSUE_CODES.summaryMissing,
-          severity: "warning",
-          stage: "markdown",
-          displayDetails: { summary: "unsafe override" },
-          recoveryActions: [RECOVERY_ACTIONS.cancel],
-          safePathLabel: 123,
-        } as unknown as IssueLocation,
-      );
-
-      expect(issue).toEqual({
-        code: ISSUE_CODES.staleDuringPlanning,
-        severity: "blocker",
-        stage: "planning",
-        displayDetails: { summary: "The note changed while planning." },
-        recoveryActions: [RECOVERY_ACTIONS.previewAgain],
-      });
-    });
-
-    it("deeply clones and freezes constructed issue data", () => {
-      const displayDetails = {
-        summary: "The note changed while planning.",
-        safeContext: "line 3",
+      const frozenMessages = async (name: string, source: string) => {
+        const [result] = await eslint.lintText(source, {
+          filePath: `src/planning/freeze-${name}-probe.ts`,
+        });
+        return result?.messages.filter(
+          ({ ruleId }) => ruleId === "contracts/freeze-contracts",
+        );
       };
-      const sourceRange = {
-        start: { line: 3, column: 2, offset: 14 },
-        end: { line: 3, column: 8, offset: 20 },
-      };
-      const issue = createIssue(
-        ISSUE_CODES.staleDuringPlanning,
-        displayDetails,
-        { sourceRange, safePathLabel: "notes/example.md" },
-      );
-
-      displayDetails.summary = "mutated";
-      sourceRange.start.line = 99;
-      sourceRange.end.offset = 99;
-
-      expect(issue.displayDetails.summary).toBe(
-        "The note changed while planning.",
-      );
-      expect(issue.sourceRange).toEqual({
-        start: { line: 3, column: 2, offset: 14 },
-        end: { line: 3, column: 8, offset: 20 },
-      });
-      expect(Object.isFrozen(issue)).toBe(true);
-      expect(Object.isFrozen(issue.displayDetails)).toBe(true);
-      expect(Object.isFrozen(issue.sourceRange)).toBe(true);
-      expect(Object.isFrozen(issue.sourceRange?.start)).toBe(true);
-      expect(Object.isFrozen(issue.sourceRange?.end)).toBe(true);
-      expect(() => {
-        (issue.displayDetails as { summary: string }).summary = "mutated";
-      }).toThrow(TypeError);
-      expect(() => {
-        (issue as unknown as { code: string }).code =
-          ISSUE_CODES.summaryMissing;
-      }).toThrow(TypeError);
-      expect(() => {
-        (issue.sourceRange as unknown as { start: SourcePoint }).start = {
-          line: 99,
-          column: 99,
-          offset: 99,
-        };
-      }).toThrow(TypeError);
-      expect(() => {
-        (issue.sourceRange?.start as { line: number }).line = 99;
-      }).toThrow(TypeError);
-      expect(() => {
-        (issue.sourceRange?.end as { offset: number }).offset = 99;
-      }).toThrow(TypeError);
-      expect(() => {
-        (
-          ISSUE_CODES as unknown as { staleDuringPlanning: string }
-        ).staleDuringPlanning = "MUTATED";
-      }).toThrow(TypeError);
-      expect(() => {
-        (RECOVERY_ACTIONS as unknown as { previewAgain: string }).previewAgain =
-          "mutated";
-      }).toThrow(TypeError);
+      const rejected = [
+        ["interface", "interface SourceRange {}", "contract"],
+        ["type", 'type ExportPlanState = "ready";', "contract"],
+        ["enum", "enum WorkerRequest { Process }", "contract"],
+        ["class", "class WorkerProcessRequest {}", "contract"],
+        ["module", "namespace PlanIdentity {}", "contract"],
+        ["function", "export function createIssue() {}", "contract"],
+        [
+          "default-function",
+          "export default function matchesPlanIdentity() {}",
+          "contract",
+        ],
+        [
+          "variable",
+          "export const generationTokenBrand = Symbol();",
+          "contract",
+        ],
+        [
+          "alias",
+          "const local = 0; export { local as planIdBrand };",
+          "contract",
+        ],
+        [
+          "destructure",
+          "const source = { ok: 0 }; export const { ok } = source;",
+          "contract",
+        ],
+        ["issue-codes-value", "export const ISSUE_CODES = {};", "contract"],
+        [
+          "issue-registry-value",
+          "export const ISSUE_REGISTRY = {};",
+          "contract",
+        ],
+        [
+          "recovery-actions-value",
+          "export const RECOVERY_ACTIONS = {};",
+          "contract",
+        ],
+        ["limit-value", "export const MDX_RELAY_LIMITS = {};", "contract"],
+        ["limit-type", "export type MdxRelayLimits = {};", "contract"],
+        ["issue-code-literal", 'const code = "INVALID_MDX";', "issueCode"],
+        [
+          "contract-wildcard",
+          'export * from "../contracts/result";',
+          "wildcard",
+        ],
+        [
+          "contract-wildcard-js",
+          'export * from "../contracts/result.js";',
+          "wildcard",
+        ],
+        [
+          "contract-namespace",
+          'export * as contracts from "../contracts/result";',
+          "wildcard",
+        ],
+        [
+          "contract-namespace-js",
+          'export * as contracts from "../contracts/result.js";',
+          "wildcard",
+        ],
+        ["limit-wildcard", 'export * from "../core/limits";', "wildcard"],
+        ["limit-wildcard-js", 'export * from "../core/limits.js";', "wildcard"],
+        [
+          "limit-namespace",
+          'export * as limits from "../core/limits";',
+          "wildcard",
+        ],
+        [
+          "limit-namespace-js",
+          'export * as limits from "../core/limits.js";',
+          "wildcard",
+        ],
+      ] as const;
+      for (const [name, source, messageId] of rejected) {
+        expect(await frozenMessages(name, source), name).toMatchObject([
+          { messageId },
+        ]);
+      }
+      const allowed = [
+        [
+          "canonical-imports",
+          [
+            'import type { SourceRange } from "../contracts/issues.js";',
+            'import { createIssue } from "../contracts/issues.js";',
+            'import { MDX_RELAY_LIMITS } from "../core/limits.js";',
+            "void createIssue; void MDX_RELAY_LIMITS;",
+          ].join("\n"),
+        ],
+        ["unrelated-wildcard", 'export * from "./unrelated.js";'],
+        ["unrelated-namespace", 'export * as unrelated from "./unrelated.js";'],
+        [
+          "unrelated-re-export",
+          'export { local as unrelatedName } from "./unrelated.js";',
+        ],
+        [
+          "ordinary-locals",
+          [
+            "const ok = 1;",
+            "function createIssue() { return ok; }",
+            "const localFunction = function matchesPlanIdentity() { return ok; };",
+            "const localClass = class ExportPlan {};",
+            "void createIssue; void localFunction; void localClass;",
+          ].join("\n"),
+        ],
+        [
+          "unrelated-all-caps",
+          'const UNRELATED_ALL_CAPS = "UNRELATED_ALL_CAPS"; void UNRELATED_ALL_CAPS;',
+        ],
+      ] as const;
+      for (const [name, source] of allowed) {
+        expect(await frozenMessages(name, source), name).toEqual([]);
+      }
     });
 
-    it("lint rejects adversarial contract, issue, and limit redefinitions", async () => {
+    it("rejects static assembly, aliased unsafe casts, and shadowed code objects", async () => {
       const { ESLint } = await import("eslint");
       const eslint = new ESLint({
         cwd: process.cwd(),
@@ -503,31 +846,35 @@ if (import.meta.vitest) {
       });
       const [result] = await eslint.lintText(
         [
-          "export function ok() {}",
-          "export function err() {}",
-          "export function createIssue() {}",
-          "export const generationTokenBrand = Symbol();",
-          "export function matchesPlanIdentity() {}",
-          "export interface SourceRange {}",
-          'export type ExportPlanState = "ready";',
-          "export class WorkerProcessRequest {}",
-          "export const ISSUE_CODES = {};",
-          "export const ISSUE_REGISTRY = {};",
-          "export const MDX_RELAY_LIMITS = {};",
-          "export type MdxRelayLimits = {};",
-          "export const templateCode = `STALE_DURING_PLANNING`;",
-          'export const concatenatedCode = "STALE_" + "DURING_PLANNING";',
+          'import { ISSUE_CODES as CODES, type IssueCode as Code } from "../contracts/issues.js";',
+          'const joined = ["INVALID", "MDX"].join("_");',
+          'const concatenated = "INVALID".concat("_", "MDX");',
+          "const unsafeAs = getCode() as Code;",
+          "const unsafeAngle = <Code>getCode();",
+          "const legalAssertion = CODES.invalidMdx as Code;",
+          "const shadowedLocal = (input: string) => { const ISSUE_CODES = { injected: input }; return ISSUE_CODES.injected as Code; };",
+          "const shadowedParameter = (ISSUE_CODES: { injected: string }) => ISSUE_CODES.injected as Code;",
+          "const handler = (code: Code): Code => code;",
+          "type LocalCode = string; const localCast = getCode() as LocalCode;",
+          "void joined; void concatenated; void unsafeAs; void unsafeAngle;",
+          "void legalAssertion; void shadowedLocal; void shadowedParameter;",
+          "void handler; void localCast;",
         ].join("\n"),
-        { filePath: "src/planning/contract-boundary-probe.ts" },
+        { filePath: "src/planning/issue-code-bypass-probe.ts" },
       );
-      const boundaryMessages = result?.messages.filter(
+      const messages = result?.messages.filter(
         ({ ruleId }) => ruleId === "contracts/freeze-contracts",
       );
-
-      expect(boundaryMessages).toHaveLength(14);
+      expect(
+        messages?.filter(({ messageId }) => messageId === "issueCode"),
+      ).toHaveLength(2);
+      expect(
+        messages?.filter(({ messageId }) => messageId === "issueCodeCast"),
+      ).toHaveLength(4);
+      expect(messages).toHaveLength(6);
     });
 
-    it("lint rejects exported aliases and destructured frozen bindings", async () => {
+    it("allows a canonical ISSUE_CODES alias as assertion provenance", async () => {
       const { ESLint } = await import("eslint");
       const eslint = new ESLint({
         cwd: process.cwd(),
@@ -537,82 +884,24 @@ if (import.meta.vitest) {
       });
       const [result] = await eslint.lintText(
         [
-          "const localOk = () => {};",
-          "export { localOk as ok };",
-          "const source = { err: () => {} };",
-          "export const { err } = source;",
+          'import { ISSUE_CODES as CODES, type IssueCode as Code } from "../contracts/issues.js";',
+          "const legalAssertion = CODES.invalidMdx as Code;",
+          "const handler = (code: Code): Code => code;",
+          "void legalAssertion; void handler;",
         ].join("\n"),
-        { filePath: "src/planning/export-bypass-probe.ts" },
+        { filePath: "src/planning/legal-issue-code-alias-probe.ts" },
       );
-      const rejectedNames = result?.messages
-        .filter(({ ruleId }) => ruleId === "contracts/freeze-contracts")
-        .map(({ message }) => message.split(" is frozen", 1)[0])
-        .sort();
-
-      expect(rejectedNames).toEqual(["err", "ok"]);
+      expect(
+        result?.messages.filter(
+          ({ ruleId }) => ruleId === "contracts/freeze-contracts",
+        ),
+      ).toEqual([]);
     });
 
-    it("lint freezes exported function APIs but allows local declarations", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      const [result] = await eslint.lintText(
-        [
-          "function ok() {}",
-          "function downstream() { function err() {} void err; }",
-          "export function createIssue() {}",
-          "export default function matchesPlanIdentity() {}",
-          "function localAlias() {}",
-          "export { localAlias as generationTokenBrand };",
-          "void ok;",
-          "void downstream;",
-        ].join("\n"),
-        { filePath: "src/planning/function-boundary-probe.ts" },
-      );
-      const rejectedNames = result?.messages
-        .filter(({ ruleId }) => ruleId === "contracts/freeze-contracts")
-        .map(({ message }) => message.split(" is frozen", 1)[0])
-        .sort();
-
-      expect(rejectedNames).toEqual([
-        "createIssue",
-        "generationTokenBrand",
-        "matchesPlanIdentity",
-      ]);
-    });
-
-    it("lint rejects nested destructured frozen bindings", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      const [result] = await eslint.lintText(
-        [
-          "const source = { nested: [] };",
-          "export const { nested: [ok = undefined, ...err], ...SourceRange } = source;",
-        ].join("\n"),
-        { filePath: "src/planning/nested-binding-bypass-probe.ts" },
-      );
-      const rejectedNames = result?.messages
-        .filter(({ ruleId }) => ruleId === "contracts/freeze-contracts")
-        .map(({ message }) => message.split(" is frozen", 1)[0])
-        .sort();
-
-      expect(rejectedNames).toEqual(["SourceRange", "err", "ok"]);
-    });
-
-    it("lint rejects every contract export through independent syntax families", async () => {
+    it("locks the exact public contract export snapshot", async () => {
       const fs = await import("node:fs");
       const path = await import("node:path");
       const ts = await import("typescript");
-      const { ESLint } = await import("eslint");
       const contractsRoot = path.join(process.cwd(), "src", "contracts");
       const contractFiles = fs
         .readdirSync(contractsRoot, { recursive: true, withFileTypes: true })
@@ -624,318 +913,104 @@ if (import.meta.vitest) {
         target: ts.ScriptTarget.ES2022,
       });
       const checker = program.getTypeChecker();
-      // Intentional approval gate: contract API changes must update this exact snapshot.
-      const lockedContractExportNames = [
+      const exportedNames = [
+        ...new Set(
+          contractFiles.flatMap((filename) =>
+            checker
+              .getExportsOfModule(
+                checker.getSymbolAtLocation(program.getSourceFile(filename)!)!,
+              )
+              .map((symbol) => symbol.getName()),
+          ),
+        ),
+      ].sort();
+      // Intentional approval gate: contract API changes update this independent list.
+      expect(exportedNames).toEqual([
+        "ApprovalFingerprint",
         "ApprovalRecord",
-        "CaptureFingerprint",
+        "ApprovalSealedOutputFingerprint",
+        "ApprovalSourceImageFingerprint",
+        "ApprovalSourceNoteFingerprint",
+        "ApprovalTransitionIdentity",
+        "ApprovedPriorTarget",
+        "BlockedPreviewState",
+        "BlockerIssue",
+        "CanonicalDependencySnapshot",
+        "CommitAuthorSnapshot",
+        "DecodedWorkerCompletedEvent",
+        "DecodedWorkerEvent",
         "ExportAction",
         "ExportPlan",
         "ExportPlanState",
         "GenerationToken",
+        "GitFileMode",
+        "GitRuntimeFingerprint",
         "ISSUE_CODES",
         "ISSUE_REGISTRY",
         "IssueCode",
         "IssueDefinition",
+        "IssueDisplayContext",
         "IssueLocation",
         "IssueSeverity",
         "IssueStage",
+        "MdxRelayErrorIssues",
         "MdxRelayIssue",
         "MdxRelayResult",
+        "NoChangesExportPlan",
         "PlanId",
         "PlanIdentity",
         "RECOVERY_ACTIONS",
+        "ReadyExportPlan",
         "RecoveryAction",
         "RedactedDisplayDetails",
+        "RedactedRemoteFingerprint",
+        "RepositoryBranchFingerprint",
         "RepositoryFingerprint",
+        "RepositoryOidFingerprint",
+        "RepositoryRealPaths",
+        "RepositoryStateHashes",
+        "RepositoryTargetFingerprint",
         "Result",
-        "SealedBlob",
+        "SafePathLabel",
+        "SealedOutput",
         "Sha256Digest",
-        "SourceImageFingerprint",
+        "SourceImageMetadata",
+        "SourceNoteMetadata",
         "SourcePoint",
         "SourceRange",
+        "SupportedRepositoryFormChecks",
+        "ValidatedPortableProfileSnapshot",
+        "VerifiedReadyExportPlan",
+        "WarningIssue",
         "WorkerBlockedEvent",
         "WorkerCancelRequest",
         "WorkerCancelledEvent",
-        "WorkerCompletedEvent",
-        "WorkerEvent",
+        "WorkerCompletedWireEvent",
+        "WorkerCompletion",
+        "WorkerGeneratedMdxOutput",
         "WorkerImageInput",
         "WorkerImageOutput",
         "WorkerProcessRequest",
         "WorkerProgressEvent",
         "WorkerRequest",
+        "WorkerSourceNoteInput",
         "WorkerStartedEvent",
+        "WorkerWireEvent",
+        "canonicalDependencySnapshotBrand",
         "createIssue",
         "err",
         "generationTokenBrand",
         "matchesApprovalContext",
         "matchesPlanIdentity",
+        "mdxRelayErr",
+        "mdxRelayOk",
         "ok",
         "planIdBrand",
+        "safePathLabelBrand",
         "sha256Brand",
-      ] as const;
-      const exportedNames = [
-        ...new Set(
-          contractFiles.flatMap((filename) => {
-            const sourceFile = program.getSourceFile(filename);
-            const moduleSymbol =
-              sourceFile && checker.getSymbolAtLocation(sourceFile);
-            return moduleSymbol
-              ? checker
-                  .getExportsOfModule(moduleSymbol)
-                  .map((symbol) => symbol.getName())
-              : [];
-          }),
-        ),
-      ].sort();
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      expect(exportedNames).toEqual(lockedContractExportNames);
-      const probes = {
-        alias: [
-          ...lockedContractExportNames.map(
-            (_, index) => `const localContract${index} = undefined;`,
-          ),
-          `export { ${lockedContractExportNames
-            .map((name, index) => `localContract${index} as ${name}`)
-            .join(", ")} };`,
-        ].join("\n"),
-        destructure: [
-          "const source = {};",
-          `export const { ${lockedContractExportNames.join(", ")} } = source;`,
-        ].join("\n"),
-        direct: lockedContractExportNames
-          .map((name) => `export const ${name} = undefined;`)
-          .join("\n"),
-      };
-
-      for (const [syntaxFamily, probe] of Object.entries(probes)) {
-        const [result] = await eslint.lintText(probe, {
-          filePath: `src/planning/full-contract-${syntaxFamily}-probe.ts`,
-        });
-        const rejectedNames = result?.messages
-          .filter(({ ruleId }) => ruleId === "contracts/freeze-contracts")
-          .map(({ message }) => message.split(" is frozen", 1)[0])
-          .sort();
-
-        expect(rejectedNames, syntaxFamily).toEqual(lockedContractExportNames);
-      }
-    });
-
-    it("lint resolves static issue codes through const aliases", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      const [result] = await eslint.lintText(
-        [
-          'const prefix = "STALE_";',
-          'export const prefixedCode = prefix + "DURING_PLANNING";',
-          "const chainedPrefix = prefix;",
-          'export const chainedCode = chainedPrefix + "DURING_PLANNING";',
-          'const planning = "PLANNING";',
-          "export const templatedCode = `STALE_DURING_${planning}`;",
-        ].join("\n"),
-        { filePath: "src/planning/static-issue-alias-probe.ts" },
-      );
-      const issueMessages = result?.messages.filter(
-        ({ messageId, ruleId }) =>
-          ruleId === "contracts/freeze-contracts" && messageId === "issueCode",
-      );
-
-      expect(issueMessages).toHaveLength(3);
-    });
-
-    it("lint unwraps transparent TypeScript wrappers in static issue codes", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      const [result] = await eslint.lintText(
-        [
-          'const assertedPrefix = "STALE_" as const;',
-          'export const assertedCode = assertedPrefix + "DURING_PLANNING";',
-          'const satisfiedPrefix = "STALE_" satisfies string;',
-          'export const satisfiedCode = satisfiedPrefix + "DURING_PLANNING";',
-          'const angleAssertedPrefix = <const>"STALE_";',
-          'export const angleAssertedCode = angleAssertedPrefix + "DURING_PLANNING";',
-          'const nonNullPrefix = "STALE_"!;',
-          'export const nonNullCode = nonNullPrefix + "DURING_PLANNING";',
-          'const planning = "PLANNING" as const;',
-          "export const templatedCode = `STALE_DURING_${planning}`;",
-        ].join("\n"),
-        { filePath: "src/planning/wrapped-static-issue-probe.ts" },
-      );
-      const issueMessages = result?.messages.filter(
-        ({ messageId, ruleId }) =>
-          ruleId === "contracts/freeze-contracts" && messageId === "issueCode",
-      );
-
-      expect(issueMessages).toHaveLength(5);
-    });
-
-    it("lint does not treat mutable or dynamic issue-code expressions as static", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      const [result] = await eslint.lintText(
-        [
-          'let mutablePrefix = "STALE_";',
-          'export const mutableCode = mutablePrefix + "DURING_PLANNING";',
-          'const reassignedPrefix = "STALE_";',
-          'reassignedPrefix = "OTHER_";',
-          'export const reassignedCode = reassignedPrefix + "DURING_PLANNING";',
-          "const cycleA = cycleB;",
-          "const cycleB = cycleA;",
-          'export const cyclicCode = cycleA + "DURING_PLANNING";',
-          'export const externalCode = externalPrefix + "DURING_PLANNING";',
-          "const dynamicPrefix = getPrefix();",
-          'export const dynamicCode = dynamicPrefix + "DURING_PLANNING";',
-          "const objectPrefix = values.prefix;",
-          'export const propertyCode = objectPrefix + "DURING_PLANNING";',
-          'const conditionalPrefix = enabled ? "STALE_" : "FRESH_";',
-          'export const conditionalCode = conditionalPrefix + "DURING_PLANNING";',
-          "const wrappedDynamicPrefix = getPrefix() as string;",
-          'export const wrappedDynamicCode = wrappedDynamicPrefix + "DURING_PLANNING";',
-          "const satisfiedDynamicPrefix = getPrefix() satisfies string;",
-          'export const satisfiedDynamicCode = satisfiedDynamicPrefix + "DURING_PLANNING";',
-        ].join("\n"),
-        { filePath: "src/planning/dynamic-issue-alias-probe.ts" },
-      );
-      const issueMessages = result?.messages.filter(
-        ({ messageId, ruleId }) =>
-          ruleId === "contracts/freeze-contracts" && messageId === "issueCode",
-      );
-
-      expect(issueMessages).toHaveLength(0);
-    });
-
-    it("lint allows frozen names as ordinary non-exported local bindings", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      const [result] = await eslint.lintText(
-        [
-          "const ok = undefined;",
-          "function downstream() {",
-          "  const ok = undefined;",
-          "  const { err } = { err: undefined };",
-          "  const localHandler = function createIssue() { return err; };",
-          "  const LocalPlan = class ExportPlan {};",
-          "  return { ok, localHandler, LocalPlan };",
-          "}",
-          "try { throw { err: undefined }; } catch ({ err }) { void err; }",
-          "void ok;",
-          "void downstream;",
-        ].join("\n"),
-        { filePath: "src/planning/local-binding-probe.ts" },
-      );
-      const boundaryMessages = result?.messages.filter(
-        ({ ruleId }) => ruleId === "contracts/freeze-contracts",
-      );
-
-      expect(boundaryMessages).toHaveLength(0);
-    });
-
-    it("lint rejects canonical contract wildcard re-exports uniformly", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-
-      for (const [name, probe] of Object.entries({
-        namespace: 'export * as resultContracts from "../contracts/result";',
-        namespaceJs:
-          'export * as resultContracts from "../contracts/result.js";',
-        wildcard: 'export * from "../contracts/result";',
-        wildcardJs: 'export * from "../contracts/result.js";',
-      })) {
-        const [result] = await eslint.lintText(probe, {
-          filePath: `src/planning/canonical-${name}-re-export-probe.ts`,
-        });
-        const boundaryMessages = result?.messages.filter(
-          ({ ruleId }) => ruleId === "contracts/freeze-contracts",
-        );
-
-        expect(boundaryMessages, name).toHaveLength(1);
-      }
-    });
-
-    it("lint allows unrelated wildcard re-exports", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-
-      for (const [name, probe] of Object.entries({
-        local: 'export * from "./unrelated-local-module";',
-        package: 'export * from "some-package";',
-      })) {
-        const [result] = await eslint.lintText(probe, {
-          filePath: `src/planning/unrelated-${name}-re-export-probe.ts`,
-        });
-        const boundaryMessages = result?.messages.filter(
-          ({ ruleId }) => ruleId === "contracts/freeze-contracts",
-        );
-
-        expect(boundaryMessages, name).toHaveLength(0);
-      }
-    });
-
-    it("lint allows downstream imports and references to frozen contracts", async () => {
-      const { ESLint } = await import("eslint");
-      const eslint = new ESLint({
-        cwd: process.cwd(),
-        overrideConfig: {
-          languageOptions: { parserOptions: { projectService: false } },
-        },
-      });
-      const [result] = await eslint.lintText(
-        [
-          'import type { SourceRange, WorkerProcessRequest } from "../contracts";',
-          'import { createIssue, ISSUE_CODES } from "../contracts/issues";',
-          'import { matchesPlanIdentity } from "../contracts/export-plan";',
-          'import { err, ok } from "../contracts/result";',
-          "export type PlanningInput = Readonly<{",
-          "  range: SourceRange;",
-          "  request: WorkerProcessRequest;",
-          "  code: typeof ISSUE_CODES.staleDuringPlanning;",
-          "}>;",
-          "void createIssue;",
-          "void matchesPlanIdentity;",
-          "void err;",
-          "void ok;",
-        ].join("\n"),
-        { filePath: "src/planning/contract-reference-probe.ts" },
-      );
-      const boundaryMessages = result?.messages.filter(
-        ({ ruleId }) => ruleId === "contracts/freeze-contracts",
-      );
-
-      expect(boundaryMessages).toHaveLength(0);
+        "toSafePathLabel",
+        "validatedPortableProfileSnapshotBrand",
+      ]);
     });
   });
 }

@@ -100,7 +100,7 @@ Approval records the sealed plan only after revalidating its repository fingerpr
 
 ### Preview identity
 
-Every planning run has an immutable generation token. Worker events, persisted plan, modal contents, button state, and approval transition must share that token and exact plan ID. Late events from older generations are discarded.
+Every planning run has an immutable generation token. Pre-seal worker requests and events use only that generation token. Once transformation is sealed and a content-derived plan ID exists, the persisted plan, modal contents, button state, and approval transition share both the generation token and exact plan ID. Stale generations and late events are discarded.
 
 ### Private storage
 

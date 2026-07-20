@@ -5,7 +5,6 @@ import eslint from "@eslint/js";
 import ts from "typescript";
 import tseslint from "typescript-eslint";
 
-const ISSUE_CODE_PATTERN = /^[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+$/u;
 const SOURCE_ROOT = path.join(import.meta.dirname, "src");
 const CONTRACTS_ROOT = path.join(SOURCE_ROOT, "contracts");
 const ISSUES_FILE = path.join(CONTRACTS_ROOT, "issues.ts");
@@ -44,6 +43,38 @@ const exportedNames = (filename) => {
 const frozenContractNames = new Set(contractFiles.flatMap(exportedNames));
 const frozenIssueValueNames = new Set(exportedNames(ISSUES_FILE));
 const frozenLimitNames = new Set(exportedNames(LIMITS_FILE));
+const issueCodesModule = exportProgram.getSourceFile(ISSUES_FILE);
+const issueCodesModuleSymbol =
+  issueCodesModule && exportChecker.getSymbolAtLocation(issueCodesModule);
+const issueCodesSymbol = issueCodesModuleSymbol
+  ? exportChecker
+      .getExportsOfModule(issueCodesModuleSymbol)
+      .find((symbol) => symbol.getName() === "ISSUE_CODES")
+  : undefined;
+const issueCodesDeclaration =
+  issueCodesSymbol?.valueDeclaration ?? issueCodesSymbol?.declarations?.[0];
+const canonicalIssueCodes = new Set(
+  issueCodesSymbol && issueCodesDeclaration
+    ? exportChecker
+        .getPropertiesOfType(
+          exportChecker.getTypeOfSymbolAtLocation(
+            issueCodesSymbol,
+            issueCodesDeclaration,
+          ),
+        )
+        .map((property) =>
+          exportChecker.getTypeOfSymbolAtLocation(
+            property,
+            property.valueDeclaration ?? issueCodesDeclaration,
+          ),
+        )
+        .filter((type) => type.isStringLiteral())
+        .map((type) => type.value)
+    : [],
+);
+if (canonicalIssueCodes.size === 0) {
+  throw new Error("Unable to discover ISSUE_CODES string literals");
+}
 
 const staticStringValue = (
   node,
@@ -127,7 +158,111 @@ const staticStringValue = (
     );
     return left === undefined || right === undefined ? undefined : left + right;
   }
+  if (
+    node.type === "CallExpression" &&
+    node.callee.type === "MemberExpression" &&
+    !node.callee.computed &&
+    node.callee.property.type === "Identifier"
+  ) {
+    if (node.callee.property.name === "concat") {
+      const receiver = staticStringValue(
+        node.callee.object,
+        resolvedIdentifiers,
+        constInitializers,
+        visited,
+        depth + 1,
+      );
+      const arguments_ = node.arguments.map((argument) =>
+        argument.type === "SpreadElement"
+          ? undefined
+          : staticStringValue(
+              argument,
+              resolvedIdentifiers,
+              constInitializers,
+              visited,
+              depth + 1,
+            ),
+      );
+      return receiver === undefined ||
+        arguments_.some((value) => value === undefined)
+        ? undefined
+        : receiver + arguments_.join("");
+    }
+    if (node.callee.property.name === "join" && node.arguments.length <= 1) {
+      const values = staticStringArrayValue(
+        node.callee.object,
+        resolvedIdentifiers,
+        constInitializers,
+        visited,
+        depth + 1,
+      );
+      const separator = node.arguments[0]
+        ? node.arguments[0].type === "SpreadElement"
+          ? undefined
+          : staticStringValue(
+              node.arguments[0],
+              resolvedIdentifiers,
+              constInitializers,
+              visited,
+              depth + 1,
+            )
+        : ",";
+      return values === undefined || separator === undefined
+        ? undefined
+        : values.join(separator);
+    }
+  }
   return undefined;
+};
+
+const staticStringArrayValue = (
+  node,
+  resolvedIdentifiers,
+  constInitializers,
+  visited = new Set(),
+  depth = 0,
+) => {
+  if (depth > 100) return undefined;
+  if (node.type === "Identifier") {
+    const variable = resolvedIdentifiers.get(node);
+    const initializer = variable && constInitializers.get(variable);
+    if (!variable || !initializer || visited.has(variable)) return undefined;
+    const nextVisited = new Set(visited);
+    nextVisited.add(variable);
+    return staticStringArrayValue(
+      initializer,
+      resolvedIdentifiers,
+      constInitializers,
+      nextVisited,
+      depth + 1,
+    );
+  }
+  if (
+    node.type === "TSAsExpression" ||
+    node.type === "TSSatisfiesExpression" ||
+    node.type === "TSTypeAssertion"
+  ) {
+    return staticStringArrayValue(
+      node.expression,
+      resolvedIdentifiers,
+      constInitializers,
+      visited,
+      depth + 1,
+    );
+  }
+  if (node.type !== "ArrayExpression") return undefined;
+  const values = node.elements.map((element) =>
+    !element || element.type === "SpreadElement"
+      ? undefined
+      : staticStringValue(
+          element,
+          resolvedIdentifiers,
+          constInitializers,
+          visited,
+          depth + 1,
+        ),
+  );
+  return values.some((value) => value === undefined) ? undefined : values;
 };
 
 const isNestedStaticString = (node) => {
@@ -148,9 +283,11 @@ const freezeContractsRule = {
     messages: {
       issueCode:
         "Reference ISSUE_CODES; issue-code literals are defined only in src/contracts/issues.ts.",
+      issueCodeCast:
+        "IssueCode assertions must preserve provenance from an ISSUE_CODES member expression.",
       contract: "{{name}} is frozen and may only be declared in {{location}}.",
       wildcard:
-        "Wildcard re-exports from src/contracts/** are frozen at the canonical contract boundary.",
+        "Wildcard re-exports from canonical contract and limit modules are frozen at their source boundary.",
     },
     schema: [],
   },
@@ -163,6 +300,37 @@ const freezeContractsRule = {
     const inContracts = filename.startsWith(normalizedContractsRoot);
     const resolvedIdentifiers = new Map();
     const constInitializers = new Map();
+    const issueCodeTypeImportVariables = new Set();
+    const issueCodesValueImportVariables = new Set();
+    const isCanonicalIssuesSource = (source) => {
+      if (typeof source !== "string" || !source.startsWith(".")) return false;
+      const resolvedSource = path.resolve(path.dirname(filename), source);
+      const sourceExtension = path.extname(resolvedSource);
+      const sourceStem = sourceExtension
+        ? resolvedSource.slice(0, -sourceExtension.length)
+        : resolvedSource;
+      const typedExtensionCandidates = {
+        ".cjs": [".cts"],
+        ".js": [".ts", ".tsx"],
+        ".jsx": [".tsx"],
+        ".mjs": [".mts"],
+      }[sourceExtension];
+      const candidates = typedExtensionCandidates
+        ? [
+            resolvedSource,
+            ...typedExtensionCandidates.map(
+              (extension) => `${sourceStem}${extension}`,
+            ),
+          ]
+        : [
+            resolvedSource,
+            `${resolvedSource}.ts`,
+            path.join(resolvedSource, "index.ts"),
+          ];
+      return candidates.some(
+        (candidate) => normalizePath(candidate) === normalizedIssuesFile,
+      );
+    };
     const collectStaticBindings = () => {
       for (const scope of context.sourceCode.scopeManager.scopes) {
         for (const reference of scope.references) {
@@ -172,6 +340,23 @@ const freezeContractsRule = {
         }
         for (const variable of scope.variables) {
           const [definition] = variable.defs;
+          if (
+            variable.defs.length === 1 &&
+            definition?.type === "ImportBinding" &&
+            definition.node.type === "ImportSpecifier" &&
+            isCanonicalIssuesSource(definition.parent.source.value)
+          ) {
+            const importedName =
+              definition.node.imported.type === "Identifier"
+                ? definition.node.imported.name
+                : String(definition.node.imported.value);
+            if (importedName === "IssueCode") {
+              issueCodeTypeImportVariables.add(variable);
+            }
+            if (importedName === "ISSUE_CODES") {
+              issueCodesValueImportVariables.add(variable);
+            }
+          }
           if (
             variable.defs.length !== 1 ||
             definition?.type !== "Variable" ||
@@ -215,7 +400,7 @@ const freezeContractsRule = {
       }
     };
 
-    const isCanonicalContractSource = (source) => {
+    const isCanonicalWildcardSource = (source) => {
       if (typeof source !== "string" || !source.startsWith(".")) {
         return false;
       }
@@ -246,7 +431,8 @@ const freezeContractsRule = {
       return candidates.some((candidate) => {
         const normalizedCandidate = normalizePath(candidate);
         return (
-          normalizedCandidate.startsWith(normalizedContractsRoot) &&
+          (normalizedCandidate.startsWith(normalizedContractsRoot) ||
+            normalizedCandidate === normalizedLimitsFile) &&
           fs.existsSync(candidate) &&
           fs.statSync(candidate).isFile()
         );
@@ -296,8 +482,41 @@ const freezeContractsRule = {
         resolvedIdentifiers,
         constInitializers,
       );
-      if (value !== undefined && ISSUE_CODE_PATTERN.test(value)) {
+      if (value !== undefined && canonicalIssueCodes.has(value)) {
         context.report({ node, messageId: "issueCode" });
+      }
+    };
+
+    const isIssueCodeType = (typeAnnotation) =>
+      typeAnnotation?.type === "TSTypeReference" &&
+      typeAnnotation.typeName.type === "Identifier" &&
+      issueCodeTypeImportVariables.has(
+        resolvedIdentifiers.get(typeAnnotation.typeName),
+      );
+    const isIssueCodesMember = (expression) => {
+      while (
+        expression.type === "TSAsExpression" ||
+        expression.type === "TSSatisfiesExpression" ||
+        expression.type === "TSNonNullExpression" ||
+        expression.type === "ChainExpression"
+      ) {
+        expression = expression.expression;
+      }
+      return (
+        expression.type === "MemberExpression" &&
+        expression.object.type === "Identifier" &&
+        issueCodesValueImportVariables.has(
+          resolvedIdentifiers.get(expression.object),
+        )
+      );
+    };
+    const checkIssueCodeAssertion = (node) => {
+      if (
+        filename !== normalizedIssuesFile &&
+        isIssueCodeType(node.typeAnnotation) &&
+        !isIssueCodesMember(node.expression)
+      ) {
+        context.report({ node, messageId: "issueCodeCast" });
       }
     };
 
@@ -306,6 +525,9 @@ const freezeContractsRule = {
       Literal: checkStaticIssueCode,
       TemplateLiteral: checkStaticIssueCode,
       BinaryExpression: checkStaticIssueCode,
+      CallExpression: checkStaticIssueCode,
+      TSAsExpression: checkIssueCodeAssertion,
+      TSTypeAssertion: checkIssueCodeAssertion,
       ExportNamedDeclaration(node) {
         for (const specifier of node.specifiers) {
           if (specifier.exported) {
@@ -318,7 +540,7 @@ const freezeContractsRule = {
         }
       },
       ExportAllDeclaration(node) {
-        if (isCanonicalContractSource(node.source.value)) {
+        if (isCanonicalWildcardSource(node.source.value)) {
           context.report({ node, messageId: "wildcard" });
         }
       },

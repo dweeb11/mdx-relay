@@ -3,6 +3,7 @@
 ## Orientation
 
 Read before acting:
+
 1. `PITCH.md` — the human's design vision (never modify)
 2. `WORKING_AGREEMENT.md` — development process
 3. `WORKING_AGREEMENT.apps.md` — app-specific conventions
@@ -23,4 +24,4 @@ MDX Relay is a desktop Obsidian plugin written in TypeScript. It converts approv
 
 ## Build & Test
 
-No package or test runner is configured yet. The first engineering slice must add and verify exact commands.
+Follow `AGENTS.md` for the current package, test, build, and verification commands. Run `npm run verify` before claiming completion.
