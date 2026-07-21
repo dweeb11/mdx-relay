@@ -302,6 +302,7 @@ const freezeContractsRule = {
     const constInitializers = new Map();
     const issueCodeTypeImportVariables = new Set();
     const issueCodesValueImportVariables = new Set();
+    const canonicalImportedNames = new Map();
     const isCanonicalIssuesSource = (source) => {
       if (typeof source !== "string" || !source.startsWith(".")) return false;
       const resolvedSource = path.resolve(path.dirname(filename), source);
@@ -356,6 +357,19 @@ const freezeContractsRule = {
             if (importedName === "ISSUE_CODES") {
               issueCodesValueImportVariables.add(variable);
             }
+          }
+          if (
+            variable.defs.length === 1 &&
+            definition?.type === "ImportBinding" &&
+            definition.node.type === "ImportSpecifier" &&
+            isCanonicalWildcardSource(definition.parent.source.value)
+          ) {
+            canonicalImportedNames.set(
+              variable,
+              definition.node.imported.type === "Identifier"
+                ? definition.node.imported.name
+                : String(definition.node.imported.value),
+            );
           }
           if (
             variable.defs.length !== 1 ||
@@ -529,13 +543,35 @@ const freezeContractsRule = {
       TSAsExpression: checkIssueCodeAssertion,
       TSTypeAssertion: checkIssueCodeAssertion,
       ExportNamedDeclaration(node) {
+        const fromCanonicalModule =
+          node.source != null && isCanonicalWildcardSource(node.source.value);
         for (const specifier of node.specifiers) {
-          if (specifier.exported) {
-            const name =
-              specifier.exported.type === "Identifier"
-                ? specifier.exported.name
-                : String(specifier.exported.value);
-            reportName(specifier.exported, name);
+          const exportedName = specifier.exported
+            ? specifier.exported.type === "Identifier"
+              ? specifier.exported.name
+              : String(specifier.exported.value)
+            : undefined;
+          if (exportedName !== undefined) {
+            reportName(specifier.exported, exportedName);
+          }
+          if (!specifier.local) {
+            continue;
+          }
+          const localName =
+            specifier.local.type === "Identifier"
+              ? specifier.local.name
+              : String(specifier.local.value);
+          if (fromCanonicalModule) {
+            if (localName !== exportedName) {
+              reportName(specifier.local, localName);
+            }
+          } else if (node.source == null) {
+            const variable = resolvedIdentifiers.get(specifier.local);
+            const importedName =
+              variable && canonicalImportedNames.get(variable);
+            if (importedName !== undefined && importedName !== exportedName) {
+              reportName(specifier.local, importedName);
+            }
           }
         }
       },

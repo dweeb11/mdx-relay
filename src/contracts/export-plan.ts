@@ -1,7 +1,11 @@
 import {
   createIssue,
   ISSUE_CODES,
+  ISSUE_REGISTRY,
+  toSafePathLabel,
   type BlockerIssue,
+  type SourcePoint,
+  type SourceRange,
   type WarningIssue,
 } from "./issues";
 
@@ -60,6 +64,7 @@ export type ApprovedPriorTarget =
 interface ExportActionFields {
   readonly documentOrder: number;
   readonly targetPath: string;
+  /** Updates must preserve the approved prior mode; creates seal "100644". */
   readonly expectedGitMode: GitFileMode;
   readonly sealedOutput: SealedOutput;
   readonly sourceOccurrence: number;
@@ -482,6 +487,9 @@ const isIsoUtc = (value: unknown): value is string => {
     new Date(milliseconds).toISOString() === value
   );
 };
+/** Win32 reserves device base names and trailing dot/space path aliases. */
+const windowsReservedSegmentPattern =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 const hasPortableRelativePathShape = (value: unknown): value is string => {
   if (
     !isNonemptyString(value) ||
@@ -500,7 +508,13 @@ const hasPortableRelativePathShape = (value: unknown): value is string => {
   return value
     .split("/")
     .every(
-      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+      (segment) =>
+        segment.length > 0 &&
+        segment !== "." &&
+        segment !== ".." &&
+        !segment.endsWith(".") &&
+        !segment.endsWith(" ") &&
+        !windowsReservedSegmentPattern.test(segment),
     );
 };
 const isPlanRelativePath = (value: unknown): value is string =>
@@ -621,6 +635,62 @@ const isExportAction = (value: unknown): value is ExportAction =>
   isPriorTarget(value.approvedPriorTarget) &&
   ((value.kind === "create" && value.approvedPriorTarget.state === "absent") ||
     (value.kind === "update" && value.approvedPriorTarget.state === "file"));
+
+const isSourcePoint = (value: unknown): value is SourcePoint =>
+  exactObject(value, ["line", "column", "offset"]) &&
+  isNonnegativeInteger(value.line) &&
+  isNonnegativeInteger(value.column) &&
+  isNonnegativeInteger(value.offset);
+const isSourceRange = (value: unknown): value is SourceRange => {
+  if (!exactObject(value, ["start", "end"])) return false;
+  const { start, end } = value;
+  if (!isSourcePoint(start) || !isSourcePoint(end)) return false;
+  return (
+    end.offset >= start.offset &&
+    (end.line > start.line ||
+      (end.line === start.line && end.column >= start.column))
+  );
+};
+/** Stored warning issues must equal registry-owned policy exactly. */
+const isWarningIssue = (value: unknown): value is WarningIssue => {
+  if (!isRecord(value) || typeof value.code !== "string") return false;
+  if (!Object.prototype.hasOwnProperty.call(ISSUE_REGISTRY, value.code))
+    return false;
+  const definition = ISSUE_REGISTRY[value.code as keyof typeof ISSUE_REGISTRY];
+  if (
+    definition.severity !== "warning" ||
+    !hasExactKeys(value, [
+      "code",
+      "severity",
+      "stage",
+      "displayDetails",
+      "recoveryActions",
+      ...("sourceRange" in value ? ["sourceRange"] : []),
+      ...("safePathLabel" in value ? ["safePathLabel"] : []),
+    ]) ||
+    value.severity !== definition.severity ||
+    value.stage !== definition.stage ||
+    !sameValue(value.recoveryActions, [...definition.recoveryActions])
+  )
+    return false;
+  const details = value.displayDetails;
+  if (
+    !isRecord(details) ||
+    !hasExactKeys(details, [
+      "summary",
+      ...("count" in details ? ["count"] : []),
+    ]) ||
+    details.summary !== definition.summary ||
+    ("count" in details && !isNonnegativeInteger(details.count))
+  )
+    return false;
+  if ("sourceRange" in value && !isSourceRange(value.sourceRange)) return false;
+  return (
+    !("safePathLabel" in value) ||
+    (typeof value.safePathLabel === "string" &&
+      toSafePathLabel(value.safePathLabel) === value.safePathLabel)
+  );
+};
 
 export function matchesPlanIdentity(
   actual: unknown,
@@ -772,18 +842,16 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
     if (
       actionTargetPaths.has(action.targetPath) ||
       target === undefined ||
-      !sameValue(target.approvedPriorTarget, action.approvedPriorTarget)
+      !sameValue(target.approvedPriorTarget, action.approvedPriorTarget) ||
+      (action.approvedPriorTarget.state === "file"
+        ? action.expectedGitMode !== action.approvedPriorTarget.gitMode
+        : action.expectedGitMode !== "100644")
     )
       return false;
     actionTargetPaths.add(action.targetPath);
   }
 
-  if (
-    !Array.isArray(value.issues) ||
-    !value.issues.every(
-      (issue) => isRecord(issue) && issue.severity === "warning",
-    )
-  )
+  if (!Array.isArray(value.issues) || !value.issues.every(isWarningIssue))
     return false;
   if (
     !exactObject(value.author, ["name", "email"]) ||
@@ -1762,6 +1830,13 @@ if (import.meta.vitest) {
         "outputs/\u0000blob",
         "/absolute/blob",
         "plans/plan-1/blob",
+        "outputs/CON",
+        "outputs/con.blob",
+        "nul/blob",
+        "outputs/com1",
+        "outputs/lpt9.blob",
+        "outputs/blob.",
+        "outputs/blob ",
       ] as const;
 
       for (const planRelativePath of invalidPaths) {
@@ -1808,6 +1883,14 @@ if (import.meta.vitest) {
         "/tmp/post.mdx",
         ".git/config",
         "content/.GIT/config",
+        "content/CON",
+        "content/con.mdx",
+        "AUX/post.mdx",
+        "content/prn.txt",
+        "content/com9",
+        "content/lpt1.mdx",
+        "content/post.mdx.",
+        "content/post.mdx ",
       ] as const;
 
       for (const targetPath of invalidPaths) {
@@ -1827,6 +1910,157 @@ if (import.meta.vitest) {
             now,
           ),
           targetPath,
+        ).toBe(false);
+      }
+    });
+
+    it("binds expected git modes to the approved prior target modes", () => {
+      const transition = { generationToken, planId };
+      const now = "2026-07-20T01:00:00.000Z";
+      const withActionMode = (
+        actionIndex: number,
+        expectedGitMode: GitFileMode,
+      ): VerifiedReadyExportPlan => {
+        const plan = structuredClone(
+          completeReadyPlan(),
+        ) as VerifiedReadyExportPlan;
+        (
+          plan.actions[actionIndex] as unknown as {
+            expectedGitMode: GitFileMode;
+          }
+        ).expectedGitMode = expectedGitMode;
+        return plan;
+      };
+      const chmodCreate = withActionMode(0, "100755");
+      expect(
+        matchesApprovalContext(
+          chmodCreate,
+          transition,
+          chmodCreate.approvalFingerprint,
+          now,
+        ),
+      ).toBe(false);
+      const chmodUpdate = withActionMode(1, "100755");
+      expect(
+        matchesApprovalContext(
+          chmodUpdate,
+          transition,
+          chmodUpdate.approvalFingerprint,
+          now,
+        ),
+      ).toBe(false);
+      const executableUpdate = structuredClone(
+        completeReadyPlan(),
+      ) as VerifiedReadyExportPlan;
+      const setPriorMode = (
+        target: RepositoryTargetFingerprint | undefined,
+      ) => {
+        (target?.approvedPriorTarget as { gitMode: GitFileMode }).gitMode =
+          "100755";
+      };
+      setPriorMode(executableUpdate.repositoryFingerprint.targets[1]);
+      setPriorMode(
+        executableUpdate.approvalFingerprint.repositoryFingerprint.targets[1],
+      );
+      const updateAction = executableUpdate.actions[1] as unknown as {
+        expectedGitMode: GitFileMode;
+        approvedPriorTarget: { gitMode: GitFileMode };
+      };
+      updateAction.approvedPriorTarget.gitMode = "100755";
+      updateAction.expectedGitMode = "100755";
+      expect(
+        matchesApprovalContext(
+          executableUpdate,
+          transition,
+          executableUpdate.approvalFingerprint,
+          now,
+        ),
+      ).toBe(true);
+    });
+
+    it("validates warning issues against the registry before trusting plans", () => {
+      const transition = { generationToken, planId };
+      const now = "2026-07-20T01:00:00.000Z";
+      const withIssues = (issues: unknown): VerifiedReadyExportPlan =>
+        ({ ...completeReadyPlan(), issues }) as VerifiedReadyExportPlan;
+      const plainWarning = createIssue(ISSUE_CODES.summaryMissing);
+      const decoratedWarning = createIssue(
+        ISSUE_CODES.wikilinksFlattened,
+        { count: 2 },
+        {
+          sourceRange: {
+            start: { line: 1, column: 0, offset: 0 },
+            end: { line: 1, column: 4, offset: 4 },
+          },
+          safePathLabel: "notes/example.md",
+        },
+      );
+      expect(
+        matchesApprovalContext(
+          withIssues([plainWarning, decoratedWarning]),
+          transition,
+          approvalFingerprint(),
+          now,
+        ),
+      ).toBe(true);
+      const blocker = createBlocker();
+      const rejectedIssueLists: readonly (readonly unknown[])[] = [
+        [{ severity: "warning", displayDetails: { summary: "secret" } }],
+        [{ ...plainWarning, displayDetails: { summary: "attacker text" } }],
+        [
+          {
+            ...decoratedWarning,
+            displayDetails: { ...decoratedWarning.displayDetails, count: -1 },
+          },
+        ],
+        [
+          {
+            ...plainWarning,
+            displayDetails: {
+              ...plainWarning.displayDetails,
+              leaked: "secret",
+            },
+          },
+        ],
+        [{ ...plainWarning, code: blocker.code }],
+        [{ ...blocker, severity: "warning" }],
+        [{ ...plainWarning, stage: "git" }],
+        [{ ...plainWarning, recoveryActions: [] }],
+        [{ ...plainWarning, extra: true }],
+        [{ ...plainWarning, sourceRange: {} }],
+        [{ ...plainWarning, sourceRange: { start: {}, end: {} } }],
+        [
+          {
+            ...plainWarning,
+            sourceRange: {
+              start: { line: 2, column: 0, offset: 9 },
+              end: { line: 1, column: 0, offset: 3 },
+            },
+          },
+        ],
+        [
+          {
+            ...plainWarning,
+            sourceRange: {
+              start: { line: 1, column: 5, offset: 3 },
+              end: { line: 1, column: 2, offset: 9 },
+            },
+          },
+        ],
+        [{ ...plainWarning, safePathLabel: "../secret" }],
+        [{ ...plainWarning, safePathLabel: 7 }],
+        [null],
+        ["warning"],
+      ];
+      for (const issues of rejectedIssueLists) {
+        expect(
+          matchesApprovalContext(
+            withIssues(issues),
+            transition,
+            approvalFingerprint(),
+            now,
+          ),
+          JSON.stringify(issues),
         ).toBe(false);
       }
     });

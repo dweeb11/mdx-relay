@@ -753,6 +753,26 @@ if (import.meta.vitest) {
         ["limit-type", "export type MdxRelayLimits = {};", "contract"],
         ["issue-code-literal", 'const code = "INVALID_MDX";', "issueCode"],
         [
+          "contract-alias-re-export",
+          'export { createIssue as makeIssue } from "../contracts/issues.js";',
+          "contract",
+        ],
+        [
+          "limit-alias-re-export",
+          'export { MDX_RELAY_LIMITS as relayLimits } from "../core/limits.js";',
+          "contract",
+        ],
+        [
+          "contract-import-alias-export",
+          'import { createIssue as ci } from "../contracts/issues.js"; export { ci as makeIssue };',
+          "contract",
+        ],
+        [
+          "contract-import-export-as-imported-alias",
+          'import { createIssue as ci } from "../contracts/issues.js"; export { ci };',
+          "contract",
+        ],
+        [
           "contract-wildcard",
           'export * from "../contracts/result";',
           "wildcard",

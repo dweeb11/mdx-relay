@@ -102,16 +102,25 @@ export interface WorkerCompletedWireEvent extends GenerationBoundEvent {
   readonly result: unknown;
 }
 
+declare const decodedWorkerEventBrand: unique symbol;
+/** Nominal decoder authority; only the future T3 decoder brands events. */
+type DecodedWorkerEventAuthority = {
+  readonly [decodedWorkerEventBrand]: "DecodedWorkerEvent";
+};
+
+interface DecodedWorkerCompletedEventFields extends GenerationBoundEvent {
+  readonly type: "completed";
+  /** A blocker-first error arm never exposes trusted partial output. */
+  readonly result: MdxRelayResult<WorkerCompletion>;
+}
+
 /**
  * Host-side completion produced only after the future T3 decoder validates the
  * event shape, severity channels, byte lengths and hashes, then creates or
  * restores the nominal boundary result with the mdxRelay constructors.
  */
-export interface DecodedWorkerCompletedEvent extends GenerationBoundEvent {
-  readonly type: "completed";
-  /** A blocker-first error arm never exposes trusted partial output. */
-  readonly result: MdxRelayResult<WorkerCompletion>;
-}
+export type DecodedWorkerCompletedEvent = DecodedWorkerCompletedEventFields &
+  DecodedWorkerEventAuthority;
 
 /** Parent-synthesized terminal failure when no trustworthy worker Result exists. */
 export interface WorkerBlockedEvent extends GenerationBoundEvent {
@@ -135,15 +144,17 @@ export type WorkerWireEvent =
 /**
  * Host-facing union returned by the future T3 decoder, never by annotating
  * MessageEvent.data. The decoder validates shape, severity channels, byte
- * lengths and hashes, and creates/restores nominal boundary results. All
- * pre-seal variants remain generationToken-only.
+ * lengths and hashes, and creates/restores nominal boundary results. Every
+ * arm carries the private decoded brand, so raw wire events (including
+ * narrowed non-completion arms) are never assignable without the decoder.
+ * All pre-seal variants remain generationToken-only.
  */
 export type DecodedWorkerEvent =
-  | WorkerStartedEvent
-  | WorkerProgressEvent
+  | (WorkerStartedEvent & DecodedWorkerEventAuthority)
+  | (WorkerProgressEvent & DecodedWorkerEventAuthority)
   | DecodedWorkerCompletedEvent
-  | WorkerBlockedEvent
-  | WorkerCancelledEvent;
+  | (WorkerBlockedEvent & DecodedWorkerEventAuthority)
+  | (WorkerCancelledEvent & DecodedWorkerEventAuthority);
 
 if (import.meta.vitest) {
   const { describe, expect, it } = import.meta.vitest;
@@ -151,6 +162,12 @@ if (import.meta.vitest) {
   const generationToken = "generation-1" as GenerationToken;
   const noteLabel = toSafePathLabel("notes/example.md") as SafePathLabel;
   const imageLabel = toSafePathLabel("assets/image.png") as SafePathLabel;
+  /** Test-only stand-in for the branding step of the future T3 decoder. */
+  const brandDecoded = (event: WorkerWireEvent): DecodedWorkerEvent =>
+    event as DecodedWorkerEvent;
+  const brandDecodedCompleted = (
+    event: DecodedWorkerCompletedEventFields,
+  ): DecodedWorkerCompletedEvent => event as DecodedWorkerCompletedEvent;
 
   const processRequest = (): WorkerProcessRequest => ({
     type: "process-plan",
@@ -216,8 +233,8 @@ if (import.meta.vitest) {
         warnings: [createIssue(ISSUE_CODES.summaryMissing)],
       };
       const events: readonly DecodedWorkerEvent[] = [
-        { type: "started", generationToken, imageCount: 1 },
-        {
+        brandDecoded({ type: "started", generationToken, imageCount: 1 }),
+        brandDecoded({
           type: "progress",
           generationToken,
           sourceId: "image-1",
@@ -226,16 +243,20 @@ if (import.meta.vitest) {
           totalImages: 1,
           elapsedMs: 10,
           remainingPlanBudgetMs: 990,
-        },
-        { type: "completed", generationToken, result: mdxRelayOk(completion) },
-        {
+        }),
+        brandDecoded({
+          type: "completed",
+          generationToken,
+          result: mdxRelayOk(completion),
+        }),
+        brandDecoded({
           type: "blocked",
           generationToken,
           issues: [createIssue(ISSUE_CODES.workerCrashed)],
-        },
-        { type: "cancelled", generationToken },
+        }),
+        brandDecoded({ type: "cancelled", generationToken }),
       ];
-      const invalidEvent: DecodedWorkerEvent = {
+      const invalidEvent: WorkerWireEvent = {
         type: "cancelled",
         generationToken,
         // @ts-expect-error pre-seal worker events cannot carry a planId
@@ -265,17 +286,17 @@ if (import.meta.vitest) {
         transformedImages: [],
         warnings: [warning],
       } satisfies WorkerCompletion;
-      const success = {
+      const success = brandDecodedCompleted({
         type: "completed",
         generationToken,
         result: mdxRelayOk(completion),
-      } satisfies DecodedWorkerCompletedEvent;
+      });
       const blocker = createIssue(ISSUE_CODES.imageDecodeFailed);
-      const failure = {
+      const failure = brandDecodedCompleted({
         type: "completed",
         generationToken,
         result: mdxRelayErr([blocker, warning]),
-      } satisfies DecodedWorkerCompletedEvent;
+      });
       expect(success.result.ok).toBe(true);
       expect(failure.result.ok).toBe(false);
       if (!failure.result.ok) expect(failure.result.error[0]).toBe(blocker);
@@ -291,11 +312,11 @@ if (import.meta.vitest) {
         transformedImages: [],
         warnings: [createIssue(ISSUE_CODES.summaryMissing)],
       };
-      const event = {
+      const event = brandDecodedCompleted({
         type: "completed",
         generationToken,
         result: mdxRelayOk(completion),
-      } satisfies DecodedWorkerCompletedEvent;
+      });
       const cloned: WorkerCompletedWireEvent = structuredClone(event);
       const messageEvent = { data: cloned } as MessageEvent<WorkerWireEvent>;
       // @ts-expect-error raw structured-clone data cannot satisfy decoded authority
@@ -325,6 +346,49 @@ if (import.meta.vitest) {
       expect(Object.getOwnPropertySymbols(untrustedResult)).toHaveLength(0);
       void decodedCompletion;
       void decodedEvent;
+    });
+
+    it("keeps every raw wire event arm unassignable to decoded authority", () => {
+      const wireEvents = {
+        started: { type: "started", generationToken, imageCount: 1 },
+        progress: {
+          type: "progress",
+          generationToken,
+          sourceId: "image-1",
+          imageIndex: 0,
+          completedImages: 0,
+          totalImages: 1,
+          elapsedMs: 10,
+          remainingPlanBudgetMs: 990,
+        },
+        blocked: {
+          type: "blocked",
+          generationToken,
+          issues: [createIssue(ISSUE_CODES.workerCrashed)],
+        },
+        cancelled: { type: "cancelled", generationToken },
+      } as const satisfies Record<string, WorkerWireEvent>;
+      // @ts-expect-error wire started events lack decoded authority
+      const started: DecodedWorkerEvent = wireEvents.started;
+      // @ts-expect-error wire progress events lack decoded authority
+      const progress: DecodedWorkerEvent = wireEvents.progress;
+      // @ts-expect-error wire blocked events lack decoded authority
+      const blocked: DecodedWorkerEvent = wireEvents.blocked;
+      // @ts-expect-error wire cancelled events lack decoded authority
+      const cancelled: DecodedWorkerEvent = wireEvents.cancelled;
+      void started;
+      void progress;
+      void blocked;
+      void cancelled;
+      const messageEvent = {
+        data: wireEvents.started,
+      } as MessageEvent<WorkerWireEvent>;
+      if (messageEvent.data.type === "started") {
+        // @ts-expect-error narrowed MessageEvent data still lacks authority
+        const narrowed: DecodedWorkerEvent = messageEvent.data;
+        void narrowed;
+      }
+      expect(brandDecoded(wireEvents.started).type).toBe("started");
     });
 
     it("enforces warning and blocker channels at compile time", () => {

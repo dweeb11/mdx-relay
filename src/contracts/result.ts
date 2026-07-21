@@ -1,6 +1,7 @@
 import {
   createIssue,
   ISSUE_CODES,
+  ISSUE_REGISTRY,
   type BlockerIssue,
   type MdxRelayIssue,
 } from "./issues";
@@ -48,10 +49,33 @@ export function mdxRelayOk<T>(value: T): MdxRelayResult<T> {
   return brandAndFreeze({ ok: true as const, value });
 }
 
-/** Clones and freezes the nonempty blocker-first issue tuple. */
+const isRegistryCoherentIssue = (value: unknown): value is MdxRelayIssue => {
+  if (value === null || typeof value !== "object") return false;
+  const { code, severity } = value as { code?: unknown; severity?: unknown };
+  return (
+    typeof code === "string" &&
+    Object.prototype.hasOwnProperty.call(ISSUE_REGISTRY, code) &&
+    ISSUE_REGISTRY[code as keyof typeof ISSUE_REGISTRY].severity === severity
+  );
+};
+
+/**
+ * Clones and freezes the nonempty blocker-first issue tuple. The invariant is
+ * enforced at runtime so unvalidated failure data cannot be branded trusted.
+ */
 export function mdxRelayErr(
   issues: MdxRelayErrorIssues,
 ): MdxRelayResult<never> {
+  if (
+    !Array.isArray(issues) ||
+    issues.length === 0 ||
+    !issues.every(isRegistryCoherentIssue) ||
+    issues[0].severity !== "blocker"
+  ) {
+    throw new TypeError(
+      "mdxRelayErr requires registry-coherent issues led by a blocker.",
+    );
+  }
   const stableIssues = Object.freeze([...issues]) as MdxRelayErrorIssues;
   return brandAndFreeze({ ok: false as const, error: stableIssues });
 }
@@ -81,6 +105,26 @@ if (import.meta.vitest) {
       void invalidSuccess;
       expect(validFailure.ok).toBe(false);
       expect(validSuccess.ok).toBe(true);
+    });
+
+    it("enforces the blocker-first invariant at runtime before branding", () => {
+      const blocker = createIssue(ISSUE_CODES.invalidMdx);
+      const warning = createIssue(ISSUE_CODES.summaryMissing);
+      const forced = (issues: unknown) => () =>
+        mdxRelayErr(issues as MdxRelayErrorIssues);
+      expect(forced("blocked")).toThrow(TypeError);
+      expect(forced([])).toThrow(TypeError);
+      expect(forced([warning])).toThrow(TypeError);
+      expect(forced([warning, blocker])).toThrow(TypeError);
+      expect(forced([null])).toThrow(TypeError);
+      expect(forced([{ ...blocker, severity: "warning" }])).toThrow(TypeError);
+      expect(forced([{ ...blocker, code: "NOT_IN_REGISTRY" }])).toThrow(
+        TypeError,
+      );
+      expect(forced([blocker, { severity: "warning" }])).toThrow(TypeError);
+      const failure = mdxRelayErr([blocker, warning]);
+      expect(failure.ok).toBe(false);
+      if (!failure.ok) expect(failure.error).toEqual([blocker, warning]);
     });
 
     it("stabilizes the blocker-first issue tuple without retaining aliases", () => {
