@@ -195,6 +195,7 @@ describe("profile resolution", () => {
     "git@example.invalid:site.git#fragment",
     String.raw`https:\\writer:token@example.invalid\\site.git`,
     String.raw`ssh:\\writer:token@example.invalid\\site.git`,
+    "writer:token@example.invalid/site.git",
     "writer:token@example.invalid:site.git",
   ])("rejects credential-bearing binding URLs", (repositoryUrl) => {
     expectBlocked(

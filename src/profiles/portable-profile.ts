@@ -150,6 +150,7 @@ export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
 
   if (/^[a-z]:[\\/]/iu.test(value)) return false;
   if (value.includes("\\")) return false;
+  if (/^[^/@:\s]+:[^@/\s]+@[^/@:\s]+\//u.test(value)) return true;
   if (/^[^/@:\s]+:[^@/\s]+@[^/@:\s]+:[^\\?#\s]+$/u.test(value)) return true;
   if (/^(?:[^/@:\s]+@)?[^/@:\s]+:[^\\?#\s]+[?#].*$/u.test(value)) return true;
   return false;

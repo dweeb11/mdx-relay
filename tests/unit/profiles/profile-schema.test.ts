@@ -181,6 +181,7 @@ describe("portable profile schema", () => {
     "git://token@example.invalid/site.git",
     "git@example.invalid:site.git#fragment",
     String.raw`https:\\writer:token@example.invalid\\site.git`,
+    "writer:token@example.invalid/site.git",
     "writer:token@example.invalid:site.git",
   ])("rejects credential-bearing repository URLs", (repositoryUrl) => {
     const profile = cloneBuiltin();
