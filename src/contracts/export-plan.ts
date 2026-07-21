@@ -5,24 +5,24 @@ import {
   type WarningIssue,
 } from "./issues";
 
-export declare const generationTokenBrand: unique symbol;
+declare const generationTokenBrand: unique symbol;
 export type GenerationToken = string & {
   readonly [generationTokenBrand]: "GenerationToken";
 };
-export declare const planIdBrand: unique symbol;
+declare const planIdBrand: unique symbol;
 export type PlanId = string & { readonly [planIdBrand]: "PlanId" };
 export interface PlanIdentity {
   readonly generationToken: GenerationToken;
   readonly planId: PlanId;
 }
-export declare const sha256Brand: unique symbol;
+declare const sha256Brand: unique symbol;
 export type Sha256Digest = string & { readonly [sha256Brand]: "Sha256Digest" };
 
-export declare const validatedPortableProfileSnapshotBrand: unique symbol;
+declare const validatedPortableProfileSnapshotBrand: unique symbol;
 export type ValidatedPortableProfileSnapshot = string & {
   readonly [validatedPortableProfileSnapshotBrand]: "ValidatedPortableProfileSnapshot";
 };
-export declare const canonicalDependencySnapshotBrand: unique symbol;
+declare const canonicalDependencySnapshotBrand: unique symbol;
 export type CanonicalDependencySnapshot = string & {
   readonly [canonicalDependencySnapshotBrand]: "CanonicalDependencySnapshot";
 };

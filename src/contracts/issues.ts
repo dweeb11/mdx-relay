@@ -400,7 +400,7 @@ export interface SourceRange {
   readonly end: SourcePoint;
 }
 
-export declare const safePathLabelBrand: unique symbol;
+declare const safePathLabelBrand: unique symbol;
 export type SafePathLabel = string & {
   readonly [safePathLabelBrand]: "SafePathLabel";
 };
@@ -734,16 +734,6 @@ if (import.meta.vitest) {
           "contract",
         ],
         [
-          "variable",
-          "export const generationTokenBrand = Symbol();",
-          "contract",
-        ],
-        [
-          "alias",
-          "const local = 0; export { local as planIdBrand };",
-          "contract",
-        ],
-        [
           "destructure",
           "const source = { ok: 0 }; export const { ok } = source;",
           "contract",
@@ -827,6 +817,14 @@ if (import.meta.vitest) {
           ].join("\n"),
         ],
         [
+          "private-brand-name-value",
+          "export const generationTokenBrand = Symbol();",
+        ],
+        [
+          "private-brand-name-alias",
+          "const local = 0; export { local as planIdBrand };",
+        ],
+        [
           "unrelated-all-caps",
           'const UNRELATED_ALL_CAPS = "UNRELATED_ALL_CAPS"; void UNRELATED_ALL_CAPS;',
         ],
@@ -896,6 +894,43 @@ if (import.meta.vitest) {
           ({ ruleId }) => ruleId === "contracts/freeze-contracts",
         ),
       ).toEqual([]);
+    });
+
+    it("does not publish erased ambient values as runtime exports", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const ts = await import("typescript");
+      const contractsRoot = path.join(process.cwd(), "src", "contracts");
+      const contractFiles = fs
+        .readdirSync(contractsRoot, { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
+        .map((entry) => path.join(entry.parentPath, entry.name));
+      const erasedRuntimeExports = contractFiles.flatMap((filename) => {
+        const sourceFile = ts.createSourceFile(
+          filename,
+          fs.readFileSync(filename, "utf8"),
+          ts.ScriptTarget.ES2022,
+          true,
+        );
+        return sourceFile.statements.flatMap((statement) => {
+          if (!ts.isVariableStatement(statement)) return [];
+          const modifiers = statement.modifiers ?? [];
+          const isExported = modifiers.some(
+            ({ kind }) => kind === ts.SyntaxKind.ExportKeyword,
+          );
+          const isAmbient = modifiers.some(
+            ({ kind }) => kind === ts.SyntaxKind.DeclareKeyword,
+          );
+          if (!isExported || !isAmbient) return [];
+          /* v8 ignore next 4 -- failure-only diagnostic for forbidden exports */
+          return statement.declarationList.declarations.map(
+            (declaration) =>
+              `${path.relative(contractsRoot, filename)}:${declaration.name.getText(sourceFile)}`,
+          );
+        });
+      });
+
+      expect(erasedRuntimeExports).toEqual([]);
     });
 
     it("locks the exact public contract export snapshot", async () => {
@@ -996,20 +1031,14 @@ if (import.meta.vitest) {
         "WorkerSourceNoteInput",
         "WorkerStartedEvent",
         "WorkerWireEvent",
-        "canonicalDependencySnapshotBrand",
         "createIssue",
         "err",
-        "generationTokenBrand",
         "matchesApprovalContext",
         "matchesPlanIdentity",
         "mdxRelayErr",
         "mdxRelayOk",
         "ok",
-        "planIdBrand",
-        "safePathLabelBrand",
-        "sha256Brand",
         "toSafePathLabel",
-        "validatedPortableProfileSnapshotBrand",
       ]);
     });
   });
