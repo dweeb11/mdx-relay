@@ -10,7 +10,11 @@ export default defineConfig({
           name: "unit",
           environment: "node",
           include: ["tests/unit/**/*.test.ts"],
-          includeSource: ["src/contracts/**/*.ts", "src/core/**/*.ts"],
+          includeSource: [
+            "src/contracts/**/*.ts",
+            "src/core/**/*.ts",
+            "src/profiles/**/*.ts",
+          ],
         },
       },
       {
@@ -43,13 +47,23 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "json-summary"],
       reportsDirectory: "coverage",
-      include: ["src/contracts/**/*.ts", "src/core/**/*.ts"],
+      include: [
+        "src/contracts/**/*.ts",
+        "src/core/**/*.ts",
+        "src/profiles/**/*.ts",
+      ],
       exclude: ["src/main.ts"],
       thresholds: {
         statements: 99,
         lines: 99,
         branches: 95,
         functions: 100,
+        "src/profiles/**": {
+          statements: 100,
+          lines: 100,
+          branches: 100,
+          functions: 100,
+        },
       },
     },
   },

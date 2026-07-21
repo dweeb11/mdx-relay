@@ -35,7 +35,7 @@ const hasValidUnicode = (value: string): boolean => {
     const code = value.charCodeAt(index);
     if (code >= 0xd800 && code <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return false;
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
       index += 1;
     } else if (code >= 0xdc00 && code <= 0xdfff) {
       return false;
@@ -120,7 +120,7 @@ const placeholders = (value: string): readonly string[] | undefined => {
   const withoutPlaceholders = value.replaceAll(/\{[^{}]+\}/gu, "");
   if (withoutPlaceholders.includes("{") || withoutPlaceholders.includes("}"))
     return undefined;
-  return found.map((match) => match[1] ?? "");
+  return found.map((match) => match[1]!);
 };
 
 const hasExactPlaceholders = (

@@ -108,4 +108,40 @@ describe("profile resolution", () => {
     });
     expect(result.ok).toBe(true);
   });
+
+  it("returns portable-profile validation failures before binding validation", () => {
+    const result = resolveProfile({}, validBinding);
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error[0]?.code).toBe(ISSUE_CODES.invalidProfile);
+  });
+
+  it("fails closed for cyclic and accessor-backed machine bindings", () => {
+    const cyclic = structuredClone(validBinding) as Record<string, unknown>;
+    cyclic.self = cyclic;
+    expectBlocked(cyclic, ISSUE_CODES.invalidProfile);
+
+    const accessorBacked = Object.defineProperty({}, "binding", {
+      enumerable: true,
+      get: () => {
+        throw new Error("access denied");
+      },
+    });
+    expectBlocked(accessorBacked, ISSUE_CODES.invalidProfile);
+  });
+
+  it("rejects malformed repository URLs and normalized empty path segments", () => {
+    expectBlocked(
+      { ...validBinding, repositoryUrl: "" },
+      ISSUE_CODES.invalidProfile,
+    );
+    expectBlocked(
+      { ...validBinding, repositoryUrl: "https://[" },
+      ISSUE_CODES.invalidProfile,
+    );
+    expectBlocked(
+      { ...validBinding, repositoryRoot: "/Users/example//checkout" },
+      ISSUE_CODES.unsafePath,
+    );
+  });
 });

@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
-import { validatePortableProfile } from "../../../src/profiles/portable-profile";
+import {
+  canonicalizeProfileData,
+  validatePortableProfile,
+} from "../../../src/profiles/portable-profile";
 
 const expectBlocked = (value: unknown, code: string) => {
   const result = validatePortableProfile(value);
@@ -101,5 +104,62 @@ describe("portable profile schema", () => {
     const profile = cloneBuiltin();
     (profile.repository as Record<string, unknown>).url = repositoryUrl;
     expectBlocked(profile, ISSUE_CODES.credentialUrl);
+  });
+
+  it("fails closed for cyclic and accessor-backed profile data", () => {
+    const cyclic = cloneBuiltin();
+    cyclic.self = cyclic;
+    expectBlocked(cyclic, ISSUE_CODES.invalidProfile);
+
+    const accessorBacked = Object.defineProperty({}, "profile", {
+      enumerable: true,
+      get: () => {
+        throw new Error("access denied");
+      },
+    });
+    expectBlocked(accessorBacked, ISSUE_CODES.invalidProfile);
+    expectBlocked({}, ISSUE_CODES.invalidProfile);
+  });
+
+  it("rejects malformed credential-like URLs without throwing", () => {
+    const profile = cloneBuiltin();
+    (profile.repository as Record<string, unknown>).url = "https://[";
+    expectBlocked(profile, ISSUE_CODES.invalidProfile);
+  });
+
+  it("validates Unicode boundaries in names and templates", () => {
+    const validUnicode = cloneBuiltin();
+    validUnicode.name = "Portable 😀 Profile";
+    expect(validatePortableProfile(validUnicode).ok).toBe(true);
+
+    for (const name of [
+      `broken-high-${String.fromCharCode(0xd800)}`,
+      `broken-low-${String.fromCharCode(0xdc00)}`,
+    ]) {
+      const profile = cloneBuiltin();
+      profile.name = name;
+      expectBlocked(profile, ISSUE_CODES.invalidProfile);
+    }
+
+    const template = cloneBuiltin();
+    (template.commit as Record<string, unknown>).message =
+      `Publish {title}${String.fromCharCode(0xd800)}`;
+    expectBlocked(template, ISSUE_CODES.invalidProfile);
+  });
+
+  it("canonicalizes every JSON value shape and rejects non-JSON values", () => {
+    expect(canonicalizeProfileData(null)).toBe("null");
+    expect(canonicalizeProfileData(true)).toBe("true");
+    expect(canonicalizeProfileData("profile")).toBe('"profile"');
+    expect(canonicalizeProfileData([1, "two", false])).toBe('[1,"two",false]');
+    expect(() => canonicalizeProfileData(Number.NaN)).toThrow(
+      "Non-finite JSON number",
+    );
+    expect(() => canonicalizeProfileData(undefined)).toThrow(
+      "Non-JSON profile value",
+    );
+    expect(() => canonicalizeProfileData({ invalid: undefined })).toThrow(
+      "Non-JSON profile value",
+    );
   });
 });
