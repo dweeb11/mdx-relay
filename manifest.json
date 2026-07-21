@@ -1,0 +1,9 @@
+{
+  "id": "mdx-relay",
+  "name": "MDX Relay",
+  "version": "0.1.0",
+  "minAppVersion": "1.13.2",
+  "description": "Review and publish Obsidian notes as repository-ready MDX.",
+  "author": "Critterhaus",
+  "isDesktopOnly": true
+}

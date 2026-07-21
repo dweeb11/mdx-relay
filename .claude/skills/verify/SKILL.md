@@ -1,47 +1,68 @@
 ---
 name: verify
-description: Run before marking any task complete. Uses the real project commands once configured; the scaffold gate currently verifies repository structure only.
+description: Run the complete MDX Relay install, static-check, test, and bundle gate before marking any task complete.
 ---
 
 # verify
 
-Run every step in order. Do not claim completion until all applicable checks pass.
+Run every step in order from the repository root. Do not claim completion until all applicable checks pass.
 
-## Step 1: Scaffold check
-
-Until the first engineering slice creates `package.json`, run:
+## Step 1: Reproducible install
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-required = ['README.md', 'LICENSE', 'PITCH.md', 'AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'WORKING_AGREEMENT.md', 'WORKING_AGREEMENT.apps.md', 'GIT_CONVENTIONS.md']
-missing = [p for p in required if not Path(p).is_file()]
-if missing:
-    raise SystemExit(f'missing: {missing}')
-print(f'scaffold: {len(required)} required files present')
-PY
+node --version
+npm --version
+npm ci
 ```
 
-Required: exit code 0.
+Required: Node 22.x, a lockfile-backed install, and exit code 0.
 
-Once `package.json` exists, this section must be replaced with the real install/check/build commands from the approved engineering plan.
+## Step 2: Full public gate
 
-## Step 2: Automated tests
-
-No test framework is configured in the pre-implementation scaffold.
-
-Report exactly:
-
-```text
-Tests: skipped — no test framework configured.
+```bash
+npm run verify
 ```
 
-The first engineering slice must replace this with the real test command before adding product behavior.
+`verify` runs formatting, ESLint contract-boundary enforcement, TypeScript, unit coverage, integration tests, and the production bundle check. Integration lanes that have not landed yet use Vitest's explicit `--passWithNoTests`; the command must still run and report that no tests were found. The bundle check builds `dist/main.js` and fails if any native `.node` artifact exists.
 
-## Step 3: Acceptance criteria
+## Step 3: Direct task gates
 
-Read the active task's acceptance criteria. Confirm each item against real files, command output, or remote URLs.
+For T0 and any contract/toolchain change, also show each required command independently:
 
-## Step 4: Evidence
+```bash
+npm run typecheck
+npm run lint
+npm run test:unit
+npm run build
+```
 
-Output the commands, exit codes, test counts or explicit skip reason, and acceptance evidence. No “should work” or “looks good.”
+Inspect release output directly:
+
+```bash
+find dist -type f -name '*.node' -print
+```
+
+Required: every command exits 0 and the direct `.node` search prints nothing.
+
+## Step 4: Private baseline when available
+
+T7 supplies the external fixture resolver and test. Until then, this command honestly reports Vitest's no-tests-yet result:
+
+```bash
+npm run test:private-baseline
+```
+
+Once T7 lands, set `MDX_RELAY_PRIVATE_FIXTURE_ROOT` to the approved machine-local fixture root and require passing tests. Never copy private fixture bytes into the repository, coverage, logs, or reports.
+
+## Step 5: Acceptance evidence
+
+Read the active task's acceptance criteria and report:
+
+- commands and exit codes;
+- exact passed/failed/skipped test counts from real output;
+- coverage summary;
+- direct bundle inspection result;
+- each acceptance item mapped to `file:line`;
+- `git status --short --branch`.
+
+No “should work” or “looks good.”
