@@ -120,21 +120,39 @@ const isPlainDataPropertyGraph = (
   return true;
 };
 
+const supportedSchemePrefix = /^(https?|ssh|git):/iu;
+const strictSupportedSchemeUrl = /^(?:https?|ssh|git):\/\//iu;
+
 export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
-  const standardUrl = /^(?:https?|ssh|git):\/\//iu.test(value);
-  const scpStyleUrl = /^(?:[^/@:\s]+@)?[^/@:\s]+:[^\s]+$/u.test(value);
-  if (!standardUrl && !scpStyleUrl) return false;
-  if (value.includes("?") || value.includes("#")) return true;
-  if (!standardUrl) return false;
-  try {
-    const parsed = new URL(value);
-    return (
-      parsed.password.length > 0 ||
-      (parsed.protocol !== "ssh:" && parsed.username.length > 0)
-    );
-  } catch {
-    return false;
+  const schemeMatch = supportedSchemePrefix.exec(value);
+  if (schemeMatch) {
+    if (value.includes("?") || value.includes("#")) return true;
+    if (strictSupportedSchemeUrl.test(value) && !value.includes("\\")) {
+      try {
+        const parsed = new URL(value);
+        return (
+          parsed.password.length > 0 ||
+          (parsed.protocol !== "ssh:" && parsed.username.length > 0)
+        );
+      } catch {
+        // Inspect malformed supported-scheme values below without SCP fallback.
+      }
+    }
+    const authority = value
+      .slice(schemeMatch[0].length)
+      .replace(/^[/\\]+/u, "")
+      .split(/[/\\]/u, 1)[0]!;
+    const atIndex = authority.lastIndexOf("@");
+    if (atIndex <= 0) return false;
+    const userInfo = authority.slice(0, atIndex);
+    return schemeMatch[1]!.toLowerCase() !== "ssh" || userInfo.includes(":");
   }
+
+  if (/^[a-z]:[\\/]/iu.test(value)) return false;
+  if (value.includes("\\")) return false;
+  if (/^[^/@:\s]+:[^@/\s]+@[^/@:\s]+:[^\\?#\s]+$/u.test(value)) return true;
+  if (/^(?:[^/@:\s]+@)?[^/@:\s]+:[^\\?#\s]+[?#].*$/u.test(value)) return true;
+  return false;
 };
 
 const containsCredentialUrl = (value: unknown): boolean => {
@@ -150,6 +168,7 @@ const containsCredentialUrl = (value: unknown): boolean => {
 
 const windowsReservedSegment =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
+const windowsForbiddenSegmentCharacter = /[<>:"|?*]/u;
 
 const isPortableSegment = (segment: string): boolean =>
   segment.length > 0 &&
@@ -157,6 +176,7 @@ const isPortableSegment = (segment: string): boolean =>
   segment !== ".." &&
   segment.toLowerCase() !== ".git" &&
   !windowsReservedSegment.test(segment) &&
+  !windowsForbiddenSegmentCharacter.test(segment) &&
   !/[. ]$/u.test(segment) &&
   !hasControlCharacter(segment);
 
@@ -203,6 +223,7 @@ const isAssetUrlTemplate = (value: unknown): value is string => {
     !value.startsWith("/") ||
     value.startsWith("//") ||
     value.includes("\\") ||
+    value.includes("%") ||
     value.includes("?") ||
     value.includes("#")
   )
@@ -235,6 +256,7 @@ const isRemoteName = (value: unknown): value is string =>
 
 const isBranchName = (value: unknown): value is string =>
   isBoundedString(value, 240) &&
+  value !== "HEAD" &&
   !value.startsWith("-") &&
   !value.startsWith("/") &&
   !value.endsWith("/") &&
@@ -360,7 +382,7 @@ const parsePortableProfile = (
       "webpQuality",
     ]) ||
     !isBoundedString(images.component, 100) ||
-    !/^[A-Z][A-Za-z0-9.]*$/u.test(images.component) ||
+    !/^[A-Z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*$/u.test(images.component) ||
     !isFilenameTemplate(images.filenameTemplate) ||
     !Number.isInteger(images.maxDimension) ||
     (images.maxDimension as number) < 1 ||
@@ -385,15 +407,26 @@ const hasUnsafePortablePath = (value: unknown): boolean => {
     (typeof assetRoot === "string" && !isPortableRelativePath(assetRoot))
   )
     return true;
+  if (
+    isRecord(value.images) &&
+    typeof value.images.filenameTemplate === "string" &&
+    windowsForbiddenSegmentCharacter.test(value.images.filenameTemplate)
+  )
+    return true;
   return (
     typeof assetUrlTemplate === "string" &&
     (assetUrlTemplate.includes("../") ||
       assetUrlTemplate.includes("/./") ||
       assetUrlTemplate.includes("\\") ||
+      assetUrlTemplate.includes("%") ||
       assetUrlTemplate
         .slice(1)
         .split("/")
-        .some((segment) => segment.toLowerCase() === ".git"))
+        .some(
+          (segment) =>
+            segment.toLowerCase() === ".git" ||
+            windowsForbiddenSegmentCharacter.test(segment),
+        ))
   );
 };
 

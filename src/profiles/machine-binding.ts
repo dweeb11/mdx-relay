@@ -137,6 +137,7 @@ const isSafeAbsoluteRepositoryRoot = (value: unknown): value is string => {
         segment !== "." &&
         segment !== ".." &&
         !windowsReservedSegment.test(segment) &&
+        (!windows || !/[<>:"|?*]/u.test(segment)) &&
         !/[. ]$/u.test(segment),
     )
   );
@@ -151,15 +152,25 @@ const isCredentialFreeRepositoryUrl = (value: unknown): value is string => {
     isCredentialBearingRepositoryUrl(value)
   )
     return false;
-  if (/^(?:https?|ssh|git):\/\//iu.test(value)) {
+  if (/^(?:https?|ssh|git):/iu.test(value)) {
+    if (!/^(?:https?|ssh|git):\/\//iu.test(value) || value.includes("\\"))
+      return false;
     try {
       const parsed = new URL(value);
-      return parsed.hostname.length > 0;
+      return (
+        parsed.hostname.length > 0 &&
+        !parsed.search &&
+        !parsed.hash &&
+        !parsed.password &&
+        (parsed.protocol === "ssh:" || !parsed.username)
+      );
     } catch {
       return false;
     }
   }
-  return /^(?:[^/@:\s]+@)?[^/@:\s]+:[^\s]+$/u.test(value);
+  return /^(?:[^/@:\s]+@)?(?:\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)*):(?!.*\/\/)(?!(?:.*\/)?\.{1,2}(?:\/|$))[^\\?#\s]+$/iu.test(
+    value,
+  );
 };
 
 const cloneAndFreeze = (binding: MachineBindingV1): MachineBindingV1 =>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
+import { validateMachineBinding } from "../../../src/profiles/machine-binding";
 import { resolveProfile } from "../../../src/profiles/resolve-profile";
 
 const validBinding = {
@@ -48,24 +49,32 @@ describe("profile resolution", () => {
   });
 
   it("emits a deterministic fingerprint that changes with the machine binding", () => {
-    const first = resolveProfile(DPW_MIND_NET_V1, validBinding);
-    const repeated = resolveProfile(
-      structuredClone(DPW_MIND_NET_V1),
-      structuredClone(validBinding),
-    );
-    const changed = resolveProfile(DPW_MIND_NET_V1, {
-      ...validBinding,
-      repositoryRoot: "/Users/example/sites/other-checkout",
-    });
+    const first = validateMachineBinding(validBinding);
+    const repeated = validateMachineBinding(structuredClone(validBinding));
 
-    expect(first.ok && repeated.ok && changed.ok).toBe(true);
-    if (!first.ok || !repeated.ok || !changed.ok) return;
-    expect(repeated.value.machineBindingFingerprint).toBe(
-      first.value.machineBindingFingerprint,
+    expect(first.ok && repeated.ok).toBe(true);
+    if (!first.ok || !repeated.ok) return;
+    expect(first.value.fingerprint).toBe(
+      "sha256:afb403f9e56985fdfa9998803ca47d5b4bfafe340d7ade752d2b1a8f9fff4501",
     );
-    expect(changed.value.machineBindingFingerprint).not.toBe(
-      first.value.machineBindingFingerprint,
-    );
+    expect(repeated.value.fingerprint).toBe(first.value.fingerprint);
+
+    for (const changedBinding of [
+      {
+        ...validBinding,
+        repositoryRoot: "/Users/example/sites/other-checkout",
+      },
+      {
+        ...validBinding,
+        repositoryUrl: "https://example.invalid/other-checkout.git",
+      },
+      { ...validBinding, profileId: "another-valid-profile" },
+    ]) {
+      const changed = validateMachineBinding(changedBinding);
+      expect(changed.ok).toBe(true);
+      if (changed.ok)
+        expect(changed.value.fingerprint).not.toBe(first.value.fingerprint);
+    }
 
     const validUnicode = resolveProfile(DPW_MIND_NET_V1, {
       ...validBinding,
@@ -89,6 +98,37 @@ describe("profile resolution", () => {
     "//server/share/repository",
   ])("rejects unsafe machine-local repository roots", (repositoryRoot) => {
     expectBlocked({ ...validBinding, repositoryRoot }, ISSUE_CODES.unsafePath);
+  });
+
+  it.each(["<", ">", ":", '"', "|", "?", "*"])(
+    "rejects Windows-forbidden character %s after the drive prefix",
+    (character) => {
+      expectBlocked(
+        {
+          ...validBinding,
+          repositoryRoot: `C:\\sites\\bad${character}segment`,
+        },
+        ISSUE_CODES.unsafePath,
+      );
+    },
+  );
+
+  it("classifies forward-slash Windows ADS characters as unsafe paths", () => {
+    expectBlocked(
+      { ...validBinding, repositoryRoot: "C:/sites/bad?segment" },
+      ISSUE_CODES.unsafePath,
+    );
+  });
+
+  it("preserves valid POSIX and Windows absolute roots", () => {
+    for (const repositoryRoot of [
+      "/Users/example/sites/posts:secret|draft?*",
+      "C:\\sites\\valid-checkout",
+      "D:/sites/valid-checkout",
+    ])
+      expect(
+        resolveProfile(DPW_MIND_NET_V1, { ...validBinding, repositoryRoot }).ok,
+      ).toBe(true);
   });
 
   it("rejects unknown and executable machine-binding fields", () => {
@@ -153,6 +193,9 @@ describe("profile resolution", () => {
     "ssh://git@example.invalid/site.git#fragment",
     "git@example.invalid:site.git?access_token=secret",
     "git@example.invalid:site.git#fragment",
+    String.raw`https:\\writer:token@example.invalid\\site.git`,
+    String.raw`ssh:\\writer:token@example.invalid\\site.git`,
+    "writer:token@example.invalid:site.git",
   ])("rejects credential-bearing binding URLs", (repositoryUrl) => {
     expectBlocked(
       { ...validBinding, repositoryUrl },
@@ -166,6 +209,8 @@ describe("profile resolution", () => {
     );
     for (const sensitiveValue of [
       "access_token",
+      "writer",
+      "token",
       "secret",
       "fragment",
       "site.git",
@@ -184,6 +229,23 @@ describe("profile resolution", () => {
       repositoryUrl,
     });
     expect(result.ok).toBe(true);
+  });
+
+  it.each([
+    String.raw`https:\\example.invalid\\site.git`,
+    String.raw`ssh:\\git@example.invalid\\site.git`,
+    "git@example.invalid:site\\repo.git",
+    "git@@example.invalid:site.git",
+    "git@-example.invalid:site.git",
+    "git@example..invalid:site.git",
+    "git@example.invalid:site//repo.git",
+    "git@example.invalid:site/../repo.git",
+    "git@example.invalid:",
+  ])("rejects malformed credential-free repository URL %s", (repositoryUrl) => {
+    expectBlocked(
+      { ...validBinding, repositoryUrl },
+      ISSUE_CODES.invalidProfile,
+    );
   });
 
   it.each([String.fromCharCode(0xd800), String.fromCharCode(0xdc00)])(

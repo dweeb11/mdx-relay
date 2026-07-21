@@ -40,6 +40,19 @@ describe("portable profile schema", () => {
     if (!result.ok) return;
     expect(result.value.profile).toEqual(DPW_MIND_NET_V1);
     expect(Object.isFrozen(result.value.profile)).toBe(true);
+    for (const rules of [
+      result.value.profile.repository,
+      result.value.profile.output,
+      result.value.profile.document,
+      result.value.profile.images,
+      result.value.profile.commit,
+    ])
+      expect(Object.isFrozen(rules)).toBe(true);
+    expect(() => {
+      (result.value.profile.output as { contentRoot: string }).contentRoot =
+        "content/mutated";
+    }).toThrow(TypeError);
+    expect(result.value.profile.output.contentRoot).toBe("content/posts");
     expect(result.value.snapshot).toBe(
       '{"commit":{"message":"Publish {title}"},"document":{"callouts":"blockquote","frontmatterPreset":"dpw-post-v1","preset":"dpw-mind-net-v1","wikilinks":"flatten"},"id":"dpw-mind-net-v1","images":{"component":"PostImage","filenameTemplate":"img-{index}.webp","maxDimension":2000,"webpQuality":85},"name":"DPW Mind Net","output":{"assetRoot":"public/posts","assetUrlTemplate":"/posts/{slug}/{assetFile}","contentRoot":"content/posts"},"repository":{"branch":"main","remote":"origin"},"schemaVersion":1}',
     );
@@ -108,9 +121,26 @@ describe("portable profile schema", () => {
     ["assetRoot", "public/../private"],
     ["assetRoot", "/var/www/assets"],
     ["contentRoot", "content\\posts"],
+    ["contentRoot", "content/posts:secret"],
+    ["assetRoot", "public/posts|bad"],
   ])("rejects unsafe %s paths", (field, unsafePath) => {
     const profile = cloneBuiltin();
     (profile.output as Record<string, unknown>)[field] = unsafePath;
+    expectBlocked(profile, ISSUE_CODES.unsafePath);
+  });
+
+  it.each([
+    ["assetUrlTemplate", "/posts/{slug}/bad|segment/{assetFile}"],
+    ["assetUrlTemplate", "/posts/%2e%2e/{slug}/{assetFile}"],
+    ["assetUrlTemplate", "/posts/%2Fprivate/{slug}/{assetFile}"],
+    ["filenameTemplate", "img:{index}.webp"],
+  ])("rejects unsafe portable characters in %s", (field, unsafePath) => {
+    const profile = cloneBuiltin();
+    const container =
+      field === "filenameTemplate"
+        ? (profile.images as Record<string, unknown>)
+        : (profile.output as Record<string, unknown>);
+    container[field] = unsafePath;
     expectBlocked(profile, ISSUE_CODES.unsafePath);
   });
 
@@ -150,6 +180,8 @@ describe("portable profile schema", () => {
     "https://example.invalid/site.git?access_token=%73%65%63%72%65%74",
     "git://token@example.invalid/site.git",
     "git@example.invalid:site.git#fragment",
+    String.raw`https:\\writer:token@example.invalid\\site.git`,
+    "writer:token@example.invalid:site.git",
   ])("rejects credential-bearing repository URLs", (repositoryUrl) => {
     const profile = cloneBuiltin();
     (profile.repository as Record<string, unknown>).url = repositoryUrl;
@@ -186,6 +218,31 @@ describe("portable profile schema", () => {
     const profile = cloneBuiltin();
     (profile.repository as Record<string, unknown>).url = "https://[";
     expectBlocked(profile, ISSUE_CODES.invalidProfile);
+
+    const malformedCredentialFree = cloneBuiltin();
+    (malformedCredentialFree.repository as Record<string, unknown>).url =
+      String.raw`https:\\example.invalid\\site.git`;
+    expectBlocked(malformedCredentialFree, ISSUE_CODES.invalidProfile);
+  });
+
+  it.each(["PostImage", "PostImage.Nested", "PostImage.Nested.Member"])(
+    "accepts JSX component name %s",
+    (component) => {
+      const profile = cloneBuiltin();
+      (profile.images as Record<string, unknown>).component = component;
+      expect(validatePortableProfile(profile).ok).toBe(true);
+    },
+  );
+
+  it.each([
+    "PostImage.",
+    "PostImage..Nested",
+    "PostImage.123",
+    "PostImage.9Nested",
+  ])("rejects invalid JSX member segments in %s", (component) => {
+    const profile = cloneBuiltin();
+    (profile.images as Record<string, unknown>).component = component;
+    expectBlocked(profile, ISSUE_CODES.invalidProfile);
   });
 
   it("validates Unicode boundaries in names and templates", () => {
@@ -219,7 +276,7 @@ describe("portable profile schema", () => {
   );
 
   it("enforces Git branch component rules", () => {
-    for (const branch of ["foo.lock/bar", "foo.LOCK/bar", "foo/.bar"]) {
+    for (const branch of ["HEAD", "foo.lock/bar", "foo.LOCK/bar", "foo/.bar"]) {
       const profile = cloneBuiltin();
       (profile.repository as Record<string, unknown>).branch = branch;
       expectBlocked(profile, ISSUE_CODES.invalidProfile);
