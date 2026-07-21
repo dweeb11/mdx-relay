@@ -43,6 +43,9 @@ describe("portable profile schema", () => {
     expect(result.value.snapshot).toBe(
       '{"commit":{"message":"Publish {title}"},"document":{"callouts":"blockquote","frontmatterPreset":"dpw-post-v1","preset":"dpw-mind-net-v1","wikilinks":"flatten"},"id":"dpw-mind-net-v1","images":{"component":"PostImage","filenameTemplate":"img-{index}.webp","maxDimension":2000,"webpQuality":85},"name":"DPW Mind Net","output":{"assetRoot":"public/posts","assetUrlTemplate":"/posts/{slug}/{assetFile}","contentRoot":"content/posts"},"repository":{"branch":"main","remote":"origin"},"schemaVersion":1}',
     );
+    expect(result.value.profileSnapshotSha256).toBe(
+      "sha256:3ce13ea7fab368516d05e8fdd55880a3a01e672812bfb32118c4c93a06c20ddb",
+    );
     expect(result.value.snapshot).not.toContain("/Users/");
   });
 
@@ -68,12 +71,50 @@ describe("portable profile schema", () => {
     expectBlocked(nested, ISSUE_CODES.invalidProfile);
   });
 
+  it("rejects hidden and accessor-backed executable fields without invoking getters", () => {
+    const symbolField = cloneBuiltin();
+    Object.defineProperty(symbolField, Symbol("execute"), {
+      enumerable: true,
+      value: () => undefined,
+    });
+    expectBlocked(symbolField, ISSUE_CODES.invalidProfile);
+
+    const hiddenField = cloneBuiltin();
+    Object.defineProperty(hiddenField, "execute", {
+      enumerable: false,
+      value: () => undefined,
+    });
+    expectBlocked(hiddenField, ISSUE_CODES.invalidProfile);
+
+    let getterCalls = 0;
+    const accessorField = cloneBuiltin();
+    Object.defineProperty(accessorField, "execute", {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return () => undefined;
+      },
+    });
+    expectBlocked(accessorField, ISSUE_CODES.invalidProfile);
+    expect(getterCalls).toBe(0);
+  });
+
   it.each([
     ["contentRoot", "../content/posts"],
     ["assetRoot", "public/../private"],
     ["assetRoot", "/var/www/assets"],
     ["contentRoot", "content\\posts"],
   ])("rejects unsafe %s paths", (field, unsafePath) => {
+    const profile = cloneBuiltin();
+    (profile.output as Record<string, unknown>)[field] = unsafePath;
+    expectBlocked(profile, ISSUE_CODES.unsafePath);
+  });
+
+  it.each([
+    ["contentRoot", "content/.git/posts"],
+    ["assetRoot", "public/.GIT/posts"],
+    ["assetUrlTemplate", "/posts/.Git/{slug}/{assetFile}"],
+  ])("rejects case-insensitive .git segments in %s", (field, unsafePath) => {
     const profile = cloneBuiltin();
     (profile.output as Record<string, unknown>)[field] = unsafePath;
     expectBlocked(profile, ISSUE_CODES.unsafePath);
@@ -119,6 +160,17 @@ describe("portable profile schema", () => {
     });
     expectBlocked(accessorBacked, ISSUE_CODES.invalidProfile);
     expectBlocked({}, ISSUE_CODES.invalidProfile);
+
+    const nonPlain = cloneBuiltin();
+    Object.setPrototypeOf(nonPlain.repository, { inherited: true });
+    expectBlocked(nonPlain, ISSUE_CODES.invalidProfile);
+
+    const throwingProxy = new Proxy(cloneBuiltin(), {
+      ownKeys: () => {
+        throw new Error("do not inspect");
+      },
+    });
+    expectBlocked(throwingProxy, ISSUE_CODES.invalidProfile);
   });
 
   it("rejects malformed credential-like URLs without throwing", () => {
@@ -159,6 +211,40 @@ describe("portable profile schema", () => {
       "Non-JSON profile value",
     );
     expect(() => canonicalizeProfileData({ invalid: undefined })).toThrow(
+      "Non-JSON profile value",
+    );
+
+    const hidden = Object.defineProperty({}, "hidden", {
+      enumerable: false,
+      value: "silently dropped",
+    });
+    expect(() => canonicalizeProfileData(hidden)).toThrow(
+      "Non-JSON profile value",
+    );
+
+    let getterCalls = 0;
+    const accessor = Object.defineProperty({}, "value", {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return "not read";
+      },
+    });
+    expect(() => canonicalizeProfileData(accessor)).toThrow(
+      "Non-JSON profile value",
+    );
+    expect(getterCalls).toBe(0);
+
+    const sparse = Array.from({ length: 2 }) as unknown[];
+    sparse[0] = "present";
+    delete sparse[1];
+    expect(() => canonicalizeProfileData(sparse)).toThrow(
+      "Non-JSON profile value",
+    );
+
+    const nonPlainArray = ["value"];
+    Object.setPrototypeOf(nonPlainArray, null);
+    expect(() => canonicalizeProfileData(nonPlainArray)).toThrow(
       "Non-JSON profile value",
     );
   });

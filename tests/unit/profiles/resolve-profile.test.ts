@@ -38,7 +38,12 @@ describe("profile resolution", () => {
     expect(result.value.portableSnapshot).not.toContain(
       validBinding.repositoryUrl,
     );
-    expect(result.value.machineBindingFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(result.value.profileSnapshotSha256).toBe(
+      "sha256:3ce13ea7fab368516d05e8fdd55880a3a01e672812bfb32118c4c93a06c20ddb",
+    );
+    expect(result.value.machineBindingFingerprint).toMatch(
+      /^sha256:[a-f0-9]{64}$/u,
+    );
     expect(Object.isFrozen(result.value)).toBe(true);
   });
 
@@ -91,6 +96,43 @@ describe("profile resolution", () => {
     );
   });
 
+  it("rejects hidden and accessor-backed binding fields without invoking getters", () => {
+    const symbolField = structuredClone(validBinding) as Record<
+      string,
+      unknown
+    >;
+    Object.defineProperty(symbolField, Symbol("execute"), {
+      enumerable: true,
+      value: () => undefined,
+    });
+    expectBlocked(symbolField, ISSUE_CODES.invalidProfile);
+
+    const hiddenField = structuredClone(validBinding) as Record<
+      string,
+      unknown
+    >;
+    Object.defineProperty(hiddenField, "execute", {
+      enumerable: false,
+      value: () => undefined,
+    });
+    expectBlocked(hiddenField, ISSUE_CODES.invalidProfile);
+
+    let getterCalls = 0;
+    const accessorField = structuredClone(validBinding) as Record<
+      string,
+      unknown
+    >;
+    Object.defineProperty(accessorField, "execute", {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return () => undefined;
+      },
+    });
+    expectBlocked(accessorField, ISSUE_CODES.invalidProfile);
+    expect(getterCalls).toBe(0);
+  });
+
   it.each([
     "https://writer:token@example.invalid/site.git",
     "https://token@example.invalid/site.git",
@@ -128,6 +170,17 @@ describe("profile resolution", () => {
       },
     });
     expectBlocked(accessorBacked, ISSUE_CODES.invalidProfile);
+
+    const nonPlain = structuredClone(validBinding);
+    Object.setPrototypeOf(nonPlain, { inherited: true });
+    expectBlocked(nonPlain, ISSUE_CODES.invalidProfile);
+
+    const throwingProxy = new Proxy(structuredClone(validBinding), {
+      ownKeys: () => {
+        throw new Error("do not inspect");
+      },
+    });
+    expectBlocked(throwingProxy, ISSUE_CODES.invalidProfile);
   });
 
   it("rejects malformed repository URLs and normalized empty path segments", () => {

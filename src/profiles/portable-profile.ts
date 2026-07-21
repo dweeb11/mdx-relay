@@ -1,5 +1,10 @@
+import { createHash } from "node:crypto";
+
 import { createIssue, ISSUE_CODES } from "../contracts/issues";
-import type { ValidatedPortableProfileSnapshot } from "../contracts/export-plan";
+import type {
+  Sha256Digest,
+  ValidatedPortableProfileSnapshot,
+} from "../contracts/export-plan";
 import {
   mdxRelayErr,
   mdxRelayOk,
@@ -11,6 +16,7 @@ import type { PortableProfileV1 } from "./profile-schema";
 export interface ValidatedPortableProfile {
   readonly profile: PortableProfileV1;
   readonly snapshot: ValidatedPortableProfileSnapshot;
+  readonly profileSnapshotSha256: Sha256Digest;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -60,15 +66,57 @@ const isBoundedString = (
   hasValidUnicode(value) &&
   !hasControlCharacter(value);
 
-const containsExecutable = (
+const isPlainDataPropertyGraph = (
   value: unknown,
-  seen: WeakSet<object> = new WeakSet(),
+  ancestors: WeakSet<object> = new WeakSet(),
 ): boolean => {
-  if (typeof value === "function") return true;
-  if (value === null || typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  return Object.values(value).some((entry) => containsExecutable(entry, seen));
+  if (value === null) return true;
+  if (
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  )
+    return true;
+  if (typeof value !== "object" || ancestors.has(value)) return false;
+
+  const isArray = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (
+    (isArray && prototype !== Array.prototype) ||
+    (!isArray && prototype !== Object.prototype)
+  )
+    return false;
+
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key === "symbol")) return false;
+  if (
+    isArray &&
+    (keys.length !== value.length + 1 ||
+      !keys.every(
+        (key) =>
+          key === "length" ||
+          (/^(?:0|[1-9]\d*)$/u.test(key as string) &&
+            Number(key) < value.length),
+      ))
+  )
+    return false;
+
+  ancestors.add(value);
+  for (const key of keys) {
+    if (isArray && key === "length") continue;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      !descriptor ||
+      !descriptor.enumerable ||
+      !("value" in descriptor) ||
+      !isPlainDataPropertyGraph(descriptor.value, ancestors)
+    ) {
+      ancestors.delete(value);
+      return false;
+    }
+  }
+  ancestors.delete(value);
+  return true;
 };
 
 export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
@@ -81,17 +129,10 @@ export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
   }
 };
 
-const containsCredentialUrl = (
-  value: unknown,
-  seen: WeakSet<object> = new WeakSet(),
-): boolean => {
+const containsCredentialUrl = (value: unknown): boolean => {
   if (typeof value === "string") return isCredentialBearingRepositoryUrl(value);
   if (value === null || typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  return Object.values(value).some((entry) =>
-    containsCredentialUrl(entry, seen),
-  );
+  return Object.values(value).some((entry) => containsCredentialUrl(entry));
 };
 
 const windowsReservedSegment =
@@ -101,6 +142,7 @@ const isPortableSegment = (segment: string): boolean =>
   segment.length > 0 &&
   segment !== "." &&
   segment !== ".." &&
+  segment.toLowerCase() !== ".git" &&
   !windowsReservedSegment.test(segment) &&
   !/[. ]$/u.test(segment) &&
   !hasControlCharacter(segment);
@@ -190,7 +232,7 @@ const isBranchName = (value: unknown): value is string =>
   !value.includes("@{") &&
   !/[~^:?*[\]\\\s]/u.test(value);
 
-const canonicalize = (value: unknown): string => {
+const canonicalizeValidated = (value: unknown): string => {
   if (value === null || typeof value === "boolean" || typeof value === "string")
     return JSON.stringify(value);
   if (typeof value === "number") {
@@ -198,16 +240,30 @@ const canonicalize = (value: unknown): string => {
     return JSON.stringify(value);
   }
   if (Array.isArray(value))
-    return `[${value.map((entry) => canonicalize(entry)).join(",")}]`;
-  if (!isRecord(value)) throw new TypeError("Non-JSON profile value");
-  return `{${Object.keys(value)
+    return `[${value
+      .map((_, index) =>
+        canonicalizeValidated(
+          Object.getOwnPropertyDescriptor(value, String(index))!.value,
+        ),
+      )
+      .join(",")}]`;
+  const record = value as JsonRecord;
+  return `{${(Reflect.ownKeys(record) as string[])
     .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`)
+    .map(
+      (key) =>
+        `${JSON.stringify(key)}:${canonicalizeValidated(
+          Object.getOwnPropertyDescriptor(record, key)!.value,
+        )}`,
+    )
     .join(",")}}`;
 };
 
-export const canonicalizeProfileData = (value: unknown): string =>
-  canonicalize(value);
+export const canonicalizeProfileData = (value: unknown): string => {
+  if (!isPlainDataPropertyGraph(value))
+    throw new TypeError("Non-JSON profile value");
+  return canonicalizeValidated(value);
+};
 
 const cloneAndFreeze = <T>(value: T): T => {
   const clone = structuredClone(value);
@@ -314,7 +370,11 @@ const hasUnsafePortablePath = (value: unknown): boolean => {
     typeof assetUrlTemplate === "string" &&
     (assetUrlTemplate.includes("../") ||
       assetUrlTemplate.includes("/./") ||
-      assetUrlTemplate.includes("\\"))
+      assetUrlTemplate.includes("\\") ||
+      assetUrlTemplate
+        .slice(1)
+        .split("/")
+        .some((segment) => segment.toLowerCase() === ".git"))
   );
 };
 
@@ -322,8 +382,9 @@ export function validatePortableProfile(
   value: unknown,
 ): MdxRelayResult<ValidatedPortableProfile> {
   try {
+    if (!isPlainDataPropertyGraph(value))
+      return invalid(ISSUE_CODES.invalidProfile);
     if (containsCredentialUrl(value)) return invalid(ISSUE_CODES.credentialUrl);
-    if (containsExecutable(value)) return invalid(ISSUE_CODES.invalidProfile);
     if (hasUnsafePortablePath(value)) return invalid(ISSUE_CODES.unsafePath);
     const profile = parsePortableProfile(value);
     if (!profile) return invalid(ISSUE_CODES.invalidProfile);
@@ -331,7 +392,16 @@ export function validatePortableProfile(
     const snapshot = canonicalizeProfileData(
       stableProfile,
     ) as ValidatedPortableProfileSnapshot;
-    return mdxRelayOk(Object.freeze({ profile: stableProfile, snapshot }));
+    const profileSnapshotSha256 = `sha256:${createHash("sha256")
+      .update(snapshot, "utf8")
+      .digest("hex")}` as Sha256Digest;
+    return mdxRelayOk(
+      Object.freeze({
+        profile: stableProfile,
+        snapshot,
+        profileSnapshotSha256,
+      }),
+    );
   } catch {
     return invalid(ISSUE_CODES.invalidProfile);
   }

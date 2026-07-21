@@ -7,10 +7,7 @@ import {
   mdxRelayOk,
   type MdxRelayResult,
 } from "../contracts/result";
-import {
-  canonicalizeProfileData,
-  isCredentialBearingRepositoryUrl,
-} from "./portable-profile";
+import { isCredentialBearingRepositoryUrl } from "./portable-profile";
 
 export interface MachineBindingV1 {
   readonly schemaVersion: 1;
@@ -41,28 +38,45 @@ const hasExactKeys = (
   );
 };
 
-const containsExecutable = (
+const isPlainDataPropertyGraph = (
   value: unknown,
-  seen: WeakSet<object> = new WeakSet(),
+  ancestors: WeakSet<object> = new WeakSet(),
 ): boolean => {
-  if (typeof value === "function") return true;
-  if (value === null || typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  return Object.values(value).some((entry) => containsExecutable(entry, seen));
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  )
+    return true;
+  if (typeof value !== "object" || Array.isArray(value) || ancestors.has(value))
+    return false;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key === "symbol")) return false;
+
+  ancestors.add(value);
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      !descriptor ||
+      !descriptor.enumerable ||
+      !("value" in descriptor) ||
+      !isPlainDataPropertyGraph(descriptor.value, ancestors)
+    ) {
+      ancestors.delete(value);
+      return false;
+    }
+  }
+  ancestors.delete(value);
+  return true;
 };
 
-const containsCredentialUrl = (
-  value: unknown,
-  seen: WeakSet<object> = new WeakSet(),
-): boolean => {
+const containsCredentialUrl = (value: unknown): boolean => {
   if (typeof value === "string") return isCredentialBearingRepositoryUrl(value);
   if (value === null || typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  return Object.values(value).some((entry) =>
-    containsCredentialUrl(entry, seen),
-  );
+  return Object.values(value).some((entry) => containsCredentialUrl(entry));
 };
 
 const windowsReservedSegment =
@@ -131,6 +145,13 @@ const isCredentialFreeRepositoryUrl = (value: unknown): value is string => {
 const cloneAndFreeze = (binding: MachineBindingV1): MachineBindingV1 =>
   Object.freeze(structuredClone(binding));
 
+const canonicalizeMachineBinding = (binding: MachineBindingV1): string =>
+  `{"profileId":${JSON.stringify(binding.profileId)},"repositoryRoot":${JSON.stringify(
+    binding.repositoryRoot,
+  )},"repositoryUrl":${JSON.stringify(
+    binding.repositoryUrl,
+  )},"schemaVersion":${JSON.stringify(binding.schemaVersion)}}`;
+
 const invalid = (
   code: keyof Pick<
     typeof ISSUE_CODES,
@@ -142,8 +163,8 @@ export function validateMachineBinding(
   value: unknown,
 ): MdxRelayResult<ValidatedMachineBinding> {
   try {
+    if (!isPlainDataPropertyGraph(value)) return invalid("invalidProfile");
     if (containsCredentialUrl(value)) return invalid("credentialUrl");
-    if (containsExecutable(value)) return invalid("invalidProfile");
     if (
       isRecord(value) &&
       typeof value.repositoryRoot === "string" &&
@@ -166,9 +187,9 @@ export function validateMachineBinding(
     )
       return invalid("invalidProfile");
     const binding = cloneAndFreeze(value as unknown as MachineBindingV1);
-    const fingerprint = createHash("sha256")
-      .update(canonicalizeProfileData(binding), "utf8")
-      .digest("hex") as Sha256Digest;
+    const fingerprint = `sha256:${createHash("sha256")
+      .update(canonicalizeMachineBinding(binding), "utf8")
+      .digest("hex")}` as Sha256Digest;
     return mdxRelayOk(Object.freeze({ binding, fingerprint }));
   } catch {
     return invalid("invalidProfile");

@@ -15,6 +15,7 @@ import type { PortableProfileV1 } from "./profile-schema";
 export interface ResolvedProfile {
   readonly portableProfile: PortableProfileV1;
   readonly portableSnapshot: ValidatedPortableProfileSnapshot;
+  readonly profileSnapshotSha256: Sha256Digest;
   readonly repositoryRoot: string;
   readonly repositoryUrl: string;
   readonly machineBindingFingerprint: Sha256Digest;
@@ -34,6 +35,7 @@ export function resolveProfile(
     Object.freeze({
       portableProfile: portableResult.value.profile,
       portableSnapshot: portableResult.value.snapshot,
+      profileSnapshotSha256: portableResult.value.profileSnapshotSha256,
       repositoryRoot: bindingResult.value.binding.repositoryRoot,
       repositoryUrl: bindingResult.value.binding.repositoryUrl,
       machineBindingFingerprint: bindingResult.value.fingerprint,
