@@ -66,6 +66,12 @@ describe("profile resolution", () => {
     expect(changed.value.machineBindingFingerprint).not.toBe(
       first.value.machineBindingFingerprint,
     );
+
+    const validUnicode = resolveProfile(DPW_MIND_NET_V1, {
+      ...validBinding,
+      repositoryRoot: "/Users/example/sites/😀",
+    });
+    expect(validUnicode.ok).toBe(true);
   });
 
   it("rejects bindings for a different profile", () => {
@@ -94,6 +100,11 @@ describe("profile resolution", () => {
       { ...validBinding, resolveRoot: () => validBinding.repositoryRoot },
       ISSUE_CODES.invalidProfile,
     );
+    expectBlocked(
+      { ...validBinding, [String.fromCharCode(0xd800)]: "invalid-key" },
+      ISSUE_CODES.invalidProfile,
+    );
+    expectBlocked({ ...validBinding, extra: null }, ISSUE_CODES.invalidProfile);
   });
 
   it("rejects hidden and accessor-backed binding fields without invoking getters", () => {
@@ -136,20 +147,65 @@ describe("profile resolution", () => {
   it.each([
     "https://writer:token@example.invalid/site.git",
     "https://token@example.invalid/site.git",
+    "https://example.invalid/site.git?access_token=secret",
+    "https://example.invalid/site.git?access_token=%73%65%63%72%65%74",
+    "git://token@example.invalid/site.git",
+    "ssh://git@example.invalid/site.git#fragment",
+    "git@example.invalid:site.git?access_token=secret",
+    "git@example.invalid:site.git#fragment",
   ])("rejects credential-bearing binding URLs", (repositoryUrl) => {
     expectBlocked(
       { ...validBinding, repositoryUrl },
       ISSUE_CODES.credentialUrl,
     );
+    const serialized = JSON.stringify(
+      resolveProfile(DPW_MIND_NET_V1, {
+        ...validBinding,
+        repositoryUrl,
+      }),
+    );
+    for (const sensitiveValue of [
+      "access_token",
+      "secret",
+      "fragment",
+      "site.git",
+    ])
+      expect(serialized).not.toContain(sensitiveValue);
   });
 
-  it("accepts a credential-free SSH repository URL", () => {
+  it.each([
+    "https://example.invalid/dpw-mind-net.git",
+    "ssh://git@example.invalid/dpw-mind-net.git",
+    "git://example.invalid/dpw-mind-net.git",
+    "git@example.invalid:dpw-mind-net.git",
+  ])("accepts credential-free repository URL %s", (repositoryUrl) => {
     const result = resolveProfile(DPW_MIND_NET_V1, {
       ...validBinding,
-      repositoryUrl: "git@example.invalid:dpw-mind-net.git",
+      repositoryUrl,
     });
     expect(result.ok).toBe(true);
   });
+
+  it.each([String.fromCharCode(0xd800), String.fromCharCode(0xdc00)])(
+    "rejects lone surrogate %s in every machine-binding string",
+    (surrogate) => {
+      expectBlocked(
+        { ...validBinding, profileId: `profile-${surrogate}` },
+        ISSUE_CODES.invalidProfile,
+      );
+      expectBlocked(
+        { ...validBinding, repositoryRoot: `/Users/example/${surrogate}` },
+        ISSUE_CODES.invalidProfile,
+      );
+      expectBlocked(
+        {
+          ...validBinding,
+          repositoryUrl: `https://example.invalid/${surrogate}.git`,
+        },
+        ISSUE_CODES.invalidProfile,
+      );
+    },
+  );
 
   it("returns portable-profile validation failures before binding validation", () => {
     const result = resolveProfile({}, validBinding);

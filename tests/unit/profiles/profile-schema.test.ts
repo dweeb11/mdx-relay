@@ -57,6 +57,10 @@ describe("portable profile schema", () => {
     const nested = cloneBuiltin();
     (nested.output as Record<string, unknown>).extra = "do-not-reflect";
     expectBlocked(nested, ISSUE_CODES.invalidProfile);
+
+    const nullField = cloneBuiltin();
+    nullField.extra = null;
+    expectBlocked(nullField, ISSUE_CODES.invalidProfile);
   });
 
   it("rejects executable values at any depth", () => {
@@ -126,6 +130,7 @@ describe("portable profile schema", () => {
     ["filenameTemplate", "img-{slug}.webp"],
     ["message", "Publish {slug}"],
     ["message", "Publish {{title}}"],
+    ["message", 42],
   ])("rejects invalid placeholders in %s", (field, template) => {
     const profile = cloneBuiltin();
     const container =
@@ -141,6 +146,10 @@ describe("portable profile schema", () => {
   it.each([
     "https://writer:token@example.invalid/site.git",
     "https://token@example.invalid/site.git",
+    "https://example.invalid/site.git?access_token=secret",
+    "https://example.invalid/site.git?access_token=%73%65%63%72%65%74",
+    "git://token@example.invalid/site.git",
+    "git@example.invalid:site.git#fragment",
   ])("rejects credential-bearing repository URLs", (repositoryUrl) => {
     const profile = cloneBuiltin();
     (profile.repository as Record<string, unknown>).url = repositoryUrl;
@@ -199,11 +208,45 @@ describe("portable profile schema", () => {
     expectBlocked(template, ISSUE_CODES.invalidProfile);
   });
 
+  it.each([String.fromCharCode(0xd800), String.fromCharCode(0xdc00)])(
+    "rejects lone surrogate %s recursively in portable fields",
+    (surrogate) => {
+      const profile = cloneBuiltin();
+      (profile.output as Record<string, unknown>).contentRoot =
+        `content/${surrogate}`;
+      expectBlocked(profile, ISSUE_CODES.invalidProfile);
+    },
+  );
+
+  it("enforces Git branch component rules", () => {
+    for (const branch of ["foo.lock/bar", "foo.LOCK/bar", "foo/.bar"]) {
+      const profile = cloneBuiltin();
+      (profile.repository as Record<string, unknown>).branch = branch;
+      expectBlocked(profile, ISSUE_CODES.invalidProfile);
+    }
+
+    const valid = cloneBuiltin();
+    (valid.repository as Record<string, unknown>).branch =
+      "feature/portable-profile";
+    expect(validatePortableProfile(valid).ok).toBe(true);
+  });
+
   it("canonicalizes every JSON value shape and rejects non-JSON values", () => {
     expect(canonicalizeProfileData(null)).toBe("null");
     expect(canonicalizeProfileData(true)).toBe("true");
     expect(canonicalizeProfileData("profile")).toBe('"profile"');
     expect(canonicalizeProfileData([1, "two", false])).toBe('[1,"two",false]');
+    for (const surrogate of [
+      String.fromCharCode(0xd800),
+      String.fromCharCode(0xdc00),
+    ]) {
+      expect(() => canonicalizeProfileData({ value: surrogate })).toThrow(
+        "Non-JSON profile value",
+      );
+    }
+    expect(() =>
+      canonicalizeProfileData({ [String.fromCharCode(0xd800)]: "value" }),
+    ).toThrow("Non-JSON profile value");
     expect(() => canonicalizeProfileData(Number.NaN)).toThrow(
       "Non-finite JSON number",
     );

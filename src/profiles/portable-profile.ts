@@ -71,12 +71,8 @@ const isPlainDataPropertyGraph = (
   ancestors: WeakSet<object> = new WeakSet(),
 ): boolean => {
   if (value === null) return true;
-  if (
-    typeof value === "string" ||
-    typeof value === "boolean" ||
-    typeof value === "number"
-  )
-    return true;
+  if (typeof value === "string") return hasValidUnicode(value);
+  if (typeof value === "boolean" || typeof value === "number") return true;
   if (typeof value !== "object" || ancestors.has(value)) return false;
 
   const isArray = Array.isArray(value);
@@ -88,7 +84,12 @@ const isPlainDataPropertyGraph = (
     return false;
 
   const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key === "symbol")) return false;
+  if (
+    keys.some(
+      (key) => typeof key === "symbol" || !hasValidUnicode(key as string),
+    )
+  )
+    return false;
   if (
     isArray &&
     (keys.length !== value.length + 1 ||
@@ -120,10 +121,17 @@ const isPlainDataPropertyGraph = (
 };
 
 export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
-  if (!/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)) return false;
+  const standardUrl = /^(?:https?|ssh|git):\/\//iu.test(value);
+  const scpStyleUrl = /^(?:[^/@:\s]+@)?[^/@:\s]+:[^\s]+$/u.test(value);
+  if (!standardUrl && !scpStyleUrl) return false;
+  if (value.includes("?") || value.includes("#")) return true;
+  if (!standardUrl) return false;
   try {
     const parsed = new URL(value);
-    return parsed.username.length > 0 || parsed.password.length > 0;
+    return (
+      parsed.password.length > 0 ||
+      (parsed.protocol !== "ssh:" && parsed.username.length > 0)
+    );
   } catch {
     return false;
   }
@@ -132,7 +140,12 @@ export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
 const containsCredentialUrl = (value: unknown): boolean => {
   if (typeof value === "string") return isCredentialBearingRepositoryUrl(value);
   if (value === null || typeof value !== "object") return false;
-  return Object.values(value).some((entry) => containsCredentialUrl(entry));
+  return Reflect.ownKeys(value).some((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return containsCredentialUrl(
+      (descriptor as PropertyDescriptor & { value: unknown }).value,
+    );
+  });
 };
 
 const windowsReservedSegment =
@@ -170,7 +183,7 @@ const hasExactPlaceholders = (
   allowed: readonly string[],
   required: readonly string[],
 ): value is string => {
-  if (typeof value !== "string" || !hasValidUnicode(value)) return false;
+  if (typeof value !== "string") return false;
   const found = placeholders(value);
   if (!found || found.some((name) => !allowed.includes(name))) return false;
   return (
@@ -226,11 +239,17 @@ const isBranchName = (value: unknown): value is string =>
   !value.startsWith("/") &&
   !value.endsWith("/") &&
   !value.endsWith(".") &&
-  !value.endsWith(".lock") &&
   !value.includes("..") &&
   !value.includes("//") &&
   !value.includes("@{") &&
-  !/[~^:?*[\]\\\s]/u.test(value);
+  !/[~^:?*[\]\\\s]/u.test(value) &&
+  value
+    .split("/")
+    .every(
+      (component) =>
+        !component.startsWith(".") &&
+        !component.toLowerCase().endsWith(".lock"),
+    );
 
 const canonicalizeValidated = (value: unknown): string => {
   if (value === null || typeof value === "boolean" || typeof value === "string")

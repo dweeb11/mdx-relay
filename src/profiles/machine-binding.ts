@@ -38,23 +38,38 @@ const hasExactKeys = (
   );
 };
 
+const hasValidUnicode = (value: string): boolean => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const isPlainDataPropertyGraph = (
   value: unknown,
   ancestors: WeakSet<object> = new WeakSet(),
 ): boolean => {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean" ||
-    typeof value === "number"
-  )
-    return true;
+  if (value === null) return true;
+  if (typeof value === "string") return hasValidUnicode(value);
+  if (typeof value === "boolean" || typeof value === "number") return true;
   if (typeof value !== "object" || Array.isArray(value) || ancestors.has(value))
     return false;
   const prototype = Object.getPrototypeOf(value) as unknown;
   if (prototype !== Object.prototype) return false;
   const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key === "symbol")) return false;
+  if (
+    keys.some(
+      (key) => typeof key === "symbol" || !hasValidUnicode(key as string),
+    )
+  )
+    return false;
 
   ancestors.add(value);
   for (const key of keys) {
@@ -76,7 +91,12 @@ const isPlainDataPropertyGraph = (
 const containsCredentialUrl = (value: unknown): boolean => {
   if (typeof value === "string") return isCredentialBearingRepositoryUrl(value);
   if (value === null || typeof value !== "object") return false;
-  return Object.values(value).some((entry) => containsCredentialUrl(entry));
+  return Reflect.ownKeys(value).some((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return containsCredentialUrl(
+      (descriptor as PropertyDescriptor & { value: unknown }).value,
+    );
+  });
 };
 
 const windowsReservedSegment =
