@@ -292,6 +292,14 @@ const isPriorTarget = (value: unknown): value is ApprovedPriorTarget => {
   );
 };
 
+const repositoryTargetKey = (
+  normalizedPath: string,
+  caseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"],
+): string =>
+  caseSensitivity === "insensitive"
+    ? normalizedPath.toLowerCase()
+    : normalizedPath;
+
 const isRepositoryFingerprint = (
   value: unknown,
 ): value is RepositoryFingerprint => {
@@ -412,7 +420,15 @@ const isRepositoryFingerprint = (
     return false;
   if (!Array.isArray(targets)) return false;
   let previous = "";
+  const targetKeys = new Set<string>();
   for (const target of targets) {
+    const targetKey =
+      isRecord(target) && typeof target.normalizedPath === "string"
+        ? repositoryTargetKey(
+            target.normalizedPath,
+            value.filesystemCaseSensitivity,
+          )
+        : "";
     if (
       !exactObject(target, [
         "normalizedPath",
@@ -422,10 +438,12 @@ const isRepositoryFingerprint = (
       !isRepositoryTargetPath(target.normalizedPath) ||
       target.symlinkStatus !== "not-symlink" ||
       !isPriorTarget(target.approvedPriorTarget) ||
-      target.normalizedPath <= previous
+      target.normalizedPath <= previous ||
+      targetKeys.has(targetKey)
     )
       return false;
     previous = target.normalizedPath;
+    targetKeys.add(targetKey);
   }
   return true;
 };
@@ -1147,6 +1165,54 @@ if (import.meta.vitest) {
           transition,
           approvalFingerprint(),
           "2026-07-20T01:00:00.000Z",
+        ),
+      ).toBe(false);
+    });
+
+    it("rejects case-folded target collisions only on insensitive filesystems", () => {
+      const caseVariantPlan = (
+        filesystemCaseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"],
+      ): VerifiedReadyExportPlan => {
+        const plan = structuredClone(
+          completeReadyPlan(),
+        ) as VerifiedReadyExportPlan;
+        const repository = plan.repositoryFingerprint as unknown as {
+          filesystemCaseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"];
+          targets: RepositoryTargetFingerprint[];
+        };
+        repository.filesystemCaseSensitivity = filesystemCaseSensitivity;
+        (repository.targets[1] as { normalizedPath: string }).normalizedPath =
+          "Content/Post.mdx";
+        repository.targets.sort((left, right) =>
+          compareCodeUnitStrings(left.normalizedPath, right.normalizedPath),
+        );
+        (plan.actions[1] as unknown as { targetPath: string }).targetPath =
+          "Content/Post.mdx";
+        (
+          plan.approvalFingerprint as unknown as {
+            repositoryFingerprint: RepositoryFingerprint;
+          }
+        ).repositoryFingerprint = structuredClone(plan.repositoryFingerprint);
+        return plan;
+      };
+      const transition = { generationToken, planId };
+      const currentUtc = "2026-07-20T01:00:00.000Z";
+      const sensitivePlan = caseVariantPlan("sensitive");
+      expect(
+        matchesApprovalContext(
+          sensitivePlan,
+          transition,
+          sensitivePlan.approvalFingerprint,
+          currentUtc,
+        ),
+      ).toBe(true);
+      const insensitivePlan = caseVariantPlan("insensitive");
+      expect(
+        matchesApprovalContext(
+          insensitivePlan,
+          transition,
+          insensitivePlan.approvalFingerprint,
+          currentUtc,
         ),
       ).toBe(false);
     });
