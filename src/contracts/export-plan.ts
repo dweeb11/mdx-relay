@@ -1,11 +1,8 @@
 import {
   createIssue,
+  isMdxRelayIssue,
   ISSUE_CODES,
-  ISSUE_REGISTRY,
-  toSafePathLabel,
   type BlockerIssue,
-  type SourcePoint,
-  type SourceRange,
   type WarningIssue,
 } from "./issues";
 
@@ -47,7 +44,7 @@ export interface SourceImageMetadata {
   readonly transformedOutputSha256: Sha256Digest;
 }
 export interface SealedOutput {
-  /** Plan-relative, never absolute and never prefixed by plans/<planId>/. */
+  /** Plan-relative, never absolute, never under plans/ in any case form. */
   readonly planRelativePath: string;
   readonly byteLength: number;
   readonly contentSha256: Sha256Digest;
@@ -518,7 +515,8 @@ const hasPortableRelativePathShape = (value: unknown): value is string => {
     );
 };
 const isPlanRelativePath = (value: unknown): value is string =>
-  hasPortableRelativePathShape(value) && !value.startsWith("plans/");
+  hasPortableRelativePathShape(value) &&
+  !value.toLowerCase().startsWith("plans/");
 const isRepositoryTargetPath = (value: unknown): value is string =>
   hasPortableRelativePathShape(value) &&
   !value.split("/").some((segment) => segment.toLowerCase() === ".git");
@@ -636,61 +634,9 @@ const isExportAction = (value: unknown): value is ExportAction =>
   ((value.kind === "create" && value.approvedPriorTarget.state === "absent") ||
     (value.kind === "update" && value.approvedPriorTarget.state === "file"));
 
-const isSourcePoint = (value: unknown): value is SourcePoint =>
-  exactObject(value, ["line", "column", "offset"]) &&
-  isNonnegativeInteger(value.line) &&
-  isNonnegativeInteger(value.column) &&
-  isNonnegativeInteger(value.offset);
-const isSourceRange = (value: unknown): value is SourceRange => {
-  if (!exactObject(value, ["start", "end"])) return false;
-  const { start, end } = value;
-  if (!isSourcePoint(start) || !isSourcePoint(end)) return false;
-  return (
-    end.offset >= start.offset &&
-    (end.line > start.line ||
-      (end.line === start.line && end.column >= start.column))
-  );
-};
 /** Stored warning issues must equal registry-owned policy exactly. */
-const isWarningIssue = (value: unknown): value is WarningIssue => {
-  if (!isRecord(value) || typeof value.code !== "string") return false;
-  if (!Object.prototype.hasOwnProperty.call(ISSUE_REGISTRY, value.code))
-    return false;
-  const definition = ISSUE_REGISTRY[value.code as keyof typeof ISSUE_REGISTRY];
-  if (
-    definition.severity !== "warning" ||
-    !hasExactKeys(value, [
-      "code",
-      "severity",
-      "stage",
-      "displayDetails",
-      "recoveryActions",
-      ...("sourceRange" in value ? ["sourceRange"] : []),
-      ...("safePathLabel" in value ? ["safePathLabel"] : []),
-    ]) ||
-    value.severity !== definition.severity ||
-    value.stage !== definition.stage ||
-    !sameValue(value.recoveryActions, [...definition.recoveryActions])
-  )
-    return false;
-  const details = value.displayDetails;
-  if (
-    !isRecord(details) ||
-    !hasExactKeys(details, [
-      "summary",
-      ...("count" in details ? ["count"] : []),
-    ]) ||
-    details.summary !== definition.summary ||
-    ("count" in details && !isNonnegativeInteger(details.count))
-  )
-    return false;
-  if ("sourceRange" in value && !isSourceRange(value.sourceRange)) return false;
-  return (
-    !("safePathLabel" in value) ||
-    (typeof value.safePathLabel === "string" &&
-      toSafePathLabel(value.safePathLabel) === value.safePathLabel)
-  );
-};
+const isWarningIssue = (value: unknown): value is WarningIssue =>
+  isMdxRelayIssue(value) && value.severity === "warning";
 
 export function matchesPlanIdentity(
   actual: unknown,
@@ -1830,6 +1776,8 @@ if (import.meta.vitest) {
         "outputs/\u0000blob",
         "/absolute/blob",
         "plans/plan-1/blob",
+        "Plans/plan-1/blob",
+        "PLANS/recovery.json",
         "outputs/CON",
         "outputs/con.blob",
         "nul/blob",

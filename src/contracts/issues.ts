@@ -527,6 +527,88 @@ export function createIssue<C extends IssueCode>(
   }) as MdxRelayIssue<C>;
 }
 
+const hasExactIssueKeys = (
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean => {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
+};
+const isStoredSourcePoint = (value: unknown): value is SourcePoint =>
+  isRecord(value) &&
+  hasExactIssueKeys(value, ["line", "column", "offset"]) &&
+  isSafeInteger(value.line) &&
+  isSafeInteger(value.column) &&
+  isSafeInteger(value.offset);
+const isStoredSourceRange = (value: unknown): value is SourceRange => {
+  if (!isRecord(value) || !hasExactIssueKeys(value, ["start", "end"]))
+    return false;
+  const { start, end } = value;
+  if (!isStoredSourcePoint(start) || !isStoredSourcePoint(end)) return false;
+  return (
+    end.offset >= start.offset &&
+    (end.line > start.line ||
+      (end.line === start.line && end.column >= start.column))
+  );
+};
+
+/**
+ * Accepts only complete stored issue payloads whose policy fields equal the
+ * registry exactly. Boundary code must reject anything else fail-closed
+ * before treating restored issue data as trusted.
+ */
+export function isMdxRelayIssue(value: unknown): value is MdxRelayIssue {
+  if (!isRecord(value) || typeof value.code !== "string") return false;
+  if (!Object.prototype.hasOwnProperty.call(ISSUE_REGISTRY, value.code))
+    return false;
+  const definition = ISSUE_REGISTRY[value.code as keyof typeof ISSUE_REGISTRY];
+  if (
+    !hasExactIssueKeys(value, [
+      "code",
+      "severity",
+      "stage",
+      "displayDetails",
+      "recoveryActions",
+      ...("sourceRange" in value ? ["sourceRange"] : []),
+      ...("safePathLabel" in value ? ["safePathLabel"] : []),
+    ]) ||
+    value.severity !== definition.severity ||
+    value.stage !== definition.stage
+  )
+    return false;
+  const { recoveryActions } = value;
+  if (
+    !Array.isArray(recoveryActions) ||
+    recoveryActions.length !== definition.recoveryActions.length ||
+    !definition.recoveryActions.every(
+      (action, index) => recoveryActions[index] === action,
+    )
+  )
+    return false;
+  const details = value.displayDetails;
+  if (
+    !isRecord(details) ||
+    !hasExactIssueKeys(details, [
+      "summary",
+      ...("count" in details ? ["count"] : []),
+    ]) ||
+    details.summary !== definition.summary ||
+    ("count" in details && !isSafeInteger(details.count))
+  )
+    return false;
+  if ("sourceRange" in value && !isStoredSourceRange(value.sourceRange))
+    return false;
+  return (
+    !("safePathLabel" in value) ||
+    (typeof value.safePathLabel === "string" &&
+      toSafePathLabel(value.safePathLabel) === value.safePathLabel)
+  );
+}
+
 if (import.meta.vitest) {
   const { describe, expect, it } = import.meta.vitest;
 
@@ -652,6 +734,69 @@ if (import.meta.vitest) {
         { safePathLabel: canary, credentialUrl: canary },
       );
       expect(JSON.stringify(issue)).not.toContain(canary);
+    });
+
+    it("accepts only registry-coherent stored issue payloads", () => {
+      const warning = createIssue(
+        ISSUE_CODES.wikilinksFlattened,
+        { count: 1 },
+        {
+          sourceRange: {
+            start: { line: 1, column: 0, offset: 0 },
+            end: { line: 1, column: 4, offset: 4 },
+          },
+          safePathLabel: "notes/example.md",
+        },
+      );
+      const blocker = createIssue(ISSUE_CODES.invalidMdx);
+      expect(isMdxRelayIssue(warning)).toBe(true);
+      expect(isMdxRelayIssue(blocker)).toBe(true);
+      const malformedPayloads: readonly unknown[] = [
+        null,
+        "issue",
+        [],
+        {},
+        { ...blocker, displayDetails: { summary: "secret" } },
+        {
+          ...blocker,
+          displayDetails: { ...blocker.displayDetails, leaked: "secret" },
+        },
+        {
+          ...warning,
+          displayDetails: { ...warning.displayDetails, count: -1 },
+        },
+        { ...blocker, severity: "warning" },
+        { ...blocker, stage: "profile" },
+        {
+          ...blocker,
+          recoveryActions: [...blocker.recoveryActions, RECOVERY_ACTIONS.retry],
+        },
+        { ...blocker, recoveryActions: [RECOVERY_ACTIONS.retry] },
+        { ...blocker, extra: true },
+        { ...warning, sourceRange: { start: {}, end: {} } },
+        {
+          ...warning,
+          sourceRange: {
+            start: { line: 1, column: 0, offset: 0 },
+            end: { line: 1, column: 4, offset: 4 },
+            extra: 1,
+          },
+        },
+        {
+          ...warning,
+          sourceRange: {
+            start: { line: 2, column: 0, offset: 9 },
+            end: { line: 1, column: 0, offset: 3 },
+          },
+        },
+        { ...warning, safePathLabel: "../secret" },
+        { ...warning, safePathLabel: 7 },
+      ];
+      for (const malformed of malformedPayloads) {
+        expect(isMdxRelayIssue(malformed), JSON.stringify(malformed)).toBe(
+          false,
+        );
+      }
     });
 
     it("clones coherent source ranges and omits malformed optional locations", () => {
@@ -1053,6 +1198,7 @@ if (import.meta.vitest) {
         "WorkerWireEvent",
         "createIssue",
         "err",
+        "isMdxRelayIssue",
         "matchesApprovalContext",
         "matchesPlanIdentity",
         "mdxRelayErr",
