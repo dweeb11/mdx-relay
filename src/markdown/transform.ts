@@ -289,7 +289,7 @@ const escapeProse = (
     } else if (character === "}") {
       output += "&#125;";
       count += 1;
-    } else if (character === "<" && /[\s\d]/u.test(value[offset + 1] ?? "")) {
+    } else if (character === "<") {
       output += "&lt;";
       count += 1;
     } else {

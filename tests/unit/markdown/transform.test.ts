@@ -192,18 +192,25 @@ describe("transformMarkdown", () => {
     );
   });
 
-  it.each([
-    ["non-MDX tag", "[[Target|<b]]"],
-    ["trailing less-than", "[[Target|<]]"],
-  ])(
-    "validates an unescaped less-than produced by a wikilink label: %s",
-    async (_name, body) => {
-      const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.error.code).toBe(ISSUE_CODES.invalidMdx);
-    },
-  );
+  it("escapes alias text that could compose executable MDX", async () => {
+    const body = [
+      "[[Target|<b]]",
+      "[[Target|<]]",
+      "[[Target|<Foo.Bar />]]",
+      "[[Open|<]]>fragment[[Close|<]]/>",
+      "[[Open|<]]Component />",
+    ].join("\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("&lt;b");
+    expect(result.value.mdx).toContain("&lt;Foo.Bar />");
+    expect(result.value.mdx).toContain("&lt;>fragment&lt;/>");
+    expect(result.value.mdx).toContain("&lt;Component />");
+    expect(result.value.mdx).not.toContain("<Foo.Bar />");
+    expect(result.value.mdx).not.toContain("<>fragment</>");
+    expect(result.value.mdx).not.toContain("<Component />");
+  });
 
   it("reports invalid MDX for a literal trailing less-than", async () => {
     const result = await transformMarkdown(note("trailing <"), DPW_MIND_NET_V1);
