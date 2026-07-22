@@ -1,4 +1,4 @@
-import { parse as parseEcmascript } from "acorn";
+import { Parser as EcmascriptParser } from "acorn";
 import { parse, postprocess, preprocess } from "micromark";
 import { decodeString } from "micromark-util-decode-string";
 
@@ -191,33 +191,63 @@ const maskMatches = (
   return output + source.slice(cursor);
 };
 
+interface EcmascriptStatement {
+  readonly type: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+interface EcmascriptStatementParser {
+  nextToken(): void;
+  parseStatement(
+    context: null,
+    topLevel: boolean,
+    exports: Readonly<Record<string, never>>,
+  ): EcmascriptStatement;
+}
+
+const StatementParser = EcmascriptParser as unknown as new (
+  options: Readonly<Record<string, unknown>>,
+  input: string,
+  startPos?: number,
+) => EcmascriptStatementParser;
+
+const parseModuleStatementAt = (
+  source: string,
+  start: number,
+): EcmascriptStatement => {
+  const parser = new StatementParser(
+    { ecmaVersion: "latest", sourceType: "module" },
+    source,
+    start,
+  );
+  parser.nextToken();
+  return parser.parseStatement(null, true, {});
+};
+
 const compactModuleDeclarations = (
   source: string,
   ranges: readonly SourceRange[],
 ): readonly { readonly start: number; readonly end: number }[] => {
   const declarations: { readonly start: number; readonly end: number }[] = [];
-  const candidates = proseMatches(
-    source,
-    ranges,
-    /^ {0,3}(?:import(?=["'{*])|export(?=[{*]))[^\r\n]*$/gmu,
+  const candidates = source.matchAll(
+    /^ {0,3}(?:import(?=[/"'{*])|export(?=[/{*]))/gmu,
   );
   for (const candidate of candidates) {
     try {
-      const program = parseEcmascript(candidate[0], {
-        ecmaVersion: "latest",
-        sourceType: "module",
-      });
-      const [statement] = program.body;
+      const statement = parseModuleStatementAt(source, candidate.index);
+      const declaration = {
+        start: statement.start,
+        end: statement.end,
+        replacement: "",
+      };
       if (
-        statement !== undefined &&
         (statement.type === "ImportDeclaration" ||
           statement.type === "ExportAllDeclaration" ||
-          statement.type === "ExportNamedDeclaration")
+          statement.type === "ExportNamedDeclaration") &&
+        !overlapsProtected(declaration, ranges)
       ) {
-        declarations.push({
-          start: candidate.index + statement.start,
-          end: candidate.index + statement.end,
-        });
+        declarations.push(declaration);
       }
       /* v8 ignore start -- malformed compact candidates are not declarations and continue to MDX validation. */
     } catch {

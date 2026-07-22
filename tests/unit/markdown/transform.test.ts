@@ -264,6 +264,68 @@ describe("transformMarkdown", () => {
   });
 
   it.each([
+    [
+      "comment-separated import",
+      'import/*gap*/"x"',
+      'import/*gap*/"x"',
+      { line: 10, column: 1 },
+      { line: 10, column: 17 },
+    ],
+    [
+      "multiline compact export",
+      'export*\nfrom"x"',
+      'export*\nfrom"x"',
+      { line: 10, column: 1 },
+      { line: 11, column: 8 },
+    ],
+    [
+      "import followed by later inline code",
+      'import"x";// `protected`',
+      'import"x";',
+      { line: 10, column: 1 },
+      { line: 10, column: 11 },
+    ],
+  ])(
+    "blocks %s at the exact declaration range",
+    async (_name, body, declaration, expectedStart, expectedEnd) => {
+      const source = note(body);
+      const declarationStart = source.indexOf(declaration);
+      const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.sourceRange).toEqual({
+        start: { ...expectedStart, offset: declarationStart },
+        end: {
+          ...expectedEnd,
+          offset: declarationStart + declaration.length,
+        },
+      });
+      expect(
+        source.slice(
+          result.error.sourceRange!.start.offset,
+          result.error.sourceRange!.end.offset,
+        ),
+      ).toBe(declaration);
+    },
+  );
+
+  it("allows prose controls and declarations wholly inside protected code", async () => {
+    const body = [
+      "important exportable prose remains ordinary.",
+      '`import/*gap*/"x"`',
+      "```js",
+      "export*",
+      'from"x"',
+      "```",
+    ].join("\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(body);
+  });
+
+  it.each([
     ["import", "import Thing from 'thing'"],
     ["compact side-effect import", 'import"side-effect"'],
     ["compact named import", 'import{x}from"pkg"'],
