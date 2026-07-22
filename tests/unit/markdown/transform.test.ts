@@ -312,6 +312,136 @@ describe("transformMarkdown", () => {
   );
 
   it.each([
+    [
+      "default function declaration",
+      "export/*gap*/default function Layout() { return null }",
+    ],
+    ["anonymous default function", "export/*gap*/default function() {}"],
+    ["named default class", "export/*g*/default class Layout {}"],
+    ["anonymous default class", "export/*g*/default class {}"],
+    ["default expression", "export/*g*/default 1 + 1;"],
+    [
+      "Unicode default declaration",
+      'export/*α*/default function Ω() { return "🌟" }',
+    ],
+  ])(
+    "blocks a compact %s at the exact declaration range",
+    async (_name, declaration) => {
+      const source = note(declaration);
+      const declarationStart = source.indexOf(declaration);
+      const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.sourceRange).toEqual({
+        start: { line: 10, column: 1, offset: declarationStart },
+        end: {
+          line: 10,
+          column: declaration.length + 1,
+          offset: declarationStart + declaration.length,
+        },
+      });
+      expect(
+        source.slice(
+          result.error.sourceRange!.start.offset,
+          result.error.sourceRange!.end.offset,
+        ),
+      ).toBe(declaration);
+    },
+  );
+
+  it.each([
+    [
+      "line comment",
+      "export//gap\ndefault function Layout() {}",
+      { line: 11, column: 29 },
+    ],
+    [
+      "multiline block comment",
+      "export/*\ngap\n*/default class {}",
+      { line: 12, column: 19 },
+    ],
+  ])(
+    "blocks a compact default export separated by a %s",
+    async (_name, declaration, expectedEnd) => {
+      const source = note(declaration);
+      const declarationStart = source.indexOf(declaration);
+      const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.sourceRange).toEqual({
+        start: { line: 10, column: 1, offset: declarationStart },
+        end: {
+          ...expectedEnd,
+          offset: declarationStart + declaration.length,
+        },
+      });
+      expect(
+        source.slice(
+          result.error.sourceRange!.start.offset,
+          result.error.sourceRange!.end.offset,
+        ),
+      ).toBe(declaration);
+    },
+  );
+
+  it("blocks a compact default export after Unicode prose and protected code", async () => {
+    const declaration = 'export/*β*/default function Ω() { return "🌟" }';
+    const source = note(`α prose \`code\` 🌟\n${declaration}`);
+    const declarationStart = source.indexOf(declaration);
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+    expect(result.error.sourceRange?.start.offset).toBe(declarationStart);
+    expect(result.error.sourceRange?.end.offset).toBe(
+      declarationStart + declaration.length,
+    );
+    expect(
+      source.slice(
+        result.error.sourceRange!.start.offset,
+        result.error.sourceRange!.end.offset,
+      ),
+    ).toBe(declaration);
+  });
+
+  it("preserves compact default exports wholly inside protected code", async () => {
+    const body = [
+      "`export/*gap*/default 1`",
+      "```js",
+      "export/*gap*/default function Layout() { return null }",
+      "export//gap",
+      "default class {}",
+      "```",
+      "",
+      "~~~md",
+      "export/*g*/default class Layout {}",
+      "~~~",
+      "",
+      "    export/*gap*/default function() {}",
+    ].join("\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(body);
+  });
+
+  it("preserves default-export-shaped prose that never forms a declaration", async () => {
+    const body = [
+      "export/**/defaults are ordinary prose.",
+      "exported defaults stay prose.",
+    ].join("\n\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(
+      "export/**/defaults are ordinary prose.",
+    );
+    expect(result.value.mdx).toContain("exported defaults stay prose.");
+  });
+
+  it.each([
     ["side-effect import string", 'import"`x`"'],
     ["comment-separated import", 'import/*`x`*/"pkg"'],
     ["named import string", 'import{x}from"`p`"'],

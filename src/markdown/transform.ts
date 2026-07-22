@@ -359,7 +359,8 @@ const compactModuleDeclarations = (
     if (
       statement.type === "ImportDeclaration" ||
       statement.type === "ExportAllDeclaration" ||
-      statement.type === "ExportNamedDeclaration"
+      statement.type === "ExportNamedDeclaration" ||
+      statement.type === "ExportDefaultDeclaration"
     ) {
       declarations.push({ start: statement.start, end: statement.end });
     }
