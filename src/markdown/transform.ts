@@ -176,6 +176,20 @@ const proseMatches = (
   return matches;
 };
 
+const maskMatches = (
+  source: string,
+  matches: readonly RegExpExecArray[],
+): string => {
+  let cursor = 0;
+  let output = "";
+  for (const match of matches) {
+    output += source.slice(cursor, match.index);
+    output += " ".repeat(match[0].length);
+    cursor = match.index + match[0].length;
+  }
+  return output + source.slice(cursor);
+};
+
 const firstUnsupported = (
   source: string,
   ranges: readonly SourceRange[],
@@ -193,11 +207,18 @@ const firstUnsupported = (
         end: match.index + match[0].length,
       });
 
+  const wikilinks = proseMatches(
+    source,
+    ranges,
+    /(?<!!)\[\[([^\]\r\n]+)\]\]/gu,
+  );
+  const sourceForParsing = maskMatches(source, wikilinks);
+
   try {
     const events = postprocess(
       parse()
         .document()
-        .write(preprocess()(source, "utf8", true)),
+        .write(preprocess()(sourceForParsing, "utf8", true)),
     );
     for (const event of events) {
       if (event[0] !== "enter") continue;
@@ -231,22 +252,9 @@ const firstUnsupported = (
         end: match.index + match[0].length,
       });
   }
-  const wikilinks = proseMatches(
-    source,
-    ranges,
-    /(?<!!)\[\[([^\]\r\n]+)\]\]/gu,
-  );
   for (const match of wikilinks) {
-    const inner = match[1]!;
-    const target = inner.split("|", 1)[0]!.trim();
-    const display = (
-      inner.includes("|") ? inner.split("|").at(-1)! : inner
-    ).trim();
-    if (
-      isLocalAttachmentDestination(target) ||
-      display.includes("<>") ||
-      display.includes("</>")
-    )
+    const target = match[1]!.split("|", 1)[0]!.trim();
+    if (isLocalAttachmentDestination(target))
       candidates.push({
         start: match.index,
         end: match.index + match[0].length,

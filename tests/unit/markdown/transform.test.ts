@@ -196,7 +196,10 @@ describe("transformMarkdown", () => {
     const body = [
       "[[Target|<b]]",
       "[[Target|<]]",
+      "[[Target|<Component />]]",
+      "[[Target|<>fragment</>]]",
       "[[Target|<Foo.Bar />]]",
+      "[[Target|<svg:path />]]",
       "[[Open|<]]>fragment[[Close|<]]/>",
       "[[Open|<]]Component />",
     ].join("\n");
@@ -205,9 +208,11 @@ describe("transformMarkdown", () => {
     if (!result.ok) return;
     expect(result.value.mdx).toContain("&lt;b");
     expect(result.value.mdx).toContain("&lt;Foo.Bar />");
+    expect(result.value.mdx).toContain("&lt;svg:path />");
     expect(result.value.mdx).toContain("&lt;>fragment&lt;/>");
     expect(result.value.mdx).toContain("&lt;Component />");
     expect(result.value.mdx).not.toContain("<Foo.Bar />");
+    expect(result.value.mdx).not.toContain("<svg:path />");
     expect(result.value.mdx).not.toContain("<>fragment</>");
     expect(result.value.mdx).not.toContain("<Component />");
   });
@@ -257,8 +262,6 @@ describe("transformMarkdown", () => {
     ["JSX", '<Component value="x" />'],
     ["inline JSX", 'prefix <Component value="x" /> suffix'],
     ["nested JSX", '<div className="shell"><Component /></div>'],
-    ["wikilink alias JSX", "[[Target|<Component />]]"],
-    ["wikilink alias fragment", "[[Target|<>fragment</>]]"],
     ["fragment", "<>fragment</>"],
     ["expression", "{dangerous}"],
     ["multiline expression", "{\n  dangerous\n}"],
