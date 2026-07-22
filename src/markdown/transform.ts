@@ -1,3 +1,4 @@
+import { parse as parseEcmascript } from "acorn";
 import { parse, postprocess, preprocess } from "micromark";
 import { decodeString } from "micromark-util-decode-string";
 
@@ -190,6 +191,43 @@ const maskMatches = (
   return output + source.slice(cursor);
 };
 
+const compactModuleDeclarations = (
+  source: string,
+  ranges: readonly SourceRange[],
+): readonly { readonly start: number; readonly end: number }[] => {
+  const declarations: { readonly start: number; readonly end: number }[] = [];
+  const candidates = proseMatches(
+    source,
+    ranges,
+    /^ {0,3}(?:import(?=["'{*])|export(?=[{*]))[^\r\n]*$/gmu,
+  );
+  for (const candidate of candidates) {
+    try {
+      const program = parseEcmascript(candidate[0], {
+        ecmaVersion: "latest",
+        sourceType: "module",
+      });
+      const [statement] = program.body;
+      if (
+        statement !== undefined &&
+        (statement.type === "ImportDeclaration" ||
+          statement.type === "ExportAllDeclaration" ||
+          statement.type === "ExportNamedDeclaration")
+      ) {
+        declarations.push({
+          start: candidate.index + statement.start,
+          end: candidate.index + statement.end,
+        });
+      }
+      /* v8 ignore start -- malformed compact candidates are not declarations and continue to MDX validation. */
+    } catch {
+      // Invalid JavaScript is prose here; final MDX validation remains fail closed.
+    }
+    /* v8 ignore stop */
+  }
+  return declarations;
+};
+
 const firstUnsupported = (
   source: string,
   ranges: readonly SourceRange[],
@@ -213,6 +251,7 @@ const firstUnsupported = (
         start: match.index,
         end: match.index + match[0].length,
       });
+  candidates.push(...compactModuleDeclarations(sourceForParsing, ranges));
 
   try {
     const events = postprocess(

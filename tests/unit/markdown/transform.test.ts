@@ -134,12 +134,14 @@ describe("transformMarkdown", () => {
   it("escapes prose but preserves inline, fenced, and indented code bytes", async () => {
     const body = [
       "A comparison is < 3 and {value}.",
-      "Inline `[[code]] {raw} < 2` remains.",
+      'Inline `[[code]] {raw} < 2 import"side-effect" export*from"pkg"` remains.',
       "~~~md",
       "> [!note] untouched",
       "![[inside.png]]",
+      'import"side-effect"',
+      'export*from"pkg"',
       "~~~",
-      "    [[indented]] {raw} < 2",
+      '    [[indented]] {raw} < 2 import"side-effect" export*from"pkg"',
     ].join("\n");
     const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
     expect(result.ok).toBe(true);
@@ -147,17 +149,22 @@ describe("transformMarkdown", () => {
     expect(result.value.mdx).toContain(
       "A comparison is &lt; 3 and &#123;value&#125;.",
     );
-    expect(result.value.mdx).toContain("`[[code]] {raw} < 2`");
     expect(result.value.mdx).toContain(
-      "~~~md\n> [!note] untouched\n![[inside.png]]\n~~~",
+      '`[[code]] {raw} < 2 import"side-effect" export*from"pkg"`',
     );
-    expect(result.value.mdx).toContain("    [[indented]] {raw} < 2");
+    expect(result.value.mdx).toContain(
+      '~~~md\n> [!note] untouched\n![[inside.png]]\nimport"side-effect"\nexport*from"pkg"\n~~~',
+    );
+    expect(result.value.mdx).toContain(
+      '    [[indented]] {raw} < 2 import"side-effect" export*from"pkg"',
+    );
     expect(result.value.images).toEqual([]);
   });
 
   it("preserves ordinary HTML, links, hard breaks, and prose beginning with export", async () => {
     const body = [
       "exporting ideas is ordinary prose.",
+      "important and exportable are ordinary prose words.",
       '<div className="notice">valid HTML</div>',
       "A [normal link](https://example.invalid/page) remains.  ",
       "An [external attachment link](https://example.invalid/archive.7z) remains.",
@@ -258,7 +265,13 @@ describe("transformMarkdown", () => {
 
   it.each([
     ["import", "import Thing from 'thing'"],
+    ["compact side-effect import", 'import"side-effect"'],
+    ["compact named import", 'import{x}from"pkg"'],
+    ["compact namespace import", 'import*as ns from"pkg"'],
     ["export", "export const value = 1"],
+    ["compact star export", 'export*from"pkg"'],
+    ["compact named export", 'export{x}from"pkg"'],
+    ["compact aliased export", 'export{default as value}from"pkg"'],
     ["JSX", '<Component value="x" />'],
     ["inline JSX", 'prefix <Component value="x" /> suffix'],
     ["nested JSX", '<div className="shell"><Component /></div>'],

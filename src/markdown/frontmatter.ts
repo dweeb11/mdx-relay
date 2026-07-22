@@ -1,4 +1,6 @@
 import {
+  Document,
+  Scalar,
   isAlias,
   isMap,
   isScalar,
@@ -52,12 +54,26 @@ export function slugify(title: string): string {
 
 const yamlScalar = (value: string): string => stringify(value).trimEnd();
 
-const inlineYamlScalar = (value: string): string =>
-  value.includes("\n") || value.includes("\r")
-    ? JSON.stringify(value)
-    : yamlScalar(value);
-
 const quotedScalar = (value: string): string => JSON.stringify(value);
+
+const flowYamlSequence = (values: readonly string[]): string => {
+  const document = new Document(values);
+  /* v8 ignore next -- a Document constructed from an array always contains a sequence. */
+  if (!isSeq(document.contents)) return "[]";
+  document.contents.flow = true;
+  for (const item of document.contents.items) {
+    if (
+      isScalar(item) &&
+      typeof item.value === "string" &&
+      /[\r\n]/u.test(item.value)
+    ) {
+      item.type = Scalar.QUOTE_DOUBLE;
+    }
+  }
+  return document
+    .toString({ flowCollectionPadding: false, lineWidth: 0 })
+    .trimEnd();
+};
 
 export function serializeFrontmatter(data: DpwPostFrontmatter): string {
   return [
@@ -65,7 +81,7 @@ export function serializeFrontmatter(data: DpwPostFrontmatter): string {
     `title: ${yamlScalar(data.title)}`,
     `date: ${quotedScalar(data.date)}`,
     `summary: ${yamlScalar(data.summary)}`,
-    `labels: [${data.labels.map(inlineYamlScalar).join(", ")}]`,
+    `labels: ${flowYamlSequence(data.labels)}`,
     `topic: ${yamlScalar(data.topic)}`,
     `msg: ${quotedScalar(data.msg)}`,
     `read: ${yamlScalar(data.read)}`,
