@@ -42,6 +42,7 @@ describe("slugify", () => {
     );
     expect(slugify("Dave’s BBS!")).toBe("daves-bbs");
     expect(slugify("  déjà vu  ")).toBe("d-j-vu");
+    expect(slugify("!!!")).toBe("untitled");
   });
 });
 

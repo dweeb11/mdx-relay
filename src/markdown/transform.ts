@@ -237,8 +237,16 @@ const firstUnsupported = (
     /(?<!!)\[\[([^\]\r\n]+)\]\]/gu,
   );
   for (const match of wikilinks) {
-    const target = match[1]!.split("|", 1)[0]!.trim();
-    if (isLocalAttachmentDestination(target))
+    const inner = match[1]!;
+    const target = inner.split("|", 1)[0]!.trim();
+    const display = (
+      inner.includes("|") ? inner.split("|").at(-1)! : inner
+    ).trim();
+    if (
+      isLocalAttachmentDestination(target) ||
+      display.includes("<>") ||
+      display.includes("</>")
+    )
       candidates.push({
         start: match.index,
         end: match.index + match[0].length,

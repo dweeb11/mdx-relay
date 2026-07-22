@@ -42,11 +42,12 @@ const invalidFrontmatter = (): Result<never, MdxRelayIssue> =>
   err(createIssue(ISSUE_CODES.invalidFrontmatter));
 
 export function slugify(title: string): string {
-  return title
+  const slug = title
     .toLowerCase()
     .replaceAll(/[\u0027\u2018\u2019]/gu, "")
     .replaceAll(/[^a-z0-9]+/gu, "-")
     .replaceAll(/^-+|-+$/gu, "");
+  return slug || "untitled";
 }
 
 const yamlScalar = (value: string): string => stringify(value).trimEnd();

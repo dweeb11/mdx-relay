@@ -250,6 +250,8 @@ describe("transformMarkdown", () => {
     ["JSX", '<Component value="x" />'],
     ["inline JSX", 'prefix <Component value="x" /> suffix'],
     ["nested JSX", '<div className="shell"><Component /></div>'],
+    ["wikilink alias JSX", "[[Target|<Component />]]"],
+    ["wikilink alias fragment", "[[Target|<>fragment</>]]"],
     ["fragment", "<>fragment</>"],
     ["expression", "{dangerous}"],
     ["multiline expression", "{\n  dangerous\n}"],
