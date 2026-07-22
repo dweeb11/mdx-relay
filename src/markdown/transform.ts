@@ -198,31 +198,104 @@ interface EcmascriptStatement {
 }
 
 interface EcmascriptStatementParser {
+  pos: number;
+  start: number;
+  end: number;
+  lastTokStart: number;
+  lastTokEnd: number;
   nextToken(): void;
   parseStatement(
     context: null,
     topLevel: boolean,
     exports: Readonly<Record<string, never>>,
   ): EcmascriptStatement;
+  skipBlockComment(): void;
+  raise(position: number, message: string): never;
+  raiseRecoverable(position: number, message: string): never;
 }
 
 const StatementParser = EcmascriptParser as unknown as new (
   options: Readonly<Record<string, unknown>>,
   input: string,
-  startPos?: number,
 ) => EcmascriptStatementParser;
+
+// Flat scan cost charged per block comment: the parser below resolves any
+// comment with one indexed lookup, so its contents are never rescanned.
+const commentScanCost = 16;
+
+// Acorn rescans from offset zero to derive the start line, formats every
+// failure with another such rescan, and finds `*/` by searching to the end of
+// input. Parsing each compact candidate this way made repeated malformed
+// candidates quadratic (APP-595). This subclass preserves Acorn's grammar,
+// token stream, and statement offsets while making each candidate cost only
+// the characters it newly consumes: the start state is seeded directly (line
+// bookkeeping stays dead because locations are disabled and `raise` stops
+// formatting positions), block comments resolve against one shared sorted
+// `*/` index, and failures throw without deriving line information.
+class CompactCandidateParser extends StatementParser {
+  readonly commentCloses: readonly number[];
+
+  // Characters inside skipped block comments beyond the flat cost, excluded
+  // from the scan budget because they are never rescanned.
+  commentExcess = 0;
+
+  constructor(source: string, start: number, commentCloses: readonly number[]) {
+    super({ ecmaVersion: "latest", sourceType: "module" }, source);
+    this.commentCloses = commentCloses;
+    this.pos = start;
+    this.start = start;
+    this.end = start;
+    this.lastTokStart = start;
+    this.lastTokEnd = start;
+  }
+
+  override skipBlockComment(): void {
+    const opening = this.pos;
+    this.pos += 2;
+    let low = 0;
+    let high = this.commentCloses.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.commentCloses[middle]! < this.pos) low = middle + 1;
+      else high = middle;
+    }
+    const close = this.commentCloses[low];
+    if (close === undefined) this.raise(opening, "Unterminated comment");
+    this.pos = close + 2;
+    const skipped = this.pos - opening;
+    if (skipped > commentScanCost)
+      this.commentExcess += skipped - commentScanCost;
+  }
+
+  override raise(position: number, message: string): never {
+    throw new SyntaxError(`${message} at ${String(position)}`);
+  }
+
+  override raiseRecoverable(position: number, message: string): never {
+    this.raise(position, message);
+  }
+}
 
 const parseModuleStatementAt = (
   source: string,
   start: number,
-): EcmascriptStatement => {
-  const parser = new StatementParser(
-    { ecmaVersion: "latest", sourceType: "module" },
-    source,
-    start,
-  );
-  parser.nextToken();
-  return parser.parseStatement(null, true, {});
+  commentCloses: readonly number[],
+): {
+  readonly statement: EcmascriptStatement | undefined;
+  readonly scanCost: number;
+} => {
+  const parser = new CompactCandidateParser(source, start, commentCloses);
+  let statement: EcmascriptStatement | undefined;
+  try {
+    parser.nextToken();
+    statement = parser.parseStatement(null, true, {});
+  } catch {
+    // Invalid JavaScript is prose here; final MDX validation remains fail closed.
+  }
+  return Object.freeze({
+    statement,
+    scanCost: parser.pos - parser.commentExcess - start,
+  });
 };
 
 const compactModuleDeclarations = (
@@ -233,27 +306,61 @@ const compactModuleDeclarations = (
   const candidates = source.matchAll(
     /^ {0,3}(?:import(?=[/"'{*])|export(?=[/{*]))/gmu,
   );
+  const commentCloses = [...source.matchAll(/\*\//gu)].map(
+    (close) => close.index,
+  );
+  // Candidate parses may overlap, so hostile notes could still multiply the
+  // per-candidate costs above. Capping total consumed characters at a fixed
+  // multiple of the source length keeps the scan near-linear: O(source)
+  // tokenizer work plus one O(log closes) lookup per skipped comment.
+  // Ordinary notes stay far below the cap because each failing candidate
+  // consumes only its own statement or line, while a note that exceeds it is
+  // reported as unsupported at the current candidate — exhaustion fails
+  // closed instead of skipping detection.
+  const scanBudget = source.length * 4 + 1024;
+  let scanned = 0;
+  let protectedIndex = 0;
   for (const candidate of candidates) {
-    try {
-      const statement = parseModuleStatementAt(source, candidate.index);
-      const declaration = {
-        start: statement.start,
-        end: statement.end,
-        replacement: "",
-      };
-      if (
-        (statement.type === "ImportDeclaration" ||
-          statement.type === "ExportAllDeclaration" ||
-          statement.type === "ExportNamedDeclaration") &&
-        !overlapsProtected(declaration, ranges)
-      ) {
-        declarations.push(declaration);
-      }
-      /* v8 ignore start -- malformed compact candidates are not declarations and continue to MDX validation. */
-    } catch {
-      // Invalid JavaScript is prose here; final MDX validation remains fail closed.
+    for (;;) {
+      const preceding = ranges[protectedIndex];
+      if (preceding === undefined || preceding.end.offset > candidate.index)
+        break;
+      protectedIndex += 1;
     }
-    /* v8 ignore stop */
+    // A candidate inside protected code always yields a statement that
+    // overlaps its range and is discarded below; skip the parse so protected
+    // content cannot consume the scan budget.
+    const enclosing = ranges[protectedIndex];
+    if (enclosing !== undefined && enclosing.start.offset <= candidate.index)
+      continue;
+    if (scanned > scanBudget) {
+      declarations.push({
+        start: candidate.index,
+        end: candidate.index + candidate[0].length,
+      });
+      break;
+    }
+    const parsed = parseModuleStatementAt(
+      source,
+      candidate.index,
+      commentCloses,
+    );
+    scanned += parsed.scanCost;
+    const statement = parsed.statement;
+    if (statement === undefined) continue;
+    const declaration = {
+      start: statement.start,
+      end: statement.end,
+      replacement: "",
+    };
+    if (
+      (statement.type === "ImportDeclaration" ||
+        statement.type === "ExportAllDeclaration" ||
+        statement.type === "ExportNamedDeclaration") &&
+      !overlapsProtected(declaration, ranges)
+    ) {
+      declarations.push(declaration);
+    }
   }
   return declarations;
 };
