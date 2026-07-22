@@ -311,6 +311,38 @@ describe("transformMarkdown", () => {
     },
   );
 
+  it.each([
+    ["side-effect import string", 'import"`x`"'],
+    ["comment-separated import", 'import/*`x`*/"pkg"'],
+    ["named import string", 'import{x}from"`p`"'],
+    ["star export string", 'export*from"a`b`c"'],
+    ["comment-separated export", "export/*`c`*/{}"],
+  ])(
+    "blocks a compact declaration whose %s carries backtick code spans",
+    async (_name, declaration) => {
+      const source = note(declaration);
+      const declarationStart = source.indexOf(declaration);
+      const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.sourceRange).toEqual({
+        start: { line: 10, column: 1, offset: declarationStart },
+        end: {
+          line: 10,
+          column: declaration.length + 1,
+          offset: declarationStart + declaration.length,
+        },
+      });
+      expect(
+        source.slice(
+          result.error.sourceRange!.start.offset,
+          result.error.sourceRange!.end.offset,
+        ),
+      ).toBe(declaration);
+    },
+  );
+
   it("allows prose controls and declarations wholly inside protected code", async () => {
     const body = [
       "important exportable prose remains ordinary.",
@@ -318,7 +350,12 @@ describe("transformMarkdown", () => {
       "```js",
       "export*",
       'from"x"',
+      'import"`x`"',
+      'export*from"a`b`c"',
+      "export/*`c`*/{}",
       "```",
+      "",
+      '    import/*`x`*/"pkg"',
     ].join("\n");
     const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
     expect(result.ok).toBe(true);
@@ -350,16 +387,11 @@ describe("transformMarkdown", () => {
   );
 
   it("preserves module-shaped prose that never forms a compact declaration", async () => {
-    const body = [
-      "import/**/(0)",
-      'export*from"a`b`c"',
-      'export{a as b,c as b}from"x"',
-    ].join("\n\n");
+    const body = ["import/**/(0)", 'export{a as b,c as b}from"x"'].join("\n\n");
     const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.mdx).toContain("import/**/(0)");
-    expect(result.value.mdx).toContain('export*from"a`b`c"');
     expect(result.value.mdx).toContain(
       'export&#123;a as b,c as b&#125;from"x"',
     );

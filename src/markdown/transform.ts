@@ -327,9 +327,10 @@ const compactModuleDeclarations = (
         break;
       protectedIndex += 1;
     }
-    // A candidate inside protected code always yields a statement that
-    // overlaps its range and is discarded below; skip the parse so protected
-    // content cannot consume the scan budget.
+    // Whether a candidate begins inside protected code is the only
+    // protected-range question for compact declarations, so it is settled
+    // here: a candidate that does is preserved verbatim, and skipping it
+    // before parsing also keeps protected content out of the scan budget.
     const enclosing = ranges[protectedIndex];
     if (enclosing !== undefined && enclosing.start.offset <= candidate.index)
       continue;
@@ -348,18 +349,19 @@ const compactModuleDeclarations = (
     scanned += parsed.scanCost;
     const statement = parsed.statement;
     if (statement === undefined) continue;
-    const declaration = {
-      start: statement.start,
-      end: statement.end,
-      replacement: "",
-    };
+    // Only the start position matters. A declaration that begins in prose is
+    // executable ESM even when its JavaScript strings or comments contain
+    // backtick pairs that CommonMark reports as inline code, and a later
+    // unrelated code span must not hide it either, so internal overlap never
+    // suppresses the declaration. The candidate anchor is a line start and the
+    // parser only skips spaces to reach `statement.start`, so no protected
+    // range can begin between the offset checked above and the declaration.
     if (
-      (statement.type === "ImportDeclaration" ||
-        statement.type === "ExportAllDeclaration" ||
-        statement.type === "ExportNamedDeclaration") &&
-      !overlapsProtected(declaration, ranges)
+      statement.type === "ImportDeclaration" ||
+      statement.type === "ExportAllDeclaration" ||
+      statement.type === "ExportNamedDeclaration"
     ) {
-      declarations.push(declaration);
+      declarations.push({ start: statement.start, end: statement.end });
     }
   }
   return declarations;
