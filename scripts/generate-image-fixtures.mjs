@@ -1,8 +1,10 @@
 // Regenerates the sanitized synthetic image fixtures under tests/fixtures/images.
 // The vectors are procedural gradients — no private or personal content — so the
 // repository never carries baseline image bytes. Run: node scripts/generate-image-fixtures.mjs
+/* global WebAssembly */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import process from "node:process";
+import { fileURLToPath, URL } from "node:url";
 
 const jsquash = new URL("../node_modules/@jsquash/", import.meta.url);
 const outDir = fileURLToPath(
@@ -14,7 +16,6 @@ const compile = async (relativePath) =>
 
 const pngEncode = await import(new URL("png/encode.js", jsquash).href);
 const jpegEncode = await import(new URL("jpeg/encode.js", jsquash).href);
-const webpEncode = await import(new URL("webp/encode.js", jsquash).href);
 
 await pngEncode.init(await compile("png/codec/pkg/squoosh_png_bg.wasm"));
 await jpegEncode.init(await compile("jpeg/codec/enc/mozjpeg_enc.wasm"));

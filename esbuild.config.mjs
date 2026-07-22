@@ -39,6 +39,11 @@ const sharedBuildOptions = {
   target: "es2021",
   platform: "browser",
   treeShaking: true,
+  // Codec WASM is inlined into the worker bundle as bytes, so the worker
+  // instantiates from precompiled modules with no runtime fetch or fs access.
+  loader: {
+    ".wasm": "binary",
+  },
   define: {
     "import.meta.vitest": "undefined",
   },
@@ -67,19 +72,29 @@ if (mode === "probe-node-builtins") {
     `bundle probe: Node built-ins remain external (${externalImports.join(", ")})\n`,
   );
 } else {
-  const context = await esbuild.context({
-    ...sharedBuildOptions,
-    entryPoints: ["src/main.ts"],
-    sourcemap: production ? false : "inline",
-    minify: production,
-    outfile: "dist/main.js",
-    logLevel: "info",
-  });
+  const entries = [
+    { entryPoints: ["src/main.ts"], outfile: "dist/main.js" },
+    {
+      entryPoints: ["src/worker/processing.worker.ts"],
+      outfile: "dist/processing.worker.js",
+    },
+  ];
+  const contexts = await Promise.all(
+    entries.map((entry) =>
+      esbuild.context({
+        ...sharedBuildOptions,
+        ...entry,
+        sourcemap: production ? false : "inline",
+        minify: production,
+        logLevel: "info",
+      }),
+    ),
+  );
 
   if (production) {
-    await context.rebuild();
-    await context.dispose();
+    await Promise.all(contexts.map((context) => context.rebuild()));
+    await Promise.all(contexts.map((context) => context.dispose()));
   } else {
-    await context.watch();
+    await Promise.all(contexts.map((context) => context.watch()));
   }
 }
