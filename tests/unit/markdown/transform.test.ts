@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
@@ -134,12 +135,14 @@ describe("transformMarkdown", () => {
   it("escapes prose but preserves inline, fenced, and indented code bytes", async () => {
     const body = [
       "A comparison is < 3 and {value}.",
-      "Inline `[[code]] {raw} < 2` remains.",
+      'Inline `[[code]] {raw} < 2 import"side-effect" export*from"pkg"` remains.',
       "~~~md",
       "> [!note] untouched",
       "![[inside.png]]",
+      'import"side-effect"',
+      'export*from"pkg"',
       "~~~",
-      "    [[indented]] {raw} < 2",
+      '    [[indented]] {raw} < 2 import"side-effect" export*from"pkg"',
     ].join("\n");
     const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
     expect(result.ok).toBe(true);
@@ -147,17 +150,22 @@ describe("transformMarkdown", () => {
     expect(result.value.mdx).toContain(
       "A comparison is &lt; 3 and &#123;value&#125;.",
     );
-    expect(result.value.mdx).toContain("`[[code]] {raw} < 2`");
     expect(result.value.mdx).toContain(
-      "~~~md\n> [!note] untouched\n![[inside.png]]\n~~~",
+      '`[[code]] {raw} < 2 import"side-effect" export*from"pkg"`',
     );
-    expect(result.value.mdx).toContain("    [[indented]] {raw} < 2");
+    expect(result.value.mdx).toContain(
+      '~~~md\n> [!note] untouched\n![[inside.png]]\nimport"side-effect"\nexport*from"pkg"\n~~~',
+    );
+    expect(result.value.mdx).toContain(
+      '    [[indented]] {raw} < 2 import"side-effect" export*from"pkg"',
+    );
     expect(result.value.images).toEqual([]);
   });
 
   it("preserves ordinary HTML, links, hard breaks, and prose beginning with export", async () => {
     const body = [
       "exporting ideas is ordinary prose.",
+      "important and exportable are ordinary prose words.",
       '<div className="notice">valid HTML</div>',
       "A [normal link](https://example.invalid/page) remains.  ",
       "An [external attachment link](https://example.invalid/archive.7z) remains.",
@@ -257,8 +265,161 @@ describe("transformMarkdown", () => {
   });
 
   it.each([
+    [
+      "comment-separated import",
+      'import/*gap*/"x"',
+      'import/*gap*/"x"',
+      { line: 10, column: 1 },
+      { line: 10, column: 17 },
+    ],
+    [
+      "multiline compact export",
+      'export*\nfrom"x"',
+      'export*\nfrom"x"',
+      { line: 10, column: 1 },
+      { line: 11, column: 8 },
+    ],
+    [
+      "import followed by later inline code",
+      'import"x";// `protected`',
+      'import"x";',
+      { line: 10, column: 1 },
+      { line: 10, column: 11 },
+    ],
+  ])(
+    "blocks %s at the exact declaration range",
+    async (_name, body, declaration, expectedStart, expectedEnd) => {
+      const source = note(body);
+      const declarationStart = source.indexOf(declaration);
+      const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.sourceRange).toEqual({
+        start: { ...expectedStart, offset: declarationStart },
+        end: {
+          ...expectedEnd,
+          offset: declarationStart + declaration.length,
+        },
+      });
+      expect(
+        source.slice(
+          result.error.sourceRange!.start.offset,
+          result.error.sourceRange!.end.offset,
+        ),
+      ).toBe(declaration);
+    },
+  );
+
+  it.each([
+    ["side-effect import string", 'import"`x`"'],
+    ["comment-separated import", 'import/*`x`*/"pkg"'],
+    ["named import string", 'import{x}from"`p`"'],
+    ["star export string", 'export*from"a`b`c"'],
+    ["comment-separated export", "export/*`c`*/{}"],
+  ])(
+    "blocks a compact declaration whose %s carries backtick code spans",
+    async (_name, declaration) => {
+      const source = note(declaration);
+      const declarationStart = source.indexOf(declaration);
+      const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.sourceRange).toEqual({
+        start: { line: 10, column: 1, offset: declarationStart },
+        end: {
+          line: 10,
+          column: declaration.length + 1,
+          offset: declarationStart + declaration.length,
+        },
+      });
+      expect(
+        source.slice(
+          result.error.sourceRange!.start.offset,
+          result.error.sourceRange!.end.offset,
+        ),
+      ).toBe(declaration);
+    },
+  );
+
+  it("allows prose controls and declarations wholly inside protected code", async () => {
+    const body = [
+      "important exportable prose remains ordinary.",
+      '`import/*gap*/"x"`',
+      "```js",
+      "export*",
+      'from"x"',
+      'import"`x`"',
+      'export*from"a`b`c"',
+      "export/*`c`*/{}",
+      "```",
+      "",
+      '    import/*`x`*/"pkg"',
+    ].join("\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(body);
+  });
+
+  it.each([
+    [
+      "parenthesized candidate",
+      'import/**/(\nimport"valid"\n)!',
+      'import"valid"',
+    ],
+    ["comment span", 'export{}/*\nimport"a"\n*/from!', 'import"a"'],
+  ])(
+    "blocks a compact import consumed by an earlier failing %s",
+    async (_name, body, declaration) => {
+      const source = note(body);
+      const declarationStart = source.indexOf(declaration);
+      const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.sourceRange?.start.offset).toBe(declarationStart);
+      expect(result.error.sourceRange?.end.offset).toBe(
+        declarationStart + declaration.length,
+      );
+    },
+  );
+
+  it("preserves module-shaped prose that never forms a compact declaration", async () => {
+    const body = ["import/**/(0)", 'export{a as b,c as b}from"x"'].join("\n\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("import/**/(0)");
+    expect(result.value.mdx).toContain(
+      'export&#123;a as b,c as b&#125;from"x"',
+    );
+  });
+
+  it("blocks the exact declaration after earlier protected code and Unicode prose", async () => {
+    const body = 'α prose `code`\nimport"blocked";';
+    const source = note(body);
+    const declarationStart = source.indexOf('import"blocked";');
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+    expect(result.error.sourceRange?.start.offset).toBe(declarationStart);
+    expect(result.error.sourceRange?.end.offset).toBe(
+      declarationStart + 'import"blocked";'.length,
+    );
+  });
+
+  it.each([
     ["import", "import Thing from 'thing'"],
+    ["compact side-effect import", 'import"side-effect"'],
+    ["compact named import", 'import{x}from"pkg"'],
+    ["compact namespace import", 'import*as ns from"pkg"'],
     ["export", "export const value = 1"],
+    ["compact star export", 'export*from"pkg"'],
+    ["compact named export", 'export{x}from"pkg"'],
+    ["compact aliased export", 'export{default as value}from"pkg"'],
     ["JSX", '<Component value="x" />'],
     ["inline JSX", 'prefix <Component value="x" /> suffix'],
     ["nested JSX", '<div className="shell"><Component /></div>'],
@@ -343,6 +504,76 @@ describe("transformMarkdown", () => {
       issueCount(result.value.issues, ISSUE_CODES.wikilinksFlattened),
     ).toBe(2_500);
   }, 5_000);
+
+  it("blocks valid compact ESM after thousands of malformed candidates", async () => {
+    const malformed = Array.from({ length: 2_000 }, () => "import/*").join(
+      "\n",
+    );
+    const source = note(`${malformed}\nimport"blocked";`);
+    const declarationStart = source.lastIndexOf('import"blocked";');
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+    expect(result.error.sourceRange?.start.offset).toBe(declarationStart);
+    expect(result.error.sourceRange?.end.offset).toBe(
+      declarationStart + 'import"blocked";'.length,
+    );
+  });
+
+  it("accepts keyword-shaped prose at scale", async () => {
+    const body = Array.from(
+      { length: 800 },
+      (_, index) => `export{prose line ${index}`,
+    ).join("\n\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("export&#123;prose line 0");
+    expect(result.value.mdx).toContain("export&#123;prose line 799");
+  });
+
+  it("accepts candidates whose terminated comment spans the note", async () => {
+    const body = `${Array.from({ length: 300 }, () => "import/*a").join(
+      "\n",
+    )}\n*/ 0!`;
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("import/*a");
+  });
+
+  it("fails closed when hostile candidates demand super-linear scanning", async () => {
+    const body = Array.from({ length: 400 }, () => "import/**/(").join("\n");
+    const source = note(body);
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+    const range = result.error.sourceRange!;
+    expect(source.slice(range.start.offset, range.end.offset)).toBe("import");
+  });
+
+  it("bounds repeated malformed compact ESM candidate scanning near-linearly", async () => {
+    const time = async (line: string, lineCount: number): Promise<number> => {
+      const body = Array.from({ length: lineCount }, () => line).join("\n\n");
+      const startedAt = performance.now();
+      const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+      const duration = performance.now() - startedAt;
+      expect(result.ok).toBe(true);
+      return duration;
+    };
+    for (const lineCount of [1_000, 4_000]) await time("import/*", lineCount);
+    // `lmport/*` differs from the malformed candidate only in never matching
+    // the compact-candidate prefix, so both notes pay identical Micromark and
+    // serialization costs; comparing them cancels hardware and coverage
+    // instrumentation speed and isolates candidate scanning. The committed
+    // quadratic scanner spent ~6x the baseline at this scale; the bounded
+    // scanner adds milliseconds. The margin is generous, not a benchmark.
+    const baseline = await time("lmport/*", 10_000);
+    const malformed = await time("import/*", 10_000);
+    expect(malformed).toBeLessThan(baseline * 3 + 1_000);
+  }, 30_000);
 
   it("returns INVALID_MDX when profile-driven emitted JSX does not compile", async () => {
     const profile = {

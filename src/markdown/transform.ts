@@ -1,3 +1,4 @@
+import { Parser as EcmascriptParser } from "acorn";
 import { parse, postprocess, preprocess } from "micromark";
 import { decodeString } from "micromark-util-decode-string";
 
@@ -190,6 +191,182 @@ const maskMatches = (
   return output + source.slice(cursor);
 };
 
+interface EcmascriptStatement {
+  readonly type: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+interface EcmascriptStatementParser {
+  pos: number;
+  start: number;
+  end: number;
+  lastTokStart: number;
+  lastTokEnd: number;
+  nextToken(): void;
+  parseStatement(
+    context: null,
+    topLevel: boolean,
+    exports: Readonly<Record<string, never>>,
+  ): EcmascriptStatement;
+  skipBlockComment(): void;
+  raise(position: number, message: string): never;
+  raiseRecoverable(position: number, message: string): never;
+}
+
+const StatementParser = EcmascriptParser as unknown as new (
+  options: Readonly<Record<string, unknown>>,
+  input: string,
+) => EcmascriptStatementParser;
+
+// Flat scan cost charged per block comment: the parser below resolves any
+// comment with one indexed lookup, so its contents are never rescanned.
+const commentScanCost = 16;
+
+// Acorn rescans from offset zero to derive the start line, formats every
+// failure with another such rescan, and finds `*/` by searching to the end of
+// input. Parsing each compact candidate this way made repeated malformed
+// candidates quadratic (APP-595). This subclass preserves Acorn's grammar,
+// token stream, and statement offsets while making each candidate cost only
+// the characters it newly consumes: the start state is seeded directly (line
+// bookkeeping stays dead because locations are disabled and `raise` stops
+// formatting positions), block comments resolve against one shared sorted
+// `*/` index, and failures throw without deriving line information.
+class CompactCandidateParser extends StatementParser {
+  readonly commentCloses: readonly number[];
+
+  // Characters inside skipped block comments beyond the flat cost, excluded
+  // from the scan budget because they are never rescanned.
+  commentExcess = 0;
+
+  constructor(source: string, start: number, commentCloses: readonly number[]) {
+    super({ ecmaVersion: "latest", sourceType: "module" }, source);
+    this.commentCloses = commentCloses;
+    this.pos = start;
+    this.start = start;
+    this.end = start;
+    this.lastTokStart = start;
+    this.lastTokEnd = start;
+  }
+
+  override skipBlockComment(): void {
+    const opening = this.pos;
+    this.pos += 2;
+    let low = 0;
+    let high = this.commentCloses.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.commentCloses[middle]! < this.pos) low = middle + 1;
+      else high = middle;
+    }
+    const close = this.commentCloses[low];
+    if (close === undefined) this.raise(opening, "Unterminated comment");
+    this.pos = close + 2;
+    const skipped = this.pos - opening;
+    if (skipped > commentScanCost)
+      this.commentExcess += skipped - commentScanCost;
+  }
+
+  override raise(position: number, message: string): never {
+    throw new SyntaxError(`${message} at ${String(position)}`);
+  }
+
+  override raiseRecoverable(position: number, message: string): never {
+    this.raise(position, message);
+  }
+}
+
+const parseModuleStatementAt = (
+  source: string,
+  start: number,
+  commentCloses: readonly number[],
+): {
+  readonly statement: EcmascriptStatement | undefined;
+  readonly scanCost: number;
+} => {
+  const parser = new CompactCandidateParser(source, start, commentCloses);
+  let statement: EcmascriptStatement | undefined;
+  try {
+    parser.nextToken();
+    statement = parser.parseStatement(null, true, {});
+  } catch {
+    // Invalid JavaScript is prose here; final MDX validation remains fail closed.
+  }
+  return Object.freeze({
+    statement,
+    scanCost: parser.pos - parser.commentExcess - start,
+  });
+};
+
+const compactModuleDeclarations = (
+  source: string,
+  ranges: readonly SourceRange[],
+): readonly { readonly start: number; readonly end: number }[] => {
+  const declarations: { readonly start: number; readonly end: number }[] = [];
+  const candidates = source.matchAll(
+    /^ {0,3}(?:import(?=[/"'{*])|export(?=[/{*]))/gmu,
+  );
+  const commentCloses = [...source.matchAll(/\*\//gu)].map(
+    (close) => close.index,
+  );
+  // Candidate parses may overlap, so hostile notes could still multiply the
+  // per-candidate costs above. Capping total consumed characters at a fixed
+  // multiple of the source length keeps the scan near-linear: O(source)
+  // tokenizer work plus one O(log closes) lookup per skipped comment.
+  // Ordinary notes stay far below the cap because each failing candidate
+  // consumes only its own statement or line, while a note that exceeds it is
+  // reported as unsupported at the current candidate — exhaustion fails
+  // closed instead of skipping detection.
+  const scanBudget = source.length * 4 + 1024;
+  let scanned = 0;
+  let protectedIndex = 0;
+  for (const candidate of candidates) {
+    for (;;) {
+      const preceding = ranges[protectedIndex];
+      if (preceding === undefined || preceding.end.offset > candidate.index)
+        break;
+      protectedIndex += 1;
+    }
+    // Whether a candidate begins inside protected code is the only
+    // protected-range question for compact declarations, so it is settled
+    // here: a candidate that does is preserved verbatim, and skipping it
+    // before parsing also keeps protected content out of the scan budget.
+    const enclosing = ranges[protectedIndex];
+    if (enclosing !== undefined && enclosing.start.offset <= candidate.index)
+      continue;
+    if (scanned > scanBudget) {
+      declarations.push({
+        start: candidate.index,
+        end: candidate.index + candidate[0].length,
+      });
+      break;
+    }
+    const parsed = parseModuleStatementAt(
+      source,
+      candidate.index,
+      commentCloses,
+    );
+    scanned += parsed.scanCost;
+    const statement = parsed.statement;
+    if (statement === undefined) continue;
+    // Only the start position matters. A declaration that begins in prose is
+    // executable ESM even when its JavaScript strings or comments contain
+    // backtick pairs that CommonMark reports as inline code, and a later
+    // unrelated code span must not hide it either, so internal overlap never
+    // suppresses the declaration. The candidate anchor is a line start and the
+    // parser only skips spaces to reach `statement.start`, so no protected
+    // range can begin between the offset checked above and the declaration.
+    if (
+      statement.type === "ImportDeclaration" ||
+      statement.type === "ExportAllDeclaration" ||
+      statement.type === "ExportNamedDeclaration"
+    ) {
+      declarations.push({ start: statement.start, end: statement.end });
+    }
+  }
+  return declarations;
+};
+
 const firstUnsupported = (
   source: string,
   ranges: readonly SourceRange[],
@@ -213,6 +390,7 @@ const firstUnsupported = (
         start: match.index,
         end: match.index + match[0].length,
       });
+  candidates.push(...compactModuleDeclarations(sourceForParsing, ranges));
 
   try {
     const events = postprocess(

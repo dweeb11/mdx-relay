@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseDocument } from "yaml";
 
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import {
@@ -71,6 +72,29 @@ describe("serializeFrontmatter", () => {
         labels: Object.freeze(["line\nbreak", "hash # label"]),
       }),
     ).toContain('labels: ["line\\nbreak", "hash # label"]');
+  });
+
+  it("round-trips flow labels without changing order or cardinality", () => {
+    const labels = Object.freeze([
+      "ordinary",
+      "second ordinary",
+      "combat, design",
+      "[brackets]",
+      "{braces}",
+      "colon: label",
+      "hash # label",
+      'double "quote"',
+      "single 'quote'",
+      "line\nbreak",
+      "true",
+      "null",
+      "123",
+    ]);
+    const serialized = serializeFrontmatter({ ...metadata, labels });
+    const document = parseDocument(serialized.slice(4, -4));
+
+    expect(document.errors).toEqual([]);
+    expect(document.toJS()).toMatchObject({ labels });
   });
 });
 
