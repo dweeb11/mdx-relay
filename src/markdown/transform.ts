@@ -195,24 +195,24 @@ const firstUnsupported = (
   ranges: readonly SourceRange[],
 ): { readonly start: number; readonly end: number } | undefined => {
   const candidates: { readonly start: number; readonly end: number }[] = [];
-  const patterns = [
-    /^ {0,3}(?:import|export)(?:\s|$).*$/gmu,
-    /^ {0,3}(?:<>|<\/?>)/gmu,
-    /^ {0,3}\{[^\r\n]*$/gmu,
-  ];
-  for (const pattern of patterns)
-    for (const match of proseMatches(source, ranges, pattern))
-      candidates.push({
-        start: match.index,
-        end: match.index + match[0].length,
-      });
-
   const wikilinks = proseMatches(
     source,
     ranges,
     /(?<!!)\[\[([^\]\r\n]+)\]\]/gu,
   );
   const sourceForParsing = maskMatches(source, wikilinks);
+  const patterns = [
+    /^ {0,3}(?:import|export)(?:\s|$).*$/gmu,
+    /^ {0,3}(?:<>|<\/?>)/gmu,
+    /^ {0,3}\{[^\r\n]*$/gmu,
+    /<\/?(?:(?:[A-Z_$][\w$-]*)|(?:[A-Za-z_$][\w$-]*(?:[.:][A-Za-z_$][\w$-]*)+))(?=\s|\/?>)/gu,
+  ];
+  for (const pattern of patterns)
+    for (const match of proseMatches(sourceForParsing, ranges, pattern))
+      candidates.push({
+        start: match.index,
+        end: match.index + match[0].length,
+      });
 
   try {
     const events = postprocess(
