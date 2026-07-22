@@ -1,0 +1,16 @@
+{
+  "slug": "a-public-examples-contract",
+  "images": [
+    {
+      "source": "sample-image.PNG",
+      "destination": "img-1.webp"
+    }
+  ],
+  "issueCodes": [
+    "DUPLICATE_MESSAGE_FIELD",
+    "WIKILINKS_FLATTENED",
+    "CALLOUTS_CONVERTED",
+    "MDX_ESCAPED",
+    "IMAGE_ALT_TEXT_MISSING"
+  ]
+}

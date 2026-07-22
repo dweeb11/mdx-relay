@@ -13,6 +13,7 @@ export default defineConfig({
           includeSource: [
             "src/contracts/**/*.ts",
             "src/core/**/*.ts",
+            "src/markdown/**/*.ts",
             "src/profiles/**/*.ts",
           ],
         },
@@ -50,6 +51,7 @@ export default defineConfig({
       include: [
         "src/contracts/**/*.ts",
         "src/core/**/*.ts",
+        "src/markdown/**/*.ts",
         "src/profiles/**/*.ts",
       ],
       exclude: ["src/main.ts"],
@@ -58,6 +60,12 @@ export default defineConfig({
         lines: 99,
         branches: 95,
         functions: 100,
+        "src/markdown/**": {
+          statements: 100,
+          lines: 100,
+          branches: 100,
+          functions: 100,
+        },
         "src/profiles/**": {
           statements: 100,
           lines: 100,
