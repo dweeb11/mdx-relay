@@ -77,6 +77,10 @@ if (mode === "probe-node-builtins") {
     {
       entryPoints: ["src/worker/processing.worker.ts"],
       outfile: "dist/processing.worker.js",
+      // Prefer the "worker" export condition so DOM-less builds win — e.g.
+      // decode-named-character-reference resolves to its table-based module
+      // instead of the browser build that touches document.
+      conditions: ["worker"],
     },
   ];
   const contexts = await Promise.all(
