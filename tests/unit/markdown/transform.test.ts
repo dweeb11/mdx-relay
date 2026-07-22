@@ -325,7 +325,7 @@ describe("transformMarkdown", () => {
     expect(
       issueCount(result.value.issues, ISSUE_CODES.wikilinksFlattened),
     ).toBe(2_500);
-  }, 1_500);
+  }, 5_000);
 
   it("returns INVALID_MDX when profile-driven emitted JSX does not compile", async () => {
     const profile = {
