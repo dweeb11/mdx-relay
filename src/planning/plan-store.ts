@@ -318,10 +318,11 @@ export async function publishSealedPlan(
     // The plan ID excludes the per-run generation token. Preserve the immutable
     // identity and blobs, but atomically refresh plan.json before re-pinning.
     const existing = await loadSealedPlan(deps, planId);
-    if (existing.ok) {
-      if (
-        existing.value.plan.generationToken !== envelope.plan.generationToken
-      ) {
+    if (
+      existing.ok &&
+      existing.value.plan.generationToken !== envelope.plan.generationToken
+    ) {
+      try {
         const verified = verifyStoredExportPlan(
           envelope.plan,
           envelope.blobBytes,
@@ -334,7 +335,17 @@ export async function publishSealedPlan(
           join(directory, PLAN_DOCUMENT_FILENAME),
           new TextEncoder().encode(canonicalizeJcs(envelope.plan)),
         );
+        await writePointer(deps, activePlanFile(deps), planId);
+        return mdxRelayOk(planId);
+      } catch {
+        await discard(deps, [
+          `${join(directory, PLAN_DOCUMENT_FILENAME)}${TEMPORARY_SUFFIX}`,
+          `${activePlanFile(deps)}${TEMPORARY_SUFFIX}`,
+        ]);
+        return writeFailed();
       }
+    }
+    if (existing.ok) {
       await writePointer(deps, activePlanFile(deps), planId);
       return mdxRelayOk(planId);
     }

@@ -381,6 +381,40 @@ describe("private plan storage", () => {
     expect(active.ok && active.value.plan.generationToken).toBe("generation-2");
   });
 
+  it("preserves the stored generation when refresh I/O fails", async () => {
+    const first = sealedPlan({
+      generationToken: "generation-1" as GenerationToken,
+    });
+    expect((await publishSealedPlan(deps, first)).ok).toBe(true);
+    const second = sealedPlan({
+      generationToken: "generation-2" as GenerationToken,
+    });
+
+    for (const failedOperation of ["openForWrite", "rename"]) {
+      const faulted = withDeps({
+        fileSystem: injectFault(deps.fileSystem, (operation, entryPath) => {
+          if (
+            operation === failedOperation &&
+            entryPath.endsWith("plan.json.tmp")
+          )
+            throw new Error(`refresh ${failedOperation} failed`);
+        }),
+      });
+
+      expect(await failureCode(publishSealedPlan(faulted, second))).toBe(
+        ISSUE_CODES.storageWriteFailed,
+      );
+      const stored = await loadSealedPlan(deps, first.planId);
+      expect(stored.ok && stored.value.plan.generationToken).toBe(
+        "generation-1",
+      );
+      const active = await loadActivePlan(deps);
+      expect(active.ok && active.value.plan.generationToken).toBe(
+        "generation-1",
+      );
+    }
+  });
+
   it("stores approval as the exact plan ID and only for the pinned ready plan", async () => {
     const envelope = sealedPlan();
     await publishSealedPlan(deps, envelope);
