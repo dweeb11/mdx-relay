@@ -3,13 +3,14 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
   chmod,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -33,8 +34,10 @@ import {
   type PlanSourceBytes,
 } from "../../../src/planning/build-export-plan";
 import {
+  canonicalPlanStoreRoot,
   cleanupExpiredPlans,
   createNodePlanStoreFileSystem,
+  createPlanStoreDeps,
   defaultPlanStoreRoot,
   loadActivePlan,
   loadSealedPlan,
@@ -268,6 +271,18 @@ const injectFault = (
     fail("readFile", filePath);
     return base.readFile(filePath);
   },
+  openForBoundedRead: async (filePath) => {
+    fail("openForBoundedRead", filePath);
+    const handle = await base.openForBoundedRead(filePath);
+    return {
+      byteLength: handle.byteLength,
+      read: async () => {
+        fail("boundedRead", filePath);
+        return handle.read();
+      },
+      close: () => handle.close(),
+    };
+  },
   readPermissionBits: (entryPath) => base.readPermissionBits(entryPath),
   byteLength: (entryPath) => base.byteLength(entryPath),
   listDirectory: (directoryPath) => base.listDirectory(directoryPath),
@@ -434,6 +449,115 @@ describe("private plan storage", () => {
         "generation-1",
       );
     }
+  });
+
+  it("rolls a generation refresh back at every boundary after the replacement", async () => {
+    const first = sealedPlan({
+      generationToken: "generation-1" as GenerationToken,
+    });
+    const other = sealedPlan({ documentTitle: "Other" });
+    const second = sealedPlan({
+      generationToken: "generation-2" as GenerationToken,
+    });
+    // The plan ID excludes the generation token, so this is one identity.
+    expect(second.planId).toBe(first.planId);
+
+    const documentPath = planDocumentOf(first.planId);
+    const activeTemporary = `${join(root, "active-plan.json")}.tmp`;
+    /** Fails the chosen reads of the published document, counting from one. */
+    const failDocumentReads = (
+      chosen: (occurrence: number) => boolean,
+    ): ((operation: string, entryPath: string) => void) => {
+      let seen = 0;
+      return (operation, entryPath) => {
+        if (operation !== "openForBoundedRead" || entryPath !== documentPath)
+          return;
+        seen += 1;
+        if (chosen(seen)) throw new Error(`document read ${seen} failed`);
+      };
+    };
+    const failPointer = (
+      failedOperation: string,
+      target: string,
+    ): ((operation: string, entryPath: string) => void) => {
+      return (operation, entryPath) => {
+        if (operation === failedOperation && entryPath === target)
+          throw new Error(`pointer ${failedOperation} failed`);
+      };
+    };
+
+    const boundaries: readonly [
+      string,
+      (operation: string, entryPath: string) => void,
+      boolean,
+    ][] = [
+      // Read 1 loads the existing plan, read 2 captures the bytes that would
+      // undo the replacement, read 3 verifies it, read 4 verifies the rollback.
+      ["prior-document capture", failDocumentReads((n) => n === 2), true],
+      // The refreshed document is written, then fails to reload and verify.
+      ["published-plan verification", failDocumentReads((n) => n === 3), true],
+      ["pointer open", failPointer("openForWrite", activeTemporary), true],
+      ["pointer write", failPointer("write", activeTemporary), true],
+      ["pointer fsync", failPointer("sync", activeTemporary), true],
+      ["pointer rename", failPointer("rename", activeTemporary), true],
+      ["pointer parent fsync", failPointer("syncDirectory", root), true],
+      // The rollback itself cannot be proven, so nothing is left at that ID.
+      ["rollback failure", failDocumentReads((n) => n >= 3), false],
+    ];
+
+    for (const [label, fail, rollsBack] of boundaries) {
+      await rm(join(root, "plans"), { recursive: true, force: true });
+      await rm(join(root, "active-plan.json"), { force: true });
+      expect((await publishSealedPlan(deps, first)).ok, label).toBe(true);
+      expect((await publishSealedPlan(deps, other)).ok, label).toBe(true);
+
+      const faulted = withDeps({
+        fileSystem: injectFault(deps.fileSystem, fail),
+      });
+      expect(await failureCode(publishSealedPlan(faulted, second)), label).toBe(
+        ISSUE_CODES.storageWriteFailed,
+      );
+
+      // The refreshed generation the caller was told failed is never loadable.
+      const stored = await loadSealedPlan(deps, first.planId);
+      expect(stored.ok && stored.value.plan.generationToken, label).not.toBe(
+        "generation-2",
+      );
+      if (rollsBack)
+        expect(stored.ok && stored.value.plan.generationToken, label).toBe(
+          "generation-1",
+        );
+      else
+        expect(
+          await failureCode(loadSealedPlan(deps, first.planId)),
+          label,
+        ).toBe(ISSUE_CODES.planNotFound);
+      // The pin the store had before the attempt survives it exactly.
+      const active = await loadActivePlan(deps);
+      expect(active.ok && active.value.planId, label).toBe(other.planId);
+      expect(
+        (await readdir(join(root, "plans"))).filter((name) =>
+          name.startsWith(".staging-"),
+        ),
+        label,
+      ).toEqual([]);
+    }
+
+    // A refresh with no injected fault still replaces the stored generation.
+    await rm(join(root, "plans"), { recursive: true, force: true });
+    await rm(join(root, "active-plan.json"), { force: true });
+    expect((await publishSealedPlan(deps, first)).ok).toBe(true);
+    expect((await publishSealedPlan(deps, second)).ok).toBe(true);
+    const refreshed = await loadActivePlan(deps);
+    expect(refreshed.ok && refreshed.value.plan.generationToken).toBe(
+      "generation-2",
+    );
+    // Republishing the same generation stays idempotent and touches nothing.
+    expect((await publishSealedPlan(deps, second)).ok).toBe(true);
+    const idempotent = await loadSealedPlan(deps, second.planId);
+    expect(idempotent.ok && idempotent.value.plan.generationToken).toBe(
+      "generation-2",
+    );
   });
 
   it("stores approval as the exact plan ID and only for the pinned ready plan", async () => {
@@ -1032,79 +1156,112 @@ describe("private plan storage", () => {
     );
   });
 
-  it("serializes approval against a concurrent publication", async () => {
-    const first = sealedPlan();
-    await publishSealedPlan(deps, first);
-    const second = sealedPlan({ documentTitle: "Second" });
+  it("serializes approval against a publication spelled with an equivalent root", async () => {
+    // Every spelling below addresses exactly the same files, so every one of
+    // them has to take the same turn on the same queue.
+    const spellings = (): readonly string[] => [
+      root,
+      join(root, "."),
+      `${root}/`,
+      root.replace("/", "//"),
+      relative(process.cwd(), root),
+    ];
+    for (const spelling of spellings())
+      expect(canonicalPlanStoreRoot(spelling), spelling).toBe(root);
 
-    const activePath = join(root, "active-plan.json");
-    const approvalTemporary = `${join(root, "approvals", `${first.planId}.json`)}.tmp`;
-    const events: string[] = [];
-    let openApproval = (): void => undefined;
-    const heldApproval = new Promise<void>((resolve) => {
-      openApproval = resolve;
-    });
+    for (const spelling of spellings()) {
+      await rm(join(root, "plans"), { recursive: true, force: true });
+      await rm(join(root, "approvals"), { recursive: true, force: true });
+      await rm(join(root, "active-plan.json"), { force: true });
 
-    const traced = (label: string, gate?: Promise<void>): PlanStoreDeps =>
-      withDeps({
-        fileSystem: {
-          ...deps.fileSystem,
-          readFile: async (filePath) => {
-            if (filePath === activePath) events.push(`${label}:read-active`);
-            return deps.fileSystem.readFile(filePath);
-          },
-          rename: async (fromPath, toPath) => {
-            if (toPath === activePath) events.push(`${label}:pin`);
-            return deps.fileSystem.rename(fromPath, toPath);
-          },
-          openForWrite: async (filePath, mode) => {
-            if (filePath === approvalTemporary) {
-              events.push(`${label}:approve-reached`);
-              if (gate) await gate;
-              events.push(`${label}:approve`);
-            }
-            return deps.fileSystem.openForWrite(filePath, mode);
-          },
-        },
+      const first = sealedPlan();
+      expect((await publishSealedPlan(deps, first)).ok, spelling).toBe(true);
+      const second = sealedPlan({ documentTitle: "Second" });
+
+      const activePath = join(root, "active-plan.json");
+      const approvalTemporary = `${join(root, "approvals", `${first.planId}.json`)}.tmp`;
+      const events: string[] = [];
+      let openApproval = (): void => undefined;
+      const heldApproval = new Promise<void>((resolve) => {
+        openApproval = resolve;
       });
 
-    const record = recordPlanApproval(
-      traced("record", heldApproval),
-      first.planId,
-      sourceBytes(),
-    );
-    while (!events.includes("record:approve-reached"))
-      await new Promise((resolve) => setImmediate(resolve));
+      const traced = (
+        label: string,
+        rootDirectory: string,
+        gate?: Promise<void>,
+      ): PlanStoreDeps =>
+        withDeps({
+          rootDirectory,
+          fileSystem: {
+            ...deps.fileSystem,
+            openForBoundedRead: async (filePath) => {
+              if (filePath === activePath) events.push(`${label}:read-active`);
+              return deps.fileSystem.openForBoundedRead(filePath);
+            },
+            rename: async (fromPath, toPath) => {
+              if (toPath === activePath) events.push(`${label}:pin`);
+              return deps.fileSystem.rename(fromPath, toPath);
+            },
+            openForWrite: async (filePath, mode) => {
+              if (filePath === approvalTemporary) {
+                events.push(`${label}:approve-reached`);
+                if (gate) await gate;
+                events.push(`${label}:approve`);
+              }
+              return deps.fileSystem.openForWrite(filePath, mode);
+            },
+          },
+        });
 
-    let publishSettled = false;
-    const publish = publishSealedPlan(traced("publish"), second);
-    const markSettled = () => void (publishSettled = true);
-    void publish.then(markSettled, markSettled);
-    // Give an unserialized publication every chance to land its pin between the
-    // approval's pointer read and its approval write -- far longer than a whole
-    // publication takes here. A serialized one cannot even start.
-    const deadline = Date.now() + CONCURRENT_PUBLISH_BUDGET_MS;
-    while (
-      !publishSettled &&
-      !events.includes("publish:pin") &&
-      Date.now() < deadline
-    )
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    openApproval();
+      // The approval holds the canonical root; the publication holds a
+      // differently spelled one that resolves to it.
+      const record = recordPlanApproval(
+        traced("record", root, heldApproval),
+        first.planId,
+        sourceBytes(),
+      );
+      while (!events.includes("record:approve-reached"))
+        await new Promise((resolve) => setImmediate(resolve));
 
-    expect((await record).ok).toBe(true);
-    expect((await publish).ok).toBe(true);
+      let publishSettled = false;
+      const publish = publishSealedPlan(traced("publish", spelling), second);
+      const markSettled = () => void (publishSettled = true);
+      void publish.then(markSettled, markSettled);
+      // Give an unserialized publication every chance to land its pin between
+      // the approval's pointer read and its approval write -- far longer than a
+      // whole publication takes here. A serialized one cannot even start.
+      const deadline = Date.now() + CONCURRENT_PUBLISH_BUDGET_MS;
+      while (
+        !publishSettled &&
+        !events.includes("publish:pin") &&
+        Date.now() < deadline
+      )
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      openApproval();
 
-    // The approval read the pin it was still holding when it wrote: no
-    // competing publication landed inside that read-then-write.
-    const pointerRead = events.indexOf("record:read-active");
-    const approvalWrite = events.indexOf("record:approve");
-    const competingPin = events.indexOf("publish:pin");
-    expect(pointerRead).toBeGreaterThanOrEqual(0);
-    expect(approvalWrite).toBeGreaterThan(pointerRead);
-    expect(competingPin).toBeGreaterThan(approvalWrite);
-    const active = await loadActivePlan(deps);
-    expect(active.ok && active.value.planId).toBe(second.planId);
+      expect((await record).ok, spelling).toBe(true);
+      expect((await publish).ok, spelling).toBe(true);
+
+      // The approval read the pin it was still holding when it wrote: no
+      // competing publication landed inside that read-then-write.
+      const pointerRead = events.indexOf("record:read-active");
+      const approvalWrite = events.indexOf("record:approve");
+      const competingPin = events.indexOf("publish:pin");
+      expect(pointerRead, spelling).toBeGreaterThanOrEqual(0);
+      expect(approvalWrite, spelling).toBeGreaterThan(pointerRead);
+      expect(competingPin, spelling).toBeGreaterThan(approvalWrite);
+      const active = await loadActivePlan(deps);
+      expect(active.ok && active.value.planId, spelling).toBe(second.planId);
+    }
+  });
+
+  it("builds deps on a canonical absolute root whatever spelling it is given", () => {
+    const relativeRoot = relative(process.cwd(), root);
+    expect(isAbsolute(relativeRoot)).toBe(false);
+    expect(createPlanStoreDeps(relativeRoot).rootDirectory).toBe(root);
+    expect(createPlanStoreDeps(join(root, ".")).rootDirectory).toBe(root);
+    expect(isAbsolute(createPlanStoreDeps().rootDirectory)).toBe(true);
   });
 
   it("refuses hostile stored plans against the locked limits before reading them", async () => {
@@ -1120,9 +1277,16 @@ describe("private plan storage", () => {
       return withDeps({
         fileSystem: {
           ...deps.fileSystem,
-          readFile: async (filePath) => {
-            readPaths.push(filePath);
-            return deps.fileSystem.readFile(filePath);
+          openForBoundedRead: async (filePath) => {
+            const handle = await deps.fileSystem.openForBoundedRead(filePath);
+            return {
+              byteLength: handle.byteLength,
+              read: async () => {
+                readPaths.push(filePath);
+                return handle.read();
+              },
+              close: () => handle.close(),
+            };
           },
           ...overrides,
         },
@@ -1130,6 +1294,20 @@ describe("private plan storage", () => {
     };
     const readBlobs = () =>
       readPaths.filter((filePath) => filePath.startsWith(blobDirectory));
+    /** Reports a hostile size on the descriptor a bounded read decides on. */
+    const reportedByteLength =
+      (size: (entryPath: string) => number | undefined) =>
+      async (filePath: string) => {
+        const handle = await deps.fileSystem.openForBoundedRead(filePath);
+        return {
+          byteLength: size(filePath) ?? handle.byteLength,
+          read: async () => {
+            readPaths.push(filePath);
+            return handle.read();
+          },
+          close: () => handle.close(),
+        };
+      };
 
     const planted: string[] = [];
     for (
@@ -1189,7 +1367,7 @@ describe("private plan storage", () => {
     for (const path of planted) await rm(path, { force: true });
 
     const oversizedDocument = watched({
-      byteLength: reportedSize((entryPath) =>
+      openForBoundedRead: reportedByteLength((entryPath) =>
         entryPath === documentPath ? MAX_PLAN_DOCUMENT_BYTES + 1 : undefined,
       ),
     });
@@ -1200,7 +1378,7 @@ describe("private plan storage", () => {
     expect(readPaths, "document size").not.toContain(documentPath);
 
     const oversizedPointer = watched({
-      byteLength: reportedSize((entryPath) =>
+      openForBoundedRead: reportedByteLength((entryPath) =>
         entryPath.endsWith("active-plan.json")
           ? MAX_PLAN_POINTER_BYTES + 1
           : undefined,
@@ -1208,6 +1386,9 @@ describe("private plan storage", () => {
     });
     expect(await failureCode(loadActivePlan(oversizedPointer))).toBe(
       ISSUE_CODES.planNotFound,
+    );
+    expect(readPaths, "pointer size").not.toContain(
+      join(root, "active-plan.json"),
     );
 
     // The real primitive measures the entry itself, never a symlink target.
@@ -1218,6 +1399,107 @@ describe("private plan storage", () => {
     const linkPath = join(root, "sized-link");
     await symlink(sizedPath, linkPath);
     expect(await fileSystem.byteLength(linkPath)).toBe(sizedPath.length);
+  });
+
+  it("bounds every stored read on the descriptor it reads, not on the path", async () => {
+    const fileSystem = createNodePlanStoreFileSystem();
+    const entryPath = join(root, "bounded");
+    await writeFile(entryPath, "small", { mode: 0o600 });
+
+    // The size is taken from the open entry, so replacing the path afterwards
+    // cannot enlarge what is allocated or read: the descriptor is unmoved.
+    const handle = await fileSystem.openForBoundedRead(entryPath);
+    expect(handle.byteLength).toBe(5);
+    const oversizedPath = join(root, "oversized");
+    await writeFile(oversizedPath, new Uint8Array(2_000_000), { mode: 0o600 });
+    await rename(oversizedPath, entryPath);
+    const bytes = await handle.read();
+    expect(bytes && new TextDecoder().decode(bytes)).toBe("small");
+    await handle.close();
+
+    // A final symlink is a failed open rather than a read of its target.
+    const linkPath = join(root, "bounded-link");
+    await symlink(entryPath, linkPath);
+    await expect(fileSystem.openForBoundedRead(linkPath)).rejects.toThrow();
+
+    // Growth and shrinkage under the descriptor are ambiguity, not data.
+    const mutablePath = join(root, "mutable");
+    await writeFile(mutablePath, "abcdef", { mode: 0o600 });
+    const grown = await fileSystem.openForBoundedRead(mutablePath);
+    await writeFile(mutablePath, "abcdefgh", { mode: 0o600 });
+    expect(await grown.read()).toBeUndefined();
+    await grown.close();
+    const shrunk = await fileSystem.openForBoundedRead(mutablePath);
+    await writeFile(mutablePath, "ab", { mode: 0o600 });
+    expect(await shrunk.read()).toBeUndefined();
+    await shrunk.close();
+  });
+
+  it("never allocates a stored entry that was swapped after its size was taken", async () => {
+    const envelope = sealedPlan();
+    await publishSealedPlan(deps, envelope);
+    const documentPath = planDocumentOf(envelope.planId);
+    const original = new Uint8Array(await readFile(documentPath));
+    const oversizedPath = join(root, "oversized");
+    const allocated: number[] = [];
+
+    // The document is replaced with an oversized one in the window between the
+    // open that measures it and the read that allocates it.
+    const raced = withDeps({
+      fileSystem: {
+        ...deps.fileSystem,
+        openForBoundedRead: async (filePath) => {
+          const handle = await deps.fileSystem.openForBoundedRead(filePath);
+          if (filePath !== documentPath) return handle;
+          await writeFile(
+            oversizedPath,
+            new Uint8Array(MAX_PLAN_DOCUMENT_BYTES + 1),
+            { mode: 0o600 },
+          );
+          await rename(oversizedPath, documentPath);
+          return {
+            byteLength: handle.byteLength,
+            read: async () => {
+              const bytes = await handle.read();
+              allocated.push(bytes?.byteLength ?? 0);
+              return bytes;
+            },
+            close: () => handle.close(),
+          };
+        },
+      },
+    });
+
+    // The descriptor still refers to the measured document, so the plan loads
+    // from the bytes that were bounded and the planted one is never allocated.
+    const loaded = await loadSealedPlan(raced, envelope.planId);
+    expect(loaded.ok && loaded.value.planId).toBe(envelope.planId);
+    expect(allocated).toEqual([original.byteLength]);
+    expect(Math.max(...allocated)).toBeLessThanOrEqual(MAX_PLAN_DOCUMENT_BYTES);
+
+    // The swapped-in document is over the ceiling, so a later load refuses it
+    // on the descriptor it opened, without reading a byte of it.
+    const reads: string[] = [];
+    const watched = withDeps({
+      fileSystem: {
+        ...deps.fileSystem,
+        openForBoundedRead: async (filePath) => {
+          const handle = await deps.fileSystem.openForBoundedRead(filePath);
+          return {
+            byteLength: handle.byteLength,
+            read: async () => {
+              reads.push(filePath);
+              return handle.read();
+            },
+            close: () => handle.close(),
+          };
+        },
+      },
+    });
+    expect(await failureCode(loadSealedPlan(watched, envelope.planId))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(reads).not.toContain(documentPath);
   });
 
   it("never stores source bytes and never brands a restored plan without them", async () => {

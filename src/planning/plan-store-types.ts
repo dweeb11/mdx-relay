@@ -80,6 +80,24 @@ export interface PlanStoreFileHandle {
   close(): Promise<void>;
 }
 
+/**
+ * One open entry a bounded read decides against. The size and the bytes come
+ * from the same descriptor, so replacing the path after the size was taken
+ * cannot enlarge what is allocated or read: the descriptor still refers to the
+ * entry that was measured.
+ */
+export interface PlanStoreReadHandle {
+  /** Byte length of the opened entry, taken from this descriptor. */
+  readonly byteLength: number;
+  /**
+   * Reads exactly `byteLength` bytes from this descriptor. Returns `undefined`
+   * when the entry no longer has exactly that length -- a short read or one
+   * further readable byte is ambiguity, not data.
+   */
+  read(): Promise<Uint8Array | undefined>;
+  close(): Promise<void>;
+}
+
 export interface PlanStoreFileSystem {
   /** Creates the directory and any missing parents with exactly `mode`. */
   makeDirectory(directoryPath: string, mode: number): Promise<void>;
@@ -88,7 +106,16 @@ export interface PlanStoreFileSystem {
   /** Flushes a directory entry so a rename into it survives a crash. */
   syncDirectory(directoryPath: string): Promise<void>;
   rename(fromPath: string, toPath: string): Promise<void>;
+  /** Reads a file this store has just written, to re-hash what landed. */
   readFile(filePath: string): Promise<Uint8Array>;
+  /**
+   * Opens the entry itself, never a final symlink, and reports its size from
+   * that same open descriptor. Every stored file the store did not just write
+   * is read through this so its ceiling is decided against the bytes that will
+   * actually be read rather than against a path that can be replaced in
+   * between.
+   */
+  openForBoundedRead(filePath: string): Promise<PlanStoreReadHandle>;
   /**
    * Permission bits of the entry itself, never of a symlink target, so a
    * planted link reads back as widened permissions rather than as its target.

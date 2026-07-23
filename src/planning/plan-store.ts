@@ -9,7 +9,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import type { PlanId } from "../contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../contracts/issues";
@@ -36,6 +36,7 @@ import {
   TEMPORARY_SUFFIX,
   type PlanStoreDeps,
   type PlanStoreFileSystem,
+  type PlanStoreReadHandle,
 } from "./plan-store-types";
 import {
   canonicalizeJcs,
@@ -108,6 +109,44 @@ export function createNodePlanStoreFileSystem(): PlanStoreFileSystem {
     },
     rename: (fromPath, toPath) => rename(fromPath, toPath),
     readFile: async (filePath) => new Uint8Array(await readFile(filePath)),
+    async openForBoundedRead(filePath) {
+      // O_NOFOLLOW refuses a final symlink outright, so a planted link is a
+      // failed open rather than a read of whatever it points at.
+      const handle = await open(
+        filePath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      );
+      let byteLength: number;
+      try {
+        const stats = await handle.stat();
+        byteLength = stats.isFile() ? stats.size : Number.NaN;
+      } catch (error) {
+        await handle.close();
+        throw error;
+      }
+      return {
+        byteLength,
+        read: async () => {
+          const bytes = new Uint8Array(byteLength);
+          let filled = 0;
+          while (filled < byteLength) {
+            const { bytesRead } = await handle.read(
+              bytes,
+              filled,
+              byteLength - filled,
+              filled,
+            );
+            // A short read means the entry shrank under the descriptor.
+            if (bytesRead === 0) return undefined;
+            filled += bytesRead;
+          }
+          // One further readable byte means it grew; neither length is its size.
+          const beyond = await handle.read(new Uint8Array(1), 0, 1, byteLength);
+          return beyond.bytesRead === 0 ? bytes : undefined;
+        },
+        close: () => handle.close(),
+      };
+    },
     readPermissionBits: async (entryPath) =>
       (await lstat(entryPath)).mode & 0o777,
     byteLength: async (entryPath) => (await lstat(entryPath)).size,
@@ -117,11 +156,24 @@ export function createNodePlanStoreFileSystem(): PlanStoreFileSystem {
   };
 }
 
+/**
+ * The one spelling of a store root. `/tmp/store`, `/tmp/store/.`, `/tmp//store`
+ * and a relative root all address the same files, so they have to resolve to
+ * the same identity or the per-root queue below would hand out one lock each
+ * for the same store. Resolution is purely lexical against the process working
+ * directory: a store root is a path contract, and walking symlinks here would
+ * make the store's own identity depend on entries an attacker can plant where
+ * the root does not exist yet.
+ */
+export function canonicalPlanStoreRoot(rootDirectory: string): string {
+  return resolve(rootDirectory);
+}
+
 export function createPlanStoreDeps(
   rootDirectory: string = defaultPlanStoreRoot(),
 ): PlanStoreDeps {
   return Object.freeze({
-    rootDirectory,
+    rootDirectory: canonicalPlanStoreRoot(rootDirectory),
     fileSystem: createNodePlanStoreFileSystem(),
     hash: sha256OfBytes,
     now: () => new Date().toISOString(),
@@ -133,38 +185,43 @@ export function createPlanStoreDeps(
  * One queue per store root. Publication, approval and cleanup take a turn on it
  * so their read-then-write sequences cannot interleave; loading stays outside
  * it because publication is atomic and a reader only ever sees one whole plan.
+ * The key is the canonical root, so deps built from equivalent spellings of one
+ * store share the queue that serializes them rather than each holding its own.
  */
 const storeQueues = new Map<string, Promise<void>>();
 
 const withStoreLock = async <T>(
-  rootDirectory: string,
+  deps: PlanStoreDeps,
   operation: () => Promise<T>,
 ): Promise<T> => {
-  const previous = storeQueues.get(rootDirectory) ?? Promise.resolve();
+  const key = storeRoot(deps);
+  const previous = storeQueues.get(key) ?? Promise.resolve();
   const running = previous.then(operation, operation);
   const settled = running.then(
     () => undefined,
     () => undefined,
   );
-  storeQueues.set(rootDirectory, settled);
+  storeQueues.set(key, settled);
   try {
     return await running;
   } finally {
-    if (storeQueues.get(rootDirectory) === settled)
-      storeQueues.delete(rootDirectory);
+    if (storeQueues.get(key) === settled) storeQueues.delete(key);
   }
 };
 
+/** Every path the store touches hangs off the one canonical root. */
+const storeRoot = (deps: PlanStoreDeps): string =>
+  canonicalPlanStoreRoot(deps.rootDirectory);
 const plansDirectory = (deps: PlanStoreDeps): string =>
-  join(deps.rootDirectory, PLANS_DIRECTORY);
+  join(storeRoot(deps), PLANS_DIRECTORY);
 const planDirectory = (deps: PlanStoreDeps, planId: PlanId): string =>
   join(plansDirectory(deps), planId);
 const approvalsDirectory = (deps: PlanStoreDeps): string =>
-  join(deps.rootDirectory, APPROVALS_DIRECTORY);
+  join(storeRoot(deps), APPROVALS_DIRECTORY);
 const approvalFile = (deps: PlanStoreDeps, planId: PlanId): string =>
   join(approvalsDirectory(deps), `${planId}.json`);
 const activePlanFile = (deps: PlanStoreDeps): string =>
-  join(deps.rootDirectory, ACTIVE_PLAN_FILENAME);
+  join(storeRoot(deps), ACTIVE_PLAN_FILENAME);
 
 const permissionBits = async (
   deps: PlanStoreDeps,
@@ -209,17 +266,34 @@ const ensureOwnerOnlyDirectory = async (
     throw new Error("Plan storage directory is not owner-only");
 };
 
-/** Reads a stored file only after its own size clears the given ceiling. */
+/**
+ * Reads a stored file only after its own size clears the given ceiling, with
+ * the size taken from the descriptor the bytes then come from. An entry swapped
+ * for an oversized one after the ceiling was cleared is still the measured
+ * entry to this descriptor, and one that never clears it is never allocated.
+ */
 const readBoundedFile = async (
   deps: PlanStoreDeps,
   filePath: string,
   maximumBytes: number,
 ): Promise<Uint8Array | undefined> => {
-  const size = await deps.fileSystem.byteLength(filePath);
-  if (!Number.isSafeInteger(size) || size < 0 || size > maximumBytes)
+  let handle: PlanStoreReadHandle;
+  try {
+    handle = await deps.fileSystem.openForBoundedRead(filePath);
+  } catch {
     return undefined;
-  const bytes = await deps.fileSystem.readFile(filePath);
-  return bytes.byteLength === size ? bytes : undefined;
+  }
+  try {
+    const size = handle.byteLength;
+    if (!Number.isSafeInteger(size) || size < 0 || size > maximumBytes)
+      return undefined;
+    const bytes = await handle.read();
+    return bytes !== undefined && bytes.byteLength === size ? bytes : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 };
 
 /** Writes one file exclusively, flushes it, then reopens and re-hashes it. */
@@ -330,7 +404,7 @@ export async function loadSealedPlan(
     const blobDirectory = join(directory, PLAN_BLOB_DIRECTORY);
     if (
       !(await hasOwnerOnlyAncestry(deps, [
-        deps.rootDirectory,
+        storeRoot(deps),
         plansDirectory(deps),
         directory,
         blobDirectory,
@@ -407,10 +481,9 @@ export async function loadActivePlan(
   deps: PlanStoreDeps,
   sourceBytes?: PlanSourceBytes,
 ): Promise<MdxRelayResult<SealedExportPlanEnvelope>> {
-  if ((await permissionBits(deps, deps.rootDirectory)) === undefined)
+  if ((await permissionBits(deps, storeRoot(deps))) === undefined)
     return notFound();
-  if (!(await hasOwnerOnlyAncestry(deps, [deps.rootDirectory])))
-    return tampered();
+  if (!(await hasOwnerOnlyAncestry(deps, [storeRoot(deps)]))) return tampered();
   const planId = await readPointer(deps, activePlanFile(deps));
   return planId === undefined
     ? notFound()
@@ -451,10 +524,43 @@ const restoreActivePin = async (
 };
 
 /**
+ * Puts the exact prior plan document back after a generation refresh that was
+ * committed and then failed. A refresh the caller was told failed must not stay
+ * loadable, so the restoration is verified too: if the prior bytes cannot be
+ * put back and proven, the plan directory goes instead. Destroying a derived,
+ * expiring plan is recoverable by re-planning; leaving a generation the store
+ * reported as failed available to approve is not.
+ */
+const rollbackRefreshedDocument = async (
+  deps: PlanStoreDeps,
+  planId: PlanId,
+  priorDocumentBytes: Uint8Array,
+  priorGenerationToken: string,
+): Promise<MdxRelayResult<never>> => {
+  const directory = planDirectory(deps, planId);
+  const documentPath = join(directory, PLAN_DOCUMENT_FILENAME);
+  try {
+    await replaceVerifiedFile(deps, documentPath, priorDocumentBytes);
+    const restored = await loadSealedPlan(deps, planId);
+    if (
+      restored.ok &&
+      restored.value.plan.generationToken === priorGenerationToken
+    )
+      return writeFailed();
+  } catch {
+    // Falls through to removal: an unprovable restoration is not a restoration.
+  }
+  await discard(deps, [`${documentPath}${TEMPORARY_SUFFIX}`, directory]);
+  return writeFailed();
+};
+
+/**
  * Re-pins a plan that is already published at this content-derived ID. The ID
  * excludes the generation token, so the same identity can arrive from a later
- * generation; the stored document is then replaced through one atomic rename
- * that leaves the existing valid plan untouched if any step of it fails.
+ * generation; the stored document is then replaced through one atomic rename.
+ * The replacement is only real once the refreshed plan has been reloaded and
+ * verified and the active pin has been published, so every failure after the
+ * rename puts the prior document and the prior pin back before reporting it.
  */
 const repinPublishedPlan = async (
   deps: PlanStoreDeps,
@@ -466,7 +572,17 @@ const repinPublishedPlan = async (
   const directory = planDirectory(deps, planId);
   const documentPath = join(directory, PLAN_DOCUMENT_FILENAME);
   const temporaryDocument = `${documentPath}${TEMPORARY_SUFFIX}`;
-  if (storedGenerationToken !== envelope.plan.generationToken) {
+  const refreshing = storedGenerationToken !== envelope.plan.generationToken;
+
+  let priorDocumentBytes: Uint8Array | undefined;
+  if (refreshing) {
+    // Nothing is replaced until the bytes that would undo it are in hand.
+    priorDocumentBytes = await readBoundedFile(
+      deps,
+      documentPath,
+      MAX_PLAN_DOCUMENT_BYTES,
+    );
+    if (priorDocumentBytes === undefined) return writeFailed();
     try {
       await replaceVerifiedFile(deps, documentPath, documentBytes);
     } catch {
@@ -478,16 +594,30 @@ const repinPublishedPlan = async (
       !replaced.ok ||
       replaced.value.plan.generationToken !== envelope.plan.generationToken
     )
-      return writeFailed();
+      return rollbackRefreshedDocument(
+        deps,
+        planId,
+        priorDocumentBytes,
+        storedGenerationToken,
+      );
   }
+
   const previousActive = await readPointer(deps, activePlanFile(deps));
   try {
     await writePointer(deps, activePlanFile(deps), planId);
   } catch {
     await discard(deps, [`${activePlanFile(deps)}${TEMPORARY_SUFFIX}`]);
-    // The plan here was already valid before this call, so it is kept.
     await restoreActivePin(deps, planId, previousActive);
-    return writeFailed();
+    // Without a refresh the plan here was already valid before this call, so it
+    // is kept; with one, the generation this call wrote never became real.
+    return priorDocumentBytes === undefined
+      ? writeFailed()
+      : rollbackRefreshedDocument(
+          deps,
+          planId,
+          priorDocumentBytes,
+          storedGenerationToken,
+        );
   }
   return mdxRelayOk(planId);
 };
@@ -570,11 +700,11 @@ export async function publishSealedPlan(
   if (Date.parse(deps.now()) >= Date.parse(envelope.plan.expiresAtUtc))
     return mdxRelayErr([createIssue(ISSUE_CODES.planExpired)]);
 
-  return withStoreLock(deps.rootDirectory, async () => {
+  return withStoreLock(deps, async () => {
     let documentBytes: Uint8Array;
     try {
       documentBytes = new TextEncoder().encode(canonicalizeJcs(envelope.plan));
-      await ensureOwnerOnlyDirectory(deps, deps.rootDirectory);
+      await ensureOwnerOnlyDirectory(deps, storeRoot(deps));
       await ensureOwnerOnlyDirectory(deps, plansDirectory(deps));
       await ensureOwnerOnlyDirectory(deps, approvalsDirectory(deps));
     } catch {
@@ -604,7 +734,7 @@ export async function recordPlanApproval(
   planId: PlanId,
   sourceBytes: PlanSourceBytes,
 ): Promise<MdxRelayResult<PlanId>> {
-  return withStoreLock(deps.rootDirectory, async () => {
+  return withStoreLock(deps, async () => {
     const loaded = await loadSealedPlan(deps, planId, sourceBytes);
     if (!loaded.ok) return loaded;
     if (loaded.value.state !== "ready" || !loaded.value.sourceBytesVerified)
@@ -634,7 +764,7 @@ export async function readPlanApproval(
   if ((await permissionBits(deps, filePath)) === undefined) return notFound();
   if (
     !(await hasOwnerOnlyAncestry(deps, [
-      deps.rootDirectory,
+      storeRoot(deps),
       approvalsDirectory(deps),
     ]))
   )
@@ -652,7 +782,7 @@ export async function readPlanApproval(
 export async function cleanupExpiredPlans(
   deps: PlanStoreDeps,
 ): Promise<MdxRelayResult<readonly PlanId[]>> {
-  return withStoreLock(deps.rootDirectory, async () => {
+  return withStoreLock(deps, async () => {
     const removed: PlanId[] = [];
     try {
       if ((await permissionBits(deps, plansDirectory(deps))) === undefined)

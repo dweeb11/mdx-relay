@@ -430,6 +430,22 @@ describe("sealExportPlan", () => {
     if (!result.ok)
       expect(result.error[0].code).toBe(ISSUE_CODES.staleDuringPlanning);
   });
+
+  it("rejects a stored plan whose source-image transforms point outside the sealed image blobs", () => {
+    const envelope = sealOrThrow();
+    const plan = restored(envelope);
+    (plan.sourceImages as { transformedOutputSha256: string }[])[0]!
+      .transformedOutputSha256 = digest("forged-transform");
+    (
+      (plan.approvalFingerprint as {
+        sourceImages: { transformedOutputSha256: string }[];
+      }).sourceImages
+    )[0]!.transformedOutputSha256 = digest("forged-transform");
+
+    const result = verifyStoredExportPlan(plan, envelope.blobBytes, NOW, sourceBytes());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error[0].code).toBe(ISSUE_CODES.storageTampered);
+  });
 });
 
 describe("verifyStoredExportPlan", () => {

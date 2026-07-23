@@ -209,6 +209,44 @@ const hasVerifiedBlobs = (
   });
 };
 
+/** The image digests must point at verified sealed image blobs, not just any blob. */
+const hasVerifiedSourceImageTransforms = (
+  candidate: Record<string, unknown>,
+  blobs: Record<string, SealedOutput>,
+): boolean => {
+  const sourceImages = candidate.sourceImages;
+  const commitMessage = candidate.commitMessage;
+  const generatedMdx = candidate.generatedMdx;
+  if (
+    !Array.isArray(sourceImages) ||
+    !isRecord(commitMessage) ||
+    !isRecord(generatedMdx) ||
+    typeof commitMessage.contentSha256 !== "string" ||
+    typeof generatedMdx.contentSha256 !== "string"
+  )
+    return false;
+
+  const sealedImageDigests = Object.values(blobs)
+    .filter(
+      (output: SealedOutput) =>
+        output.contentSha256 !== commitMessage.contentSha256 &&
+        output.contentSha256 !== generatedMdx.contentSha256,
+    )
+    .map((output: SealedOutput) => output.contentSha256 as Sha256Digest);
+
+  const remaining = new Set(sealedImageDigests);
+  for (const image of sourceImages) {
+    const transformedOutputSha256 =
+      isRecord(image) && typeof image.transformedOutputSha256 === "string"
+        ? (image.transformedOutputSha256 as Sha256Digest)
+        : undefined;
+    if (transformedOutputSha256 === undefined || !remaining.has(transformedOutputSha256))
+      return false;
+    remaining.delete(transformedOutputSha256);
+  }
+  return remaining.size === 0;
+};
+
 /** Every duplicated capture field must equal the approval fingerprint exactly. */
 const mirrorsApprovalCapture = (plan: Record<string, unknown>): boolean => {
   const approval = plan.approvalFingerprint;
@@ -389,6 +427,7 @@ const verifiedEnvelope = (
     candidate.dependencySnapshotSha256 !==
       sha256OfUtf8(candidate.dependencySnapshot) ||
     !hasVerifiedBlobs(candidate.blobs, blobBytes) ||
+    !hasVerifiedSourceImageTransforms(candidate, candidate.blobs) ||
     !mirrorsApprovalCapture(candidate)
   )
     return undefined;
