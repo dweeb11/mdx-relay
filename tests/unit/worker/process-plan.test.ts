@@ -234,3 +234,77 @@ describe("processPlan", () => {
     expect(h.transformCalls()).toBe(0);
   });
 });
+
+/**
+ * The parent can only arm a per-image timer from a wire signal, so the exact
+ * interleaving of posts and codec work is a protocol guarantee, not an
+ * implementation detail: each image's `progress` must be observable before that
+ * image's decode/encode begins, and `started` must not imply image work.
+ */
+describe("processPlan image-work signalling", () => {
+  const interleaving = async (
+    images: readonly WorkerImageInput[],
+  ): Promise<string[]> => {
+    const order: string[] = [];
+    const transform: ImageCodec["transform"] = async () => {
+      order.push("codec.transform");
+      return ok({
+        decodedMime: "image/png" as const,
+        width: 2,
+        height: 2,
+        bytes: Uint8Array.of(9, 9).buffer,
+      });
+    };
+    const h = harness(
+      {
+        transformMarkdown: (async () => {
+          order.push("markdown");
+          return ok(markdownResult);
+        }) as ProcessPlanDeps["transformMarkdown"],
+        post: (event) => {
+          order.push(
+            event.type === "progress"
+              ? `progress:${String((event as { imageIndex: number }).imageIndex)}`
+              : event.type,
+          );
+        },
+      },
+      transform,
+    );
+    await processPlan(request(images), h.deps);
+    return order;
+  };
+
+  it("emits started before markdown work, so started cannot time an image", async () => {
+    expect(await interleaving([])).toEqual([
+      "started",
+      "markdown",
+      "completed",
+    ]);
+  });
+
+  it("emits each image's progress before that image's codec work", async () => {
+    expect(await interleaving([image("a", "aa"), image("b", "bb")])).toEqual([
+      "started",
+      "markdown",
+      "progress:0",
+      "codec.transform",
+      "progress:1",
+      "codec.transform",
+      "completed",
+    ]);
+  });
+
+  it("still emits progress before reusing a deduplicated source", async () => {
+    expect(
+      await interleaving([image("a", "same"), image("b", "same")]),
+    ).toEqual([
+      "started",
+      "markdown",
+      "progress:0",
+      "codec.transform",
+      "progress:1",
+      "completed",
+    ]);
+  });
+});

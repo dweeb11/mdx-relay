@@ -178,13 +178,17 @@ export class ProcessingClient {
         if (!isRecord(data) || data.generationToken !== generationToken) return;
 
         if (data.type === "started") {
-          armImageTimer();
+          // `started` precedes the Markdown transform and carries no image, so
+          // it must not start the per-image clock. Until the first `progress`
+          // the plan budget is the only clock that can expire.
           onProgress?.(brand(data));
           return;
         }
         if (data.type === "progress") {
           activeSourceId =
             typeof data.sourceId === "string" ? data.sourceId : activeSourceId;
+          // Emitted immediately before this image's decode/encode: the one
+          // wire signal that marks image-work start.
           armImageTimer();
           onProgress?.(brand(data));
           return;

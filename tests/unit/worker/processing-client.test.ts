@@ -114,7 +114,9 @@ const image = (sourceId: string): WorkerImageInput => ({
   bytes: Uint8Array.of(1, 2, 3, 4).buffer,
 });
 
-const request = (): WorkerProcessRequest => ({
+const request = (
+  overrides: Partial<WorkerProcessRequest> = {},
+): WorkerProcessRequest => ({
   type: "process-plan",
   generationToken: token,
   planStartedAtMs: 1_000,
@@ -132,6 +134,7 @@ const request = (): WorkerProcessRequest => ({
   dependencySnapshot: "{}" as CanonicalDependencySnapshot,
   dependencySnapshotSha256: digest("deps"),
   images: [image("a")],
+  ...overrides,
 });
 
 const setup = () => {
@@ -549,5 +552,84 @@ describe("ProcessingClient transfer list", () => {
     };
     const promise = client.process(req);
     await expect(promise).resolves.toMatchObject({ type: "blocked" });
+  });
+});
+
+/**
+ * The 60s budget is per *image*, bounded by the 10-minute plan budget. The
+ * worker emits `started` before the Markdown transform and emits each image's
+ * `progress` immediately before that image's decode/encode (locked by
+ * process-plan's interleaving tests), so `progress` is the only wire signal
+ * that marks image-work start. Arming on `started` charged Markdown time -- and
+ * on an image-free note, no image work at all -- to the per-image budget.
+ */
+describe("ProcessingClient per-image budget", () => {
+  it("does not arm the per-image timer on started", () => {
+    const { worker, scheduler, client } = setup();
+    void client.process(request());
+    expect(scheduler.size).toBe(1); // the plan budget timer only
+    worker.emit(startedEvent(token));
+    expect(scheduler.size).toBe(1);
+  });
+
+  it("arms the per-image timer only once image work begins", () => {
+    const { worker, scheduler, client } = setup();
+    void client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit(progressEvent(token));
+    expect(scheduler.size).toBe(2); // plan budget + this image
+  });
+
+  it("never charges an image-free note to the per-image budget", async () => {
+    const { worker, scheduler, client } = setup();
+    const done = client.process(request({ images: [] }));
+    worker.emit({ type: "started", generationToken: token, imageCount: 0 });
+    expect(scheduler.size).toBe(1);
+    scheduler.fireSoonest();
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    // The plan budget is the only clock that can expire before any image work.
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.planBudgetExhausted);
+  });
+
+  it("gives the first image a full budget after a slow markdown transform", async () => {
+    const worker = new FakeWorker();
+    const scheduler = new Scheduler();
+    let clock = 1_000;
+    const client = new ProcessingClient({
+      createWorker: () => worker,
+      hash: async (bytes) => sha(bytes),
+      now: () => clock,
+      setTimer: scheduler.set,
+      clearTimer: scheduler.clear,
+    });
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    clock += 120_000; // markdown work runs well past one image timeout
+    expect(scheduler.size).toBe(1);
+    worker.emit(progressEvent(token));
+    // Only now is an image in flight, and it gets the whole 60s.
+    expect(scheduler.size).toBe(2);
+    scheduler.fireSoonest();
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.workerImageTimeout);
+    expect(terminal.activeSourceId).toBe("a");
+  });
+
+  it("keeps the plan budget armed across markdown and image work", async () => {
+    const { worker, scheduler, client } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit(progressEvent(token));
+    // Drop the per-image timer, leaving the plan budget as the only clock.
+    scheduler.clear(2);
+    scheduler.fireSoonest();
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.planBudgetExhausted);
   });
 });
