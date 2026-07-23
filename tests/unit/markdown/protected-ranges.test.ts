@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import {
+  findDestinationRanges,
   findProtectedRanges,
   isOffsetProtected,
+  mergeSourceRanges,
 } from "../../../src/markdown/protected-ranges";
 
 const protectedSlices = (source: string): readonly string[] => {
@@ -127,5 +129,63 @@ describe("findProtectedRanges", () => {
     expect(result.error.displayDetails).toEqual({
       summary: "The note contains unsupported Markdown or Obsidian syntax.",
     });
+  });
+});
+
+describe("findDestinationRanges", () => {
+  it("uses micromark positions for inline, image, and reference destinations", () => {
+    const source = [
+      "[ref](https://example.com/[[id]])",
+      "![alt](https://example.com/[[id]].png)",
+      "[ref][label]",
+      "",
+      "[label]: <https://example.com/[[id]]>",
+    ].join("\n");
+    const result = findDestinationRanges(source);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.map((range) =>
+        source.slice(range.start.offset, range.end.offset),
+      ),
+    ).toEqual([
+      "https://example.com/[[id]]",
+      "https://example.com/[[id]].png",
+      "https://example.com/[[id]]",
+    ]);
+    expect(Object.isFrozen(result.value)).toBe(true);
+    expect(Object.isFrozen(result.value[0])).toBe(true);
+  });
+
+  it("fails closed when the parser throws", () => {
+    const parser = (() => {
+      throw new Error("synthetic parser failure");
+    }) as never;
+    const result = findDestinationRanges("x", parser);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+    expect(result.error.sourceRange).toMatchObject({
+      start: { offset: 0 },
+      end: { offset: 1 },
+    });
+  });
+});
+
+describe("mergeSourceRanges", () => {
+  it("orders mixed code and destination ranges by start offset", () => {
+    const source = "`code` then [ref](https://example.com/[[id]])";
+    const protectedResult = findProtectedRanges(source);
+    const destinationResult = findDestinationRanges(source);
+    expect(protectedResult.ok).toBe(true);
+    expect(destinationResult.ok).toBe(true);
+    if (!protectedResult.ok || !destinationResult.ok) return;
+    const merged = mergeSourceRanges(
+      destinationResult.value,
+      protectedResult.value,
+    );
+    expect(
+      merged.map((range) => source.slice(range.start.offset, range.end.offset)),
+    ).toEqual(["`code`", "https://example.com/[[id]]"]);
   });
 });

@@ -11,6 +11,11 @@ import { err, ok, type Result } from "../contracts/result";
 
 const protectedTokenTypes = new Set(["codeText", "codeFenced", "codeIndented"]);
 
+const destinationTokenTypes = new Set([
+  "resourceDestinationString",
+  "definitionDestinationString",
+]);
+
 const freezePoint = (point: {
   readonly line: number;
   readonly column: number;
@@ -80,6 +85,49 @@ export function isOffsetProtected(
   }
   const range = ranges[low];
   return range !== undefined && offset >= range.start.offset;
+}
+
+export function mergeSourceRanges(
+  ...groups: readonly (readonly SourceRange[])[]
+): readonly SourceRange[] {
+  return Object.freeze(
+    groups.flat().sort((left, right) => left.start.offset - right.start.offset),
+  );
+}
+
+const collectTokenRanges = (
+  source: string,
+  tokenTypes: ReadonlySet<string>,
+  parser: typeof parse = parse,
+): Result<readonly SourceRange[], MdxRelayIssue> => {
+  try {
+    const events = postprocess(
+      parser()
+        .document()
+        .write(preprocess()(source, "utf8", true)),
+    );
+    return ok(
+      Object.freeze(
+        events
+          .filter(
+            (event) => event[0] === "enter" && tokenTypes.has(event[1].type),
+          )
+          .map((event) =>
+            freezeRange(freezePoint(event[1].start), freezePoint(event[1].end)),
+          )
+          .sort((left, right) => left.start.offset - right.start.offset),
+      ),
+    );
+  } catch {
+    return unsupportedAt(source, 0, Math.min(1, source.length));
+  }
+};
+
+export function findDestinationRanges(
+  source: string,
+  parser: typeof parse = parse,
+): Result<readonly SourceRange[], MdxRelayIssue> {
+  return collectTokenRanges(source, destinationTokenTypes, parser);
 }
 
 export function findProtectedRanges(
