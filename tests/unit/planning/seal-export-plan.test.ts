@@ -16,6 +16,7 @@ import {
   sha256OfUtf8,
   type ExportPlanBuildInput,
   type ExportPlanDraft,
+  type PlanSourceBytes,
 } from "../../../src/planning/build-export-plan";
 import {
   buildPlanIdentityManifest,
@@ -34,6 +35,16 @@ const DEPENDENCY_SNAPSHOT = '{"images":["assets/a.png"]}';
 const MDX_BYTES = utf8("---\ntitle: Example\n---\n\nBody\n");
 const IMAGE_BYTES = utf8("webp-bytes");
 const NOW = "2026-07-20T01:00:00.000Z";
+
+/** Every source fingerprint below is derived from the bytes, never asserted. */
+const NOTE_BYTES = utf8("# Example\n\nBody\n");
+const SOURCE_A_BYTES = utf8("png-source-a");
+const SOURCE_B_BYTES = utf8("png-source-b");
+
+const sourceBytes = (): PlanSourceBytes => ({
+  note: NOTE_BYTES,
+  images: new Map([["image-a", SOURCE_A_BYTES]]),
+});
 
 const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
   realPaths: {
@@ -113,8 +124,8 @@ const buildInput = (
     sourceNote: {
       vaultRelativePath: "notes/example.md",
       realPath: "/vault/notes/example.md",
-      byteLength: 42,
-      contentSha256: digest("note"),
+      byteLength: NOTE_BYTES.byteLength,
+      contentSha256: sha256OfBytes(NOTE_BYTES),
     },
     sourceImages: [
       {
@@ -122,10 +133,11 @@ const buildInput = (
         vaultRelativePath: "assets/a.png",
         realPath: "/vault/assets/a.png",
         decodedMime: "image/png",
-        byteLength: 10,
-        contentSha256: digest("source-a"),
+        byteLength: SOURCE_A_BYTES.byteLength,
+        contentSha256: sha256OfBytes(SOURCE_A_BYTES),
       },
     ],
+    sourceBytes: sourceBytes(),
     documentSlug: "example",
     documentTitle: "Example",
     generatedMdxBytes: MDX_BYTES,
@@ -137,12 +149,15 @@ const buildInput = (
     finalCapture: {
       profileSnapshotSha256: sha256OfUtf8(PROFILE_SNAPSHOT),
       dependencySnapshotSha256: sha256OfUtf8(DEPENDENCY_SNAPSHOT),
-      sourceNote: { byteLength: 42, contentSha256: digest("note") },
+      sourceNote: {
+        byteLength: NOTE_BYTES.byteLength,
+        contentSha256: sha256OfBytes(NOTE_BYTES),
+      },
       sourceImages: [
         {
           sourceId: "image-a",
-          byteLength: 10,
-          contentSha256: digest("source-a"),
+          byteLength: SOURCE_A_BYTES.byteLength,
+          contentSha256: sha256OfBytes(SOURCE_A_BYTES),
         },
       ],
       repository,
@@ -188,12 +203,33 @@ const restored = (envelope: {
 }): Record<string, unknown> =>
   JSON.parse(JSON.stringify(envelope.plan)) as Record<string, unknown>;
 
+/** Applies a mutation and recomputes the unkeyed content-derived plan ID. */
+const reseal = (
+  envelope: { readonly plan: unknown },
+  mutate: (plan: Record<string, unknown>) => void,
+): Record<string, unknown> => {
+  const plan = restored(envelope);
+  mutate(plan);
+  plan.planId = computePlanId(buildPlanIdentityManifest(plan));
+  return plan;
+};
+
 const tamperCode = (
   plan: unknown,
   blobBytes: ReadonlyMap<string, Uint8Array>,
   currentUtc = NOW,
+  sources: PlanSourceBytes | undefined = sourceBytes(),
 ): string | undefined => {
-  const result = verifyStoredExportPlan(plan, blobBytes, currentUtc);
+  const result = verifyStoredExportPlan(plan, blobBytes, currentUtc, sources);
+  return result.ok ? undefined : result.error[0].code;
+};
+
+/** Verification with no live source bytes: structural proof only, no brand. */
+const structuralCode = (
+  plan: unknown,
+  blobBytes: ReadonlyMap<string, Uint8Array>,
+): string | undefined => {
+  const result = verifyStoredExportPlan(plan, blobBytes, NOW);
   return result.ok ? undefined : result.error[0].code;
 };
 
@@ -226,6 +262,86 @@ describe("canonicalizeJcs", () => {
       expect(() => canonicalizeJcs(value)).toThrow(TypeError);
   });
 
+  it("terminates on invalid Unicode and emits astral characters literally", () => {
+    for (const loneSurrogate of ["\uD800", "\uDC00", "\uDBFF", "\uDFFF"]) {
+      expect(() => canonicalizeJcs(loneSurrogate), loneSurrogate).toThrow(
+        TypeError,
+      );
+      expect(() => canonicalizeJcs({ key: loneSurrogate })).toThrow(TypeError);
+      expect(() => canonicalizeJcs([loneSurrogate])).toThrow(TypeError);
+      expect(() => canonicalizeJcs({ [loneSurrogate]: 1 })).toThrow(TypeError);
+      expect(() =>
+        canonicalizeJcs({ nested: { deep: [{ value: loneSurrogate }] } }),
+      ).toThrow(TypeError);
+    }
+    expect(() => canonicalizeJcs("a\uD83Db")).toThrow(TypeError);
+
+    // Valid astral Unicode is data, not an error, and is emitted literally.
+    for (const astral of ["😀", "\u{1F600}\u{10FFFF}", "🧑‍💻"]) {
+      expect(canonicalizeJcs(astral)).toBe(JSON.stringify(astral));
+      expect(canonicalizeJcs({ [astral]: astral })).toBe(
+        `{${JSON.stringify(astral)}:${JSON.stringify(astral)}}`,
+      );
+    }
+    expect(computePlanId(canonicalizeJcs({ a: "😀" }))).toBe(
+      computePlanId(canonicalizeJcs({ a: "\u{1F600}" })),
+    );
+    expect(computePlanId(canonicalizeJcs({ a: "😀" }))).not.toBe(
+      computePlanId(canonicalizeJcs({ a: "😁" })),
+    );
+  });
+
+  it("fails closed on array holes, accessors, and non-plain JSON containers", () => {
+    const withHole = [1, 2, 3];
+    delete withHole[1];
+    expect(() => canonicalizeJcs(withHole)).toThrow(TypeError);
+    expect(() => canonicalizeJcs(Array.from({ length: 2 }))).toThrow(TypeError);
+
+    const namedArray: unknown[] & { extra?: number } = [1];
+    namedArray.extra = 2;
+    expect(() => canonicalizeJcs(namedArray)).toThrow(TypeError);
+
+    const accessor = {};
+    Object.defineProperty(accessor, "steered", {
+      enumerable: true,
+      get: () => "chosen at read time",
+    });
+    expect(() => canonicalizeJcs(accessor)).toThrow(TypeError);
+
+    const hidden = { visible: 1 };
+    Object.defineProperty(hidden, "hidden", {
+      enumerable: false,
+      value: "ignored by JSON.stringify",
+    });
+    expect(() => canonicalizeJcs(hidden)).toThrow(TypeError);
+
+    expect(() => canonicalizeJcs({ [Symbol("key")]: 1, a: 1 })).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      canonicalizeJcs({
+        toJSON: () => ({ replaced: true }),
+      }),
+    ).toThrow(TypeError);
+    for (const exotic of [
+      new Date(0),
+      new Map([["a", 1]]),
+      new Set([1]),
+      new (class Plan {
+        value = 1;
+      })(),
+      Object.create({ inherited: 1 }) as object,
+      Object("boxed"),
+    ])
+      expect(() => canonicalizeJcs(exotic), String(exotic)).toThrow(TypeError);
+
+    // A null-prototype record is still plain JSON data.
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare.b = 1;
+    bare.a = 2;
+    expect(canonicalizeJcs(bare)).toBe('{"a":2,"b":1}');
+  });
+
   it("excludes only the generation token and plan ID from plan identity", () => {
     const manifest = buildPlanIdentityManifest({
       planId: "plan-x",
@@ -248,7 +364,10 @@ describe("sealExportPlan", () => {
     expect(envelope.planId).toMatch(/^plan-[0-9a-f]{64}$/u);
     expect(envelope.plan.planId).toBe(envelope.planId);
     expect(computePlanId(envelope.identityManifest)).toBe(envelope.planId);
-    if (envelope.state !== "ready") throw new Error("expected a ready plan");
+    // The frozen brand is reachable only through a source-byte verified seal.
+    expect(envelope.sourceBytesVerified).toBe(true);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected a source-verified ready plan");
     expect(
       matchesApprovalContext(
         envelope.plan,
@@ -540,6 +659,273 @@ describe("verifyStoredExportPlan", () => {
     expect(
       tamperCode(
         resealed(() => {}),
+        envelope.blobBytes,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("recomputes every source fingerprint from bytes before branding", () => {
+    const envelope = sealOrThrow();
+    const stored = restored(envelope);
+
+    // Storage never holds source bytes, so a restored plan carries structural
+    // proof only until a live capture supplies them again.
+    const unbranded = verifyStoredExportPlan(stored, envelope.blobBytes, NOW);
+    expect(unbranded.ok && unbranded.value.sourceBytesVerified).toBe(false);
+    const branded = verifyStoredExportPlan(
+      stored,
+      envelope.blobBytes,
+      NOW,
+      sourceBytes(),
+    );
+    expect(branded.ok && branded.value.sourceBytesVerified).toBe(true);
+
+    const forgeries: readonly [
+      string,
+      (plan: Record<string, unknown>) => void,
+    ][] = [
+      [
+        "source note digest",
+        (plan) => {
+          const note = plan.sourceNote as { contentSha256: string };
+          note.contentSha256 = digest("forged-note");
+          (
+            plan.approvalFingerprint as {
+              sourceNote: { contentSha256: string };
+            }
+          ).sourceNote.contentSha256 = note.contentSha256;
+        },
+      ],
+      [
+        "source note length",
+        (plan) => {
+          const note = plan.sourceNote as { byteLength: number };
+          note.byteLength += 1;
+          (
+            plan.approvalFingerprint as { sourceNote: { byteLength: number } }
+          ).sourceNote.byteLength = note.byteLength;
+        },
+      ],
+      [
+        "source image digest",
+        (plan) => {
+          const images = plan.sourceImages as { contentSha256: string }[];
+          images[0]!.contentSha256 = digest("forged-image");
+          (
+            plan.approvalFingerprint as {
+              sourceImages: { contentSha256: string }[];
+            }
+          ).sourceImages[0]!.contentSha256 = images[0]!.contentSha256;
+        },
+      ],
+      [
+        "source image length",
+        (plan) => {
+          const images = plan.sourceImages as { byteLength: number }[];
+          images[0]!.byteLength += 1;
+          (
+            plan.approvalFingerprint as {
+              sourceImages: { byteLength: number }[];
+            }
+          ).sourceImages[0]!.byteLength = images[0]!.byteLength;
+        },
+      ],
+    ];
+
+    for (const [label, mutate] of forgeries) {
+      const forged = reseal(envelope, mutate);
+      // Every duplicated copy agrees and the unkeyed plan ID recomputes, so
+      // comparing metadata against metadata accepts the forgery outright.
+      expect(
+        structuralCode(forged, envelope.blobBytes),
+        `${label} (metadata only)`,
+      ).toBeUndefined();
+      // Recomputing from the bytes the capture actually read does not.
+      expect(tamperCode(forged, envelope.blobBytes), label).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+    }
+
+    const wrongBytes: readonly [string, PlanSourceBytes][] = [
+      [
+        "different note bytes",
+        {
+          note: utf8("# Other\n"),
+          images: new Map([["image-a", SOURCE_A_BYTES]]),
+        },
+      ],
+      ["no image bytes", { note: NOTE_BYTES, images: new Map() }],
+      [
+        "an extra image",
+        {
+          note: NOTE_BYTES,
+          images: new Map([
+            ["image-a", SOURCE_A_BYTES],
+            ["image-b", SOURCE_B_BYTES],
+          ]),
+        },
+      ],
+      [
+        "an unrelated image",
+        { note: NOTE_BYTES, images: new Map([["image-a", SOURCE_B_BYTES]]) },
+      ],
+    ];
+    for (const [label, supplied] of wrongBytes)
+      expect(tamperCode(stored, envelope.blobBytes, NOW, supplied), label).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+  });
+
+  it("applies the whole frozen structural gate to no-changes plans", () => {
+    const targets = unchangedTargets();
+    const envelope = sealOrThrow({
+      priorTargets: targets,
+      finalCapture: { ...buildInput().finalCapture, targets },
+    });
+    expect(envelope.state).toBe("no-changes");
+    expect(tamperCode(restored(envelope), envelope.blobBytes)).toBeUndefined();
+
+    const mirrorRepository = (plan: Record<string, unknown>) => {
+      (
+        plan.approvalFingerprint as { repositoryFingerprint: unknown }
+      ).repositoryFingerprint = plan.repositoryFingerprint;
+    };
+
+    const forgeries: readonly [
+      string,
+      (plan: Record<string, unknown>) => void,
+    ][] = [
+      [
+        "unsupported repository form",
+        (plan) => {
+          (
+            (plan.repositoryFingerprint as Record<string, unknown>)
+              .supportedForm as { isBareRepository: boolean }
+          ).isBareRepository = true;
+          mirrorRepository(plan);
+        },
+      ],
+      [
+        "unknown filesystem case sensitivity",
+        (plan) => {
+          (
+            plan.repositoryFingerprint as { filesystemCaseSensitivity: string }
+          ).filesystemCaseSensitivity = "unknown";
+          mirrorRepository(plan);
+        },
+      ],
+      [
+        "empty repository real path",
+        (plan) => {
+          (
+            (plan.repositoryFingerprint as Record<string, unknown>)
+              .realPaths as { repositoryRoot: string }
+          ).repositoryRoot = "";
+          mirrorRepository(plan);
+        },
+      ],
+      [
+        "extra repository field",
+        (plan) => {
+          (plan.repositoryFingerprint as Record<string, unknown>).extra = true;
+          mirrorRepository(plan);
+        },
+      ],
+      [
+        "unsupported decoded image type",
+        (plan) => {
+          (plan.sourceImages as { decodedMime: string }[])[0]!.decodedMime =
+            "image/gif";
+        },
+      ],
+      [
+        "incomplete source note metadata",
+        (plan) => {
+          delete (plan.sourceNote as Record<string, unknown>).realPath;
+        },
+      ],
+      [
+        "source images out of order",
+        (plan) => {
+          const images = plan.sourceImages as Record<string, unknown>[];
+          images.push({ ...images[0]!, sourceId: "image-A" });
+          const approval = plan.approvalFingerprint as {
+            sourceImages: Record<string, unknown>[];
+          };
+          approval.sourceImages = images.map(
+            ({
+              sourceId,
+              byteLength,
+              contentSha256,
+              transformedOutputSha256,
+            }) => ({
+              sourceId,
+              byteLength,
+              contentSha256,
+              transformedOutputSha256,
+            }),
+          );
+        },
+      ],
+      [
+        "extra author field",
+        (plan) => {
+          (plan.author as Record<string, unknown>).signature = "forged";
+        },
+      ],
+      [
+        "an action smuggled into a no-changes plan",
+        (plan) => {
+          plan.actions = [
+            {
+              kind: "create",
+              documentOrder: 0,
+              targetPath: "content/posts/example.mdx",
+              expectedGitMode: "100644",
+              sealedOutput: plan.generatedMdx,
+              sourceOccurrence: 0,
+              approvedPriorTarget: { state: "absent" },
+            },
+          ];
+        },
+      ],
+      [
+        "a repository target smuggled into a no-changes plan",
+        (plan) => {
+          (plan.repositoryFingerprint as { targets: unknown[] }).targets = [
+            {
+              normalizedPath: "content/posts/example.mdx",
+              symlinkStatus: "not-symlink",
+              approvedPriorTarget: { state: "absent" },
+            },
+          ];
+          mirrorRepository(plan);
+        },
+      ],
+      [
+        "a blocker issue promoted into the plan",
+        (plan) => void (plan.issues = [createIssue(ISSUE_CODES.invalidMdx)]),
+      ],
+      [
+        "created after it expires",
+        (plan) => {
+          plan.createdAtUtc = "2026-07-28T00:00:00.000Z";
+          plan.expiresAtUtc = "2026-07-27T00:00:00.000Z";
+        },
+      ],
+    ];
+
+    for (const [label, mutate] of forgeries)
+      expect(
+        tamperCode(reseal(envelope, mutate), envelope.blobBytes),
+        label,
+      ).toBe(ISSUE_CODES.storageTampered);
+
+    // The same reseal of an untouched no-changes plan still verifies, so every
+    // rejection above comes from the structural gate rather than the reseal.
+    expect(
+      tamperCode(
+        reseal(envelope, () => {}),
         envelope.blobBytes,
       ),
     ).toBeUndefined();

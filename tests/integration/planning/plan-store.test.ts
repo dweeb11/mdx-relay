@@ -24,11 +24,13 @@ import type {
   ValidatedPortableProfileSnapshot,
 } from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
+import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
 import {
   buildExportPlan,
   sha256OfBytes,
   sha256OfUtf8,
   type ExportPlanBuildInput,
+  type PlanSourceBytes,
 } from "../../../src/planning/build-export-plan";
 import {
   cleanupExpiredPlans,
@@ -41,6 +43,8 @@ import {
   recordPlanApproval,
 } from "../../../src/planning/plan-store";
 import {
+  MAX_PLAN_DOCUMENT_BYTES,
+  MAX_PLAN_POINTER_BYTES,
   OWNER_ONLY_DIRECTORY_MODE,
   OWNER_ONLY_FILE_MODE,
   type PlanStoreDeps,
@@ -63,6 +67,18 @@ const IMAGE_BYTES = utf8("webp-bytes");
 const CREATED_AT = "2026-07-20T00:00:00.000Z";
 const EXPIRES_AT = "2026-07-27T00:00:00.000Z";
 const NOW = "2026-07-20T01:00:00.000Z";
+
+/** Every source fingerprint below is derived from the bytes, never asserted. */
+const NOTE_BYTES = utf8("# Example\n\nBody with a private sentence.\n");
+const SOURCE_A_BYTES = utf8("png-source-a");
+
+const sourceBytes = (): PlanSourceBytes => ({
+  note: NOTE_BYTES,
+  images: new Map([["image-a", SOURCE_A_BYTES]]),
+});
+
+/** Comfortably longer than one whole publication against a temporary root. */
+const CONCURRENT_PUBLISH_BUDGET_MS = 1_000;
 
 const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
   realPaths: {
@@ -142,8 +158,8 @@ const buildInput = (
     sourceNote: {
       vaultRelativePath: "notes/example.md",
       realPath: "/vault/notes/example.md",
-      byteLength: 42,
-      contentSha256: digest("note"),
+      byteLength: NOTE_BYTES.byteLength,
+      contentSha256: sha256OfBytes(NOTE_BYTES),
     },
     sourceImages: [
       {
@@ -151,10 +167,11 @@ const buildInput = (
         vaultRelativePath: "assets/a.png",
         realPath: "/vault/assets/a.png",
         decodedMime: "image/png",
-        byteLength: 10,
-        contentSha256: digest("source-a"),
+        byteLength: SOURCE_A_BYTES.byteLength,
+        contentSha256: sha256OfBytes(SOURCE_A_BYTES),
       },
     ],
+    sourceBytes: sourceBytes(),
     documentSlug: "example",
     documentTitle: "Example",
     generatedMdxBytes: MDX_BYTES,
@@ -166,12 +183,15 @@ const buildInput = (
     finalCapture: {
       profileSnapshotSha256: sha256OfUtf8(PROFILE_SNAPSHOT),
       dependencySnapshotSha256: sha256OfUtf8(DEPENDENCY_SNAPSHOT),
-      sourceNote: { byteLength: 42, contentSha256: digest("note") },
+      sourceNote: {
+        byteLength: NOTE_BYTES.byteLength,
+        contentSha256: sha256OfBytes(NOTE_BYTES),
+      },
       sourceImages: [
         {
           sourceId: "image-a",
-          byteLength: 10,
-          contentSha256: digest("source-a"),
+          byteLength: SOURCE_A_BYTES.byteLength,
+          contentSha256: sha256OfBytes(SOURCE_A_BYTES),
         },
       ],
       repository,
@@ -249,6 +269,7 @@ const injectFault = (
     return base.readFile(filePath);
   },
   readPermissionBits: (entryPath) => base.readPermissionBits(entryPath),
+  byteLength: (entryPath) => base.byteLength(entryPath),
   listDirectory: (directoryPath) => base.listDirectory(directoryPath),
   removeRecursively: (entryPath) => base.removeRecursively(entryPath),
 });
@@ -419,7 +440,9 @@ describe("private plan storage", () => {
     const envelope = sealedPlan();
     await publishSealedPlan(deps, envelope);
 
-    expect((await recordPlanApproval(deps, envelope.planId)).ok).toBe(true);
+    expect(
+      (await recordPlanApproval(deps, envelope.planId, sourceBytes())).ok,
+    ).toBe(true);
     const approvalPath = join(root, "approvals", `${envelope.planId}.json`);
     expect(await modeOf(approvalPath)).toBe(OWNER_ONLY_FILE_MODE);
     expect(await readFile(approvalPath, "utf8")).toBe(
@@ -430,15 +453,19 @@ describe("private plan storage", () => {
 
     const later = sealedPlan({ documentTitle: "Later" });
     await publishSealedPlan(deps, later);
-    expect(await failureCode(recordPlanApproval(deps, envelope.planId))).toBe(
-      ISSUE_CODES.staleApproval,
-    );
+    expect(
+      await failureCode(
+        recordPlanApproval(deps, envelope.planId, sourceBytes()),
+      ),
+    ).toBe(ISSUE_CODES.staleApproval);
 
     const noChanges = unchangedPlan();
     await publishSealedPlan(deps, noChanges);
-    expect(await failureCode(recordPlanApproval(deps, noChanges.planId))).toBe(
-      ISSUE_CODES.approvalMismatch,
-    );
+    expect(
+      await failureCode(
+        recordPlanApproval(deps, noChanges.planId, sourceBytes()),
+      ),
+    ).toBe(ISSUE_CODES.approvalMismatch);
   });
 
   it("reports missing plans and approvals rather than guessing", async () => {
@@ -460,7 +487,7 @@ describe("private plan storage", () => {
   it("expires plans, cleans them up, and unpins the active plan", async () => {
     const envelope = sealedPlan();
     await publishSealedPlan(deps, envelope);
-    await recordPlanApproval(deps, envelope.planId);
+    await recordPlanApproval(deps, envelope.planId, sourceBytes());
 
     const afterExpiry = withDeps({ now: () => "2026-07-27T00:00:00.000Z" });
     expect(
@@ -799,6 +826,434 @@ describe("private plan storage", () => {
     );
     const active = await loadActivePlan(deps);
     expect(active.ok && active.value.planId).toBe(first.planId);
+  });
+
+  it("removes an unpinnable publication and restores the pin that was there", async () => {
+    const first = sealedPlan();
+    await publishSealedPlan(deps, first);
+    const second = sealedPlan({ documentTitle: "Second" });
+    const activePath = join(root, "active-plan.json");
+    const activeTemporary = `${activePath}.tmp`;
+
+    const pointerFaults: readonly [
+      string,
+      (operation: string, entryPath: string) => void,
+    ][] = [
+      [
+        "pointer open",
+        (operation, entryPath) => {
+          if (operation === "openForWrite" && entryPath === activeTemporary)
+            throw new Error("pointer open failed");
+        },
+      ],
+      [
+        "pointer write",
+        (operation, entryPath) => {
+          if (operation === "write" && entryPath === activeTemporary)
+            throw new Error("pointer write failed");
+        },
+      ],
+      [
+        "pointer fsync",
+        (operation, entryPath) => {
+          if (operation === "sync" && entryPath === activeTemporary)
+            throw new Error("pointer fsync failed");
+        },
+      ],
+      [
+        "pointer rename",
+        (operation, entryPath) => {
+          if (operation === "rename" && entryPath === activeTemporary)
+            throw new Error("pointer rename failed");
+        },
+      ],
+      [
+        "pointer parent fsync",
+        (operation, entryPath) => {
+          if (operation === "syncDirectory" && entryPath === root)
+            throw new Error("pointer parent fsync failed");
+        },
+      ],
+    ];
+
+    for (const [label, fail] of pointerFaults) {
+      const faulted = withDeps({
+        fileSystem: injectFault(deps.fileSystem, fail),
+      });
+      expect(await failureCode(publishSealedPlan(faulted, second)), label).toBe(
+        ISSUE_CODES.storageWriteFailed,
+      );
+      // Nothing the caller was told failed may stay loadable, and the pin the
+      // store had before the attempt must survive it exactly.
+      expect(
+        await failureCode(loadSealedPlan(deps, second.planId)),
+        label,
+      ).toBe(ISSUE_CODES.planNotFound);
+      const active = await loadActivePlan(deps);
+      expect(active.ok && active.value.planId, label).toBe(first.planId);
+    }
+
+    expect((await publishSealedPlan(deps, second)).ok).toBe(true);
+    const pinned = await loadActivePlan(deps);
+    expect(pinned.ok && pinned.value.planId).toBe(second.planId);
+  });
+
+  it("keeps an already valid plan when an idempotent re-pin fails", async () => {
+    const envelope = sealedPlan();
+    await publishSealedPlan(deps, envelope);
+    const other = sealedPlan({ documentTitle: "Other" });
+    await publishSealedPlan(deps, other);
+
+    const activeTemporary = `${join(root, "active-plan.json")}.tmp`;
+    const faulted = withDeps({
+      fileSystem: injectFault(deps.fileSystem, (operation, entryPath) => {
+        if (operation === "rename" && entryPath === activeTemporary)
+          throw new Error("pointer rename failed");
+      }),
+    });
+
+    expect(await failureCode(publishSealedPlan(faulted, envelope))).toBe(
+      ISSUE_CODES.storageWriteFailed,
+    );
+    // The plan at this ID was already valid before the call, so it stays.
+    expect((await loadSealedPlan(deps, envelope.planId)).ok).toBe(true);
+    const active = await loadActivePlan(deps);
+    expect(active.ok && active.value.planId).toBe(other.planId);
+  });
+
+  it("flushes the containing directory after every pointer rename", async () => {
+    const envelope = sealedPlan();
+    const activePath = join(root, "active-plan.json");
+    const approvalPath = join(root, "approvals", `${envelope.planId}.json`);
+    const events: string[] = [];
+    const traced = withDeps({
+      fileSystem: {
+        ...deps.fileSystem,
+        rename: async (fromPath, toPath) => {
+          events.push(`rename:${toPath}`);
+          return deps.fileSystem.rename(fromPath, toPath);
+        },
+        syncDirectory: async (directoryPath) => {
+          events.push(`sync:${directoryPath}`);
+          return deps.fileSystem.syncDirectory(directoryPath);
+        },
+      },
+    });
+
+    expect((await publishSealedPlan(traced, envelope)).ok).toBe(true);
+    expect(events.indexOf(`sync:${root}`)).toBeGreaterThan(
+      events.indexOf(`rename:${activePath}`),
+    );
+
+    events.length = 0;
+    expect(
+      (await recordPlanApproval(traced, envelope.planId, sourceBytes())).ok,
+    ).toBe(true);
+    expect(events.indexOf(`sync:${join(root, "approvals")}`)).toBeGreaterThan(
+      events.indexOf(`rename:${approvalPath}`),
+    );
+  });
+
+  it("replaces the stored generation when the same identity is republished", async () => {
+    const first = sealedPlan();
+    const regenerated = sealedPlan({
+      generationToken: "generation-9" as GenerationToken,
+    });
+    // The plan ID excludes the generation token by construction.
+    expect(regenerated.planId).toBe(first.planId);
+    expect(regenerated.plan.generationToken).not.toBe(
+      first.plan.generationToken,
+    );
+
+    await publishSealedPlan(deps, first);
+    expect((await publishSealedPlan(deps, regenerated)).ok).toBe(true);
+
+    const stored = JSON.parse(
+      await readFile(planDocumentOf(first.planId), "utf8"),
+    ) as { generationToken: string };
+    expect(stored.generationToken).toBe("generation-9");
+    const active = await loadActivePlan(deps);
+    expect(active.ok && active.value.plan.generationToken).toBe("generation-9");
+
+    // A failed replacement leaves the valid stored plan and its token alone.
+    const documentTemporary = `${planDocumentOf(first.planId)}.tmp`;
+    const faulted = withDeps({
+      fileSystem: injectFault(deps.fileSystem, (operation, entryPath) => {
+        if (operation === "rename" && entryPath === documentTemporary)
+          throw new Error("document rename failed");
+      }),
+    });
+    expect(await failureCode(publishSealedPlan(faulted, first))).toBe(
+      ISSUE_CODES.storageWriteFailed,
+    );
+    const kept = await loadSealedPlan(deps, first.planId);
+    expect(kept.ok && kept.value.plan.generationToken).toBe("generation-9");
+    expect((await readdir(join(root, "plans", first.planId))).sort()).toEqual([
+      "blobs",
+      "plan.json",
+    ]);
+  });
+
+  it("rechecks owner-only ancestry and live source bytes before approving", async () => {
+    const envelope = sealedPlan();
+    await publishSealedPlan(deps, envelope);
+    expect(
+      (await recordPlanApproval(deps, envelope.planId, sourceBytes())).ok,
+    ).toBe(true);
+
+    const widened: readonly [string, string][] = [
+      ["root", root],
+      ["approvals", join(root, "approvals")],
+    ];
+    for (const [label, path] of widened) {
+      const original = await modeOf(path);
+      await chmod(path, 0o755);
+      expect(
+        await failureCode(readPlanApproval(deps, envelope.planId)),
+        label,
+      ).toBe(ISSUE_CODES.storageTampered);
+      await chmod(path, original);
+    }
+    expect((await readPlanApproval(deps, envelope.planId)).ok).toBe(true);
+
+    // An approval is authority over reviewed bytes, so the bytes are reread.
+    const later = sealedPlan({ documentTitle: "Later" });
+    await publishSealedPlan(deps, later);
+    expect(
+      await failureCode(
+        recordPlanApproval(deps, later.planId, {
+          note: utf8("# Something else\n"),
+          images: new Map([["image-a", SOURCE_A_BYTES]]),
+        }),
+      ),
+    ).toBe(ISSUE_CODES.storageTampered);
+    expect(await failureCode(readPlanApproval(deps, later.planId))).toBe(
+      ISSUE_CODES.planNotFound,
+    );
+  });
+
+  it("serializes approval against a concurrent publication", async () => {
+    const first = sealedPlan();
+    await publishSealedPlan(deps, first);
+    const second = sealedPlan({ documentTitle: "Second" });
+
+    const activePath = join(root, "active-plan.json");
+    const approvalTemporary = `${join(root, "approvals", `${first.planId}.json`)}.tmp`;
+    const events: string[] = [];
+    let openApproval = (): void => undefined;
+    const heldApproval = new Promise<void>((resolve) => {
+      openApproval = resolve;
+    });
+
+    const traced = (label: string, gate?: Promise<void>): PlanStoreDeps =>
+      withDeps({
+        fileSystem: {
+          ...deps.fileSystem,
+          readFile: async (filePath) => {
+            if (filePath === activePath) events.push(`${label}:read-active`);
+            return deps.fileSystem.readFile(filePath);
+          },
+          rename: async (fromPath, toPath) => {
+            if (toPath === activePath) events.push(`${label}:pin`);
+            return deps.fileSystem.rename(fromPath, toPath);
+          },
+          openForWrite: async (filePath, mode) => {
+            if (filePath === approvalTemporary) {
+              events.push(`${label}:approve-reached`);
+              if (gate) await gate;
+              events.push(`${label}:approve`);
+            }
+            return deps.fileSystem.openForWrite(filePath, mode);
+          },
+        },
+      });
+
+    const record = recordPlanApproval(
+      traced("record", heldApproval),
+      first.planId,
+      sourceBytes(),
+    );
+    while (!events.includes("record:approve-reached"))
+      await new Promise((resolve) => setImmediate(resolve));
+
+    let publishSettled = false;
+    const publish = publishSealedPlan(traced("publish"), second);
+    const markSettled = () => void (publishSettled = true);
+    void publish.then(markSettled, markSettled);
+    // Give an unserialized publication every chance to land its pin between the
+    // approval's pointer read and its approval write -- far longer than a whole
+    // publication takes here. A serialized one cannot even start.
+    const deadline = Date.now() + CONCURRENT_PUBLISH_BUDGET_MS;
+    while (
+      !publishSettled &&
+      !events.includes("publish:pin") &&
+      Date.now() < deadline
+    )
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    openApproval();
+
+    expect((await record).ok).toBe(true);
+    expect((await publish).ok).toBe(true);
+
+    // The approval read the pin it was still holding when it wrote: no
+    // competing publication landed inside that read-then-write.
+    const pointerRead = events.indexOf("record:read-active");
+    const approvalWrite = events.indexOf("record:approve");
+    const competingPin = events.indexOf("publish:pin");
+    expect(pointerRead).toBeGreaterThanOrEqual(0);
+    expect(approvalWrite).toBeGreaterThan(pointerRead);
+    expect(competingPin).toBeGreaterThan(approvalWrite);
+    const active = await loadActivePlan(deps);
+    expect(active.ok && active.value.planId).toBe(second.planId);
+  });
+
+  it("refuses hostile stored plans against the locked limits before reading them", async () => {
+    const envelope = sealedPlan();
+    await publishSealedPlan(deps, envelope);
+    const blobDirectory = blobDirectoryOf(envelope.planId);
+    const documentPath = planDocumentOf(envelope.planId);
+    const readPaths: string[] = [];
+    const watched = (
+      overrides: Partial<PlanStoreFileSystem> = {},
+    ): PlanStoreDeps => {
+      readPaths.length = 0;
+      return withDeps({
+        fileSystem: {
+          ...deps.fileSystem,
+          readFile: async (filePath) => {
+            readPaths.push(filePath);
+            return deps.fileSystem.readFile(filePath);
+          },
+          ...overrides,
+        },
+      });
+    };
+    const readBlobs = () =>
+      readPaths.filter((filePath) => filePath.startsWith(blobDirectory));
+
+    const planted: string[] = [];
+    for (
+      let index = 0;
+      index <= MDX_RELAY_LIMITS.sealedOutputFiles;
+      index += 1
+    ) {
+      const path = join(blobDirectory, index.toString(16).padStart(64, "0"));
+      await writeFile(path, "planted", { mode: 0o600 });
+      planted.push(path);
+    }
+    expect(
+      await failureCode(loadSealedPlan(watched(), envelope.planId)),
+      "blob count",
+    ).toBe(ISSUE_CODES.storageTampered);
+    expect(readBlobs(), "blob count").toEqual([]);
+    for (const path of planted) await rm(path, { force: true });
+    expect((await loadSealedPlan(deps, envelope.planId)).ok).toBe(true);
+
+    const reportedSize =
+      (size: (entryPath: string) => number | undefined) =>
+      async (entryPath: string) =>
+        size(entryPath) ?? deps.fileSystem.byteLength(entryPath);
+
+    const oversizedBlob = watched({
+      byteLength: reportedSize((entryPath) =>
+        entryPath.startsWith(blobDirectory)
+          ? MDX_RELAY_LIMITS.sealedOutputBytes + 1
+          : undefined,
+      ),
+    });
+    expect(
+      await failureCode(loadSealedPlan(oversizedBlob, envelope.planId)),
+      "blob size",
+    ).toBe(ISSUE_CODES.storageTampered);
+    expect(readBlobs(), "blob size").toEqual([]);
+
+    const oversizedAggregate = watched({
+      byteLength: reportedSize((entryPath) =>
+        entryPath.startsWith(blobDirectory)
+          ? MDX_RELAY_LIMITS.sealedOutputBytes
+          : undefined,
+      ),
+    });
+    // Three maximum-size blobs still fit; the planted extras push the plan past
+    // the total budget without a single byte of any of them being read.
+    for (let index = 0; index < 3; index += 1) {
+      const path = join(blobDirectory, `f${index}`.padStart(64, "0"));
+      await writeFile(path, "planted", { mode: 0o600 });
+      planted.push(path);
+    }
+    expect(
+      await failureCode(loadSealedPlan(oversizedAggregate, envelope.planId)),
+      "aggregate size",
+    ).toBe(ISSUE_CODES.storageTampered);
+    expect(readBlobs(), "aggregate size").toEqual([]);
+    for (const path of planted) await rm(path, { force: true });
+
+    const oversizedDocument = watched({
+      byteLength: reportedSize((entryPath) =>
+        entryPath === documentPath ? MAX_PLAN_DOCUMENT_BYTES + 1 : undefined,
+      ),
+    });
+    expect(
+      await failureCode(loadSealedPlan(oversizedDocument, envelope.planId)),
+      "document size",
+    ).toBe(ISSUE_CODES.storageTampered);
+    expect(readPaths, "document size").not.toContain(documentPath);
+
+    const oversizedPointer = watched({
+      byteLength: reportedSize((entryPath) =>
+        entryPath.endsWith("active-plan.json")
+          ? MAX_PLAN_POINTER_BYTES + 1
+          : undefined,
+      ),
+    });
+    expect(await failureCode(loadActivePlan(oversizedPointer))).toBe(
+      ISSUE_CODES.planNotFound,
+    );
+
+    // The real primitive measures the entry itself, never a symlink target.
+    const fileSystem = createNodePlanStoreFileSystem();
+    const sizedPath = join(root, "sized");
+    await writeFile(sizedPath, new Uint8Array(1234), { mode: 0o600 });
+    expect(await fileSystem.byteLength(sizedPath)).toBe(1234);
+    const linkPath = join(root, "sized-link");
+    await symlink(sizedPath, linkPath);
+    expect(await fileSystem.byteLength(linkPath)).toBe(sizedPath.length);
+  });
+
+  it("never stores source bytes and never brands a restored plan without them", async () => {
+    const envelope = sealedPlan();
+    await publishSealedPlan(deps, envelope);
+
+    const noteBytes = Buffer.from(NOTE_BYTES);
+    const noteDigest = sha256OfBytes(NOTE_BYTES);
+    let sawDigest = false;
+    for (const entry of await readdir(root, {
+      recursive: true,
+      withFileTypes: true,
+    })) {
+      if (!entry.isFile()) continue;
+      const stored = await readFile(join(entry.parentPath, entry.name));
+      expect(stored.includes(noteBytes), entry.name).toBe(false);
+      sawDigest ||= stored.includes(noteDigest);
+    }
+    // The fingerprint is stored; the private bytes behind it never are.
+    expect(sawDigest).toBe(true);
+
+    const restored = await loadSealedPlan(deps, envelope.planId);
+    expect(restored.ok && restored.value.sourceBytesVerified).toBe(false);
+    const rebranded = await loadSealedPlan(
+      deps,
+      envelope.planId,
+      sourceBytes(),
+    );
+    expect(rebranded.ok && rebranded.value.sourceBytesVerified).toBe(true);
+
+    // An unbranded envelope is not publishable and cannot be approved.
+    if (!restored.ok) throw new Error("expected a restored plan");
+    expect(await failureCode(publishSealedPlan(deps, restored.value))).toBe(
+      ISSUE_CODES.storageWriteFailed,
+    );
+    expect((await loadSealedPlan(deps, envelope.planId)).ok).toBe(true);
   });
 
   it("points the default macOS root outside any vault or repository", () => {

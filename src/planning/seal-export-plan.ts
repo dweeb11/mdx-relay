@@ -2,11 +2,14 @@ import type {
   ExportPlan,
   NoChangesExportPlan,
   PlanId,
+  ReadyExportPlan,
+  RepositoryTargetFingerprint,
   SealedOutput,
+  Sha256Digest,
   VerifiedReadyExportPlan,
 } from "../contracts/export-plan";
 import { matchesApprovalContext } from "../contracts/export-plan";
-import { createIssue, isMdxRelayIssue, ISSUE_CODES } from "../contracts/issues";
+import { createIssue, ISSUE_CODES } from "../contracts/issues";
 import {
   mdxRelayErr,
   mdxRelayOk,
@@ -14,9 +17,12 @@ import {
 } from "../contracts/result";
 import {
   deepEquals,
+  isWellFormedUnicode,
   sha256OfBytes,
   sha256OfUtf8,
+  verifySourceBytes,
   type ExportPlanDraft,
+  type PlanSourceBytes,
   type UnsealedExportPlan,
 } from "./build-export-plan";
 
@@ -29,50 +35,112 @@ import {
  * The plan ID is the digest of the canonical manifest of every plan field
  * except the per-run generation token and the ID itself, so the same capture
  * always seals to the same ID while a stale generation never changes it.
- * Verification recomputes that ID, recomputes every snapshot and blob digest
- * from bytes, and re-runs the frozen approval-context gate before anything is
- * branded verified. Nothing that fails any step is ever returned.
+ * Verification recomputes that ID, recomputes every snapshot, source and blob
+ * digest from bytes, and re-runs the frozen approval-context gate before
+ * anything is branded verified. Nothing that fails any step is ever returned.
+ *
+ * Source note and image bytes are never stored, so a plan restored from private
+ * storage after a process or crash boundary carries structural proof only. It
+ * becomes `sourceBytesVerified` -- and only then can it hold the frozen
+ * `VerifiedReadyExportPlan` brand -- when a live capture supplies those bytes
+ * again and every source fingerprint is recomputed from them.
  */
 
+interface SealedExportPlanEnvelopeFields {
+  readonly planId: PlanId;
+  readonly identityManifest: string;
+  readonly blobBytes: ReadonlyMap<string, Uint8Array>;
+}
+
 export type SealedExportPlanEnvelope =
-  | Readonly<{
-      state: "ready";
-      planId: PlanId;
-      identityManifest: string;
-      plan: VerifiedReadyExportPlan;
-      blobBytes: ReadonlyMap<string, Uint8Array>;
-    }>
-  | Readonly<{
-      state: "no-changes";
-      planId: PlanId;
-      identityManifest: string;
-      plan: NoChangesExportPlan;
-      blobBytes: ReadonlyMap<string, Uint8Array>;
-    }>;
+  | Readonly<
+      SealedExportPlanEnvelopeFields & {
+        state: "ready";
+        sourceBytesVerified: true;
+        plan: VerifiedReadyExportPlan;
+      }
+    >
+  | Readonly<
+      SealedExportPlanEnvelopeFields & {
+        state: "ready";
+        sourceBytesVerified: false;
+        plan: ReadyExportPlan;
+      }
+    >
+  | Readonly<
+      SealedExportPlanEnvelopeFields & {
+        state: "no-changes";
+        sourceBytesVerified: boolean;
+        plan: NoChangesExportPlan;
+      }
+    >;
 
 const compareCodeUnits = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
 
+const canonicalString = (value: string): string => {
+  // RFC 8785 requires canonicalization to terminate on invalid Unicode rather
+  // than emit an escape for a code unit that has no UTF-8 encoding.
+  if (!isWellFormedUnicode(value))
+    throw new TypeError("Lone UTF-16 surrogate in JSON string");
+  return JSON.stringify(value);
+};
+
+/**
+ * Own enumerable data properties in their own insertion order. Accessors, own
+ * symbol keys and exotic prototypes are refused instead of being read: JCS
+ * output has to be a function of JSON data alone, and a getter or a `toJSON`
+ * would let the value being canonicalized choose its own manifest.
+ */
+const jsonDataKeys = (value: object): readonly string[] => {
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null)
+    throw new TypeError("Unsupported JSON object prototype");
+  if (Object.getOwnPropertySymbols(value).length > 0)
+    throw new TypeError("Symbol key in JSON object");
+  const keys: string[] = [];
+  for (const [key, descriptor] of Object.entries(
+    Object.getOwnPropertyDescriptors(value),
+  )) {
+    if (!("value" in descriptor))
+      throw new TypeError("Accessor in JSON object");
+    if (descriptor.enumerable) keys.push(key);
+    else throw new TypeError("Non-enumerable key in JSON object");
+  }
+  return keys;
+};
+
 /**
  * RFC 8785 JSON Canonicalization Scheme. Keys sort by UTF-16 code unit, strings
  * and numbers use the ECMAScript serializations JCS defers to, and anything
- * that is not finite JSON data throws rather than canonicalizing to something
- * an attacker could steer.
+ * that is not well-formed finite JSON data throws rather than canonicalizing to
+ * something an attacker could steer.
  */
 export function canonicalizeJcs(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string")
+  if (value === null || typeof value === "boolean")
     return JSON.stringify(value);
+  if (typeof value === "string") return canonicalString(value);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new TypeError("Non-finite JSON number");
     return JSON.stringify(value);
   }
-  if (Array.isArray(value))
-    return `[${value.map((entry) => canonicalizeJcs(entry)).join(",")}]`;
   if (typeof value !== "object") throw new TypeError("Unsupported JSON value");
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype)
+      throw new TypeError("Unsupported JSON array prototype");
+    // A hole is neither `null` nor a value and an extra named property is not
+    // JSON data at all; both make the own-key count disagree with the length.
+    if (Object.keys(value).length !== value.length)
+      throw new TypeError("Hole or non-index key in JSON array");
+    const entries: string[] = [];
+    for (let index = 0; index < value.length; index += 1)
+      entries.push(canonicalizeJcs(value[index]));
+    return `[${entries.join(",")}]`;
+  }
   const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
+  return `{${[...jsonDataKeys(record)]
     .sort(compareCodeUnits)
-    .map((key) => `${JSON.stringify(key)}:${canonicalizeJcs(record[key])}`)
+    .map((key) => `${canonicalString(key)}:${canonicalizeJcs(record[key])}`)
     .join(",")}}`;
 }
 
@@ -177,44 +245,133 @@ const mirrorsApprovalCapture = (plan: Record<string, unknown>): boolean => {
   return deepEquals(approval.sealedOutputs, orderedOutputs);
 };
 
-const isNoChangesPlanShape = (plan: Record<string, unknown>): boolean => {
-  const blobs = plan.blobs as Record<string, SealedOutput>;
-  const repository = plan.repositoryFingerprint;
-  const generatedMdx = plan.generatedMdx;
-  const commitMessage = plan.commitMessage;
+/** Plan-relative synthetic targets used only by the no-changes probe below. */
+const NO_CHANGES_PROBE_ROOT = "no-changes-probe/";
+
+/**
+ * No-changes plans carry no actions and no repository targets, so the frozen
+ * ready-plan gate cannot be applied to them directly. Every other field has the
+ * identical shape and the identical duplication rules, so verification runs
+ * that gate over a probe which substitutes exactly and only the empty parts:
+ * one synthetic create action per sealed output the candidate actually owns
+ * plus the matching ordered repository targets, mirrored into the approval
+ * fingerprint exactly as a ready plan mirrors its own. Everything else the
+ * probe carries is the candidate's own data, so the frozen structural, digest,
+ * duplicate-field, blob, ordering, issue, author and repository rules all apply
+ * unchanged. The genuinely empty fields are checked separately.
+ */
+const noChangesProbe = (
+  candidate: Record<string, unknown>,
+): Record<string, unknown> | undefined => {
+  const { blobs, commitMessage } = candidate;
+  const repository = candidate.repositoryFingerprint;
+  const approval = candidate.approvalFingerprint;
+  if (
+    !isRecord(blobs) ||
+    !isRecord(commitMessage) ||
+    !isRecord(repository) ||
+    !isRecord(approval)
+  )
+    return undefined;
+  const outputs = (Object.values(blobs) as SealedOutput[])
+    .filter((output) => output.contentSha256 !== commitMessage.contentSha256)
+    .sort((left, right) =>
+      compareCodeUnits(left.contentSha256, right.contentSha256),
+    );
+  const targets: RepositoryTargetFingerprint[] = outputs.map((_, index) => ({
+    normalizedPath: `${NO_CHANGES_PROBE_ROOT}${String(index).padStart(4, "0")}.mdx`,
+    symlinkStatus: "not-symlink",
+    approvedPriorTarget: { state: "absent" },
+  }));
+  const probeRepository = { ...repository, targets };
+  return {
+    ...candidate,
+    state: "ready",
+    repositoryFingerprint: probeRepository,
+    approvalFingerprint: {
+      ...approval,
+      repositoryFingerprint: probeRepository,
+    },
+    actions: outputs.map((sealedOutput, index) => ({
+      kind: "create",
+      documentOrder: index,
+      targetPath: targets[index]!.normalizedPath,
+      expectedGitMode: "100644",
+      sealedOutput,
+      sourceOccurrence: index,
+      approvedPriorTarget: { state: "absent" },
+    })),
+  };
+};
+
+/** The two fields a no-changes plan must leave genuinely empty. */
+const hasNoChangesEmptiness = (candidate: Record<string, unknown>): boolean => {
+  const repository = candidate.repositoryFingerprint;
   return (
-    Array.isArray(plan.actions) &&
-    plan.actions.length === 0 &&
+    Array.isArray(candidate.actions) &&
+    candidate.actions.length === 0 &&
     isRecord(repository) &&
     Array.isArray(repository.targets) &&
-    repository.targets.length === 0 &&
-    isRecord(generatedMdx) &&
-    isRecord(commitMessage) &&
-    deepEquals(blobs[String(generatedMdx.contentSha256)], generatedMdx) &&
-    deepEquals(blobs[String(commitMessage.contentSha256)], commitMessage) &&
-    deepEquals(
-      plan.author,
-      (repository as Record<string, unknown>).canonicalCommitAuthor,
-    ) &&
-    Array.isArray(plan.issues) &&
-    plan.issues.every(
-      (issue) => isMdxRelayIssue(issue) && issue.severity === "warning",
-    ) &&
-    isIsoUtc(plan.createdAtUtc) &&
-    isIsoUtc(plan.expiresAtUtc) &&
-    Date.parse(String(plan.createdAtUtc)) <
-      Date.parse(String(plan.expiresAtUtc))
+    repository.targets.length === 0
+  );
+};
+
+/**
+ * Recomputes the source-note and every source-image fingerprint from the bytes
+ * a live capture supplied. Duplicated metadata proves nothing here: only the
+ * bytes do.
+ */
+const hasVerifiedSources = (
+  candidate: Record<string, unknown>,
+  sourceBytes: PlanSourceBytes,
+): boolean => {
+  const sourceNote = candidate.sourceNote;
+  const sourceImages = candidate.sourceImages;
+  if (
+    !isRecord(sourceNote) ||
+    !Array.isArray(sourceImages) ||
+    typeof sourceNote.byteLength !== "number" ||
+    typeof sourceNote.contentSha256 !== "string"
+  )
+    return false;
+  const captured = [];
+  for (const image of sourceImages) {
+    if (
+      !isRecord(image) ||
+      typeof image.sourceId !== "string" ||
+      typeof image.byteLength !== "number" ||
+      typeof image.contentSha256 !== "string"
+    )
+      return false;
+    captured.push({
+      sourceId: image.sourceId,
+      byteLength: image.byteLength,
+      contentSha256: image.contentSha256 as Sha256Digest,
+    });
+  }
+  return (
+    verifySourceBytes(
+      {
+        byteLength: sourceNote.byteLength,
+        contentSha256: sourceNote.contentSha256 as Sha256Digest,
+      },
+      captured,
+      sourceBytes,
+    ) === undefined
   );
 };
 
 /**
  * The one place a plan becomes trusted. Returns nothing at all unless every
  * recomputed digest, mirrored capture field, structural rule and the recomputed
- * plan ID agree with what the candidate claims.
+ * plan ID agree with what the candidate claims. Supplying source bytes is what
+ * earns `sourceBytesVerified`, and only that brands a ready plan; supplying
+ * bytes that disagree with the plan fails the whole verification.
  */
 const verifiedEnvelope = (
   candidate: unknown,
   blobBytes: ReadonlyMap<string, Uint8Array>,
+  sourceBytes: PlanSourceBytes | undefined,
 ): SealedExportPlanEnvelope | undefined => {
   if (
     !isRecord(candidate) ||
@@ -225,6 +382,8 @@ const verifiedEnvelope = (
     candidate.schemaVersion !== 1 ||
     typeof candidate.profileSnapshot !== "string" ||
     typeof candidate.dependencySnapshot !== "string" ||
+    !isWellFormedUnicode(candidate.profileSnapshot) ||
+    !isWellFormedUnicode(candidate.dependencySnapshot) ||
     candidate.profileSnapshotSha256 !==
       sha256OfUtf8(candidate.profileSnapshot) ||
     candidate.dependencySnapshotSha256 !==
@@ -243,33 +402,66 @@ const verifiedEnvelope = (
   if (computePlanId(identityManifest) !== candidate.planId) return undefined;
 
   const planId = candidate.planId as PlanId;
+  const transition = { generationToken: candidate.generationToken, planId };
+  const sealedUtc = String(candidate.createdAtUtc);
   if (candidate.state === "ready") {
     if (
       !matchesApprovalContext(
         candidate as unknown as VerifiedReadyExportPlan,
-        { generationToken: candidate.generationToken, planId },
+        transition,
         candidate.approvalFingerprint,
-        String(candidate.createdAtUtc),
+        sealedUtc,
       )
     )
       return undefined;
+  } else if (candidate.state === "no-changes") {
+    const probe = noChangesProbe(candidate);
+    if (
+      probe === undefined ||
+      !hasNoChangesEmptiness(candidate) ||
+      !matchesApprovalContext(
+        probe as unknown as VerifiedReadyExportPlan,
+        transition,
+        probe.approvalFingerprint,
+        sealedUtc,
+      )
+    )
+      return undefined;
+  } else return undefined;
+
+  const sourceBytesVerified = sourceBytes !== undefined;
+  if (sourceBytes !== undefined && !hasVerifiedSources(candidate, sourceBytes))
+    return undefined;
+
+  const plan = deepFreeze(candidate);
+  if (candidate.state !== "ready")
     return Object.freeze({
-      state: "ready" as const,
+      state: "no-changes" as const,
+      sourceBytesVerified,
       planId,
       identityManifest,
-      plan: deepFreeze(candidate) as unknown as VerifiedReadyExportPlan,
+      plan: plan as unknown as NoChangesExportPlan,
       blobBytes,
     });
-  }
-  if (candidate.state !== "no-changes" || !isNoChangesPlanShape(candidate))
-    return undefined;
-  return Object.freeze({
-    state: "no-changes" as const,
-    planId,
-    identityManifest,
-    plan: deepFreeze(candidate) as unknown as NoChangesExportPlan,
-    blobBytes,
-  });
+  return Object.freeze(
+    sourceBytesVerified
+      ? {
+          state: "ready" as const,
+          sourceBytesVerified: true as const,
+          planId,
+          identityManifest,
+          plan: plan as unknown as VerifiedReadyExportPlan,
+          blobBytes,
+        }
+      : {
+          state: "ready" as const,
+          sourceBytesVerified: false as const,
+          planId,
+          identityManifest,
+          plan: plan as unknown as ReadyExportPlan,
+          blobBytes,
+        },
+  );
 };
 
 /** Assigns the content-derived plan ID and refuses to return an unsound seal. */
@@ -286,8 +478,8 @@ export function sealExportPlan(
     ...(draft.plan as UnsealedExportPlan),
     planId: computePlanId(identityManifest),
   } as unknown as ExportPlan;
-  const envelope = verifiedEnvelope(sealed, draft.blobBytes);
-  return envelope
+  const envelope = verifiedEnvelope(sealed, draft.blobBytes, draft.sourceBytes);
+  return envelope?.sourceBytesVerified
     ? mdxRelayOk(envelope)
     : mdxRelayErr([createIssue(ISSUE_CODES.staleDuringPlanning)]);
 }
@@ -296,13 +488,17 @@ export function sealExportPlan(
  * Load-time verifier for a plan restored from private storage. Anything that
  * does not verify is reported as tampering; a sound but elapsed plan is
  * reported as expired so the caller previews again instead of publishing.
+ * Source bytes are optional because storage never holds them: a caller that
+ * supplies the live bytes again gets a `sourceBytesVerified` envelope, and a
+ * caller that does not gets structural proof alone and no brand.
  */
 export function verifyStoredExportPlan(
   candidate: unknown,
   blobBytes: ReadonlyMap<string, Uint8Array>,
   currentUtc: string,
+  sourceBytes?: PlanSourceBytes,
 ): MdxRelayResult<SealedExportPlanEnvelope> {
-  const envelope = verifiedEnvelope(candidate, blobBytes);
+  const envelope = verifiedEnvelope(candidate, blobBytes, sourceBytes);
   if (
     !envelope ||
     !isIsoUtc(currentUtc) ||

@@ -73,6 +73,23 @@ export interface CapturedSourceImageState {
 }
 
 /**
+ * The bytes a live capture actually read for the source note and every source
+ * image, keyed by canonical sourceId. These are the evidence behind every
+ * source fingerprint a plan records. They are held only for as long as a plan
+ * is being derived or verified and are never written to the plan store, so
+ * private note and image content never leaves the vault.
+ */
+export interface PlanSourceBytes {
+  readonly note: Uint8Array;
+  readonly images: ReadonlyMap<string, Uint8Array>;
+}
+
+export type SourceByteFailure =
+  | typeof ISSUE_CODES.noteTooLarge
+  | typeof ISSUE_CODES.sourceImageTooLarge
+  | typeof ISSUE_CODES.staleDuringPlanning;
+
+/**
  * The recapture taken immediately before publication. Every field is compared
  * against what the plan was derived from; any difference is a stale plan.
  */
@@ -94,6 +111,8 @@ export interface ExportPlanBuildInput {
   readonly dependencySnapshotSha256: Sha256Digest;
   readonly sourceNote: SourceNoteMetadata;
   readonly sourceImages: readonly CanonicalSourceImage[];
+  /** The captured bytes behind every source fingerprint above. */
+  readonly sourceBytes: PlanSourceBytes;
   readonly documentSlug: string;
   readonly documentTitle: string;
   readonly generatedMdxBytes: Uint8Array;
@@ -135,6 +154,8 @@ export interface ExportPlanDraft {
   readonly plan: UnsealedExportPlan;
   /** Sealed output bytes keyed by plan-relative path. */
   readonly blobBytes: ReadonlyMap<string, Uint8Array>;
+  /** Carried to the sealer so branding can recompute source hashes from bytes. */
+  readonly sourceBytes: PlanSourceBytes;
 }
 
 const WINDOWS_RESERVED_SEGMENT =
@@ -173,6 +194,60 @@ export const sha256OfBytes = (bytes: Uint8Array): Sha256Digest =>
 
 export const sha256OfUtf8 = (value: string): Sha256Digest =>
   `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}` as Sha256Digest;
+
+/**
+ * True only for strings that are well-formed Unicode. A lone UTF-16 surrogate
+ * has no UTF-8 encoding, so Node substitutes U+FFFD when hashing it and two
+ * different lone surrogates would collapse to the same digest. Everything that
+ * canonicalizes or hashes text refuses such a string instead.
+ */
+export const isWellFormedUnicode = (value: string): boolean => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xdc00 && code <= 0xdfff) return false;
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (!(low >= 0xdc00 && low <= 0xdfff)) return false;
+      index += 1;
+    }
+  }
+  return true;
+};
+
+/**
+ * Recomputes the source-note and every source-image fingerprint from the bytes
+ * a capture actually read, and applies the locked source budgets to those
+ * recomputed lengths. Recorded metadata is never the evidence: a plan whose
+ * digest or length disagrees with its bytes is stale, and a plan whose real
+ * bytes exceed a locked budget is refused whatever the plan claims.
+ */
+export function verifySourceBytes(
+  sourceNote: CapturedSourceNoteState,
+  sourceImages: readonly CapturedSourceImageState[],
+  sourceBytes: PlanSourceBytes,
+): SourceByteFailure | undefined {
+  if (sourceBytes.note.byteLength > MDX_RELAY_LIMITS.noteBytes)
+    return ISSUE_CODES.noteTooLarge;
+  if (
+    sourceBytes.note.byteLength !== sourceNote.byteLength ||
+    sha256OfBytes(sourceBytes.note) !== sourceNote.contentSha256
+  )
+    return ISSUE_CODES.staleDuringPlanning;
+  if (sourceBytes.images.size !== sourceImages.length)
+    return ISSUE_CODES.staleDuringPlanning;
+  for (const image of sourceImages) {
+    const bytes = sourceBytes.images.get(image.sourceId);
+    if (!bytes) return ISSUE_CODES.staleDuringPlanning;
+    if (bytes.byteLength > MDX_RELAY_LIMITS.sourceImageBytes)
+      return ISSUE_CODES.sourceImageTooLarge;
+    if (
+      bytes.byteLength !== image.byteLength ||
+      sha256OfBytes(bytes) !== image.contentSha256
+    )
+      return ISSUE_CODES.staleDuringPlanning;
+  }
+  return undefined;
+}
 
 /** Structural equality over the plain JSON data planning produces. */
 export const deepEquals = (left: unknown, right: unknown): boolean => {
@@ -214,6 +289,8 @@ const blocked = (
     | typeof ISSUE_CODES.unsafePath
     | typeof ISSUE_CODES.repositoryPreflightFailed
     | typeof ISSUE_CODES.staleDuringPlanning
+    | typeof ISSUE_CODES.noteTooLarge
+    | typeof ISSUE_CODES.sourceImageTooLarge
     | typeof ISSUE_CODES.outputFileLimitExceeded
     | typeof ISSUE_CODES.outputTooLarge
     | typeof ISSUE_CODES.totalOutputTooLarge,
@@ -222,6 +299,10 @@ const blocked = (
     return mdxRelayErr([createIssue(ISSUE_CODES.unsafePath)]);
   if (code === ISSUE_CODES.repositoryPreflightFailed)
     return mdxRelayErr([createIssue(ISSUE_CODES.repositoryPreflightFailed)]);
+  if (code === ISSUE_CODES.noteTooLarge)
+    return mdxRelayErr([createIssue(ISSUE_CODES.noteTooLarge)]);
+  if (code === ISSUE_CODES.sourceImageTooLarge)
+    return mdxRelayErr([createIssue(ISSUE_CODES.sourceImageTooLarge)]);
   if (code === ISSUE_CODES.outputFileLimitExceeded)
     return mdxRelayErr([createIssue(ISSUE_CODES.outputFileLimitExceeded)]);
   if (code === ISSUE_CODES.outputTooLarge)
@@ -386,6 +467,15 @@ export function buildExportPlan(
   const { profile } = input;
   if (!isPortableSegment(input.documentSlug))
     return blocked(ISSUE_CODES.unsafePath);
+
+  // Source fingerprints are proven from bytes before anything is derived from
+  // them, so an oversized or moved note or image never reaches sealing.
+  const sourceByteFailure = verifySourceBytes(
+    input.sourceNote,
+    input.sourceImages,
+    input.sourceBytes,
+  );
+  if (sourceByteFailure) return blocked(sourceByteFailure);
 
   const transformedBySource = new Map<string, Uint8Array>();
   for (const image of input.transformedImages) {
@@ -642,5 +732,19 @@ export function buildExportPlan(
       blobBytes.get(output.planRelativePath)!,
     );
 
-  return mdxRelayOk(Object.freeze({ plan, blobBytes: retained }));
+  // Rebuilt from the canonical sources so caller extras never travel with the
+  // draft, and held in memory only: source bytes are never stored.
+  const retainedSources: PlanSourceBytes = Object.freeze({
+    note: input.sourceBytes.note,
+    images: new Map(
+      [...canonicalSources.keys()].map((sourceId) => [
+        sourceId,
+        input.sourceBytes.images.get(sourceId)!,
+      ]),
+    ),
+  });
+
+  return mdxRelayOk(
+    Object.freeze({ plan, blobBytes: retained, sourceBytes: retainedSources }),
+  );
 }

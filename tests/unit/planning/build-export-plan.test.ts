@@ -15,10 +15,13 @@ import {
   buildExportPlan,
   deepEquals,
   isPortableRepositoryPath,
+  isWellFormedUnicode,
   sha256OfBytes,
+  verifySourceBytes,
   type CanonicalSourceImage,
   type ExportPlanBuildInput,
   type FinalCaptureBarrier,
+  type PlanSourceBytes,
 } from "../../../src/planning/build-export-plan";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 
@@ -29,6 +32,19 @@ const utf8 = (value: string) => new TextEncoder().encode(value);
 const MDX_BYTES = utf8("---\ntitle: Example\n---\n\nBody\n");
 const IMAGE_ONE_BYTES = utf8("webp-one");
 const IMAGE_TWO_BYTES = utf8("webp-two");
+
+/** Every source fingerprint below is derived from the bytes, never asserted. */
+const NOTE_BYTES = utf8("# Example\n\nBody\n");
+const SOURCE_A_BYTES = utf8("png-source-a");
+const SOURCE_B_BYTES = utf8("png-source-b-longer");
+
+const sourceBytes = (): PlanSourceBytes => ({
+  note: NOTE_BYTES,
+  images: new Map([
+    ["image-a", SOURCE_A_BYTES],
+    ["image-b", SOURCE_B_BYTES],
+  ]),
+});
 
 const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
   realPaths: {
@@ -85,8 +101,8 @@ const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
 const sourceNote = (): SourceNoteMetadata => ({
   vaultRelativePath: "notes/example.md",
   realPath: "/vault/notes/example.md",
-  byteLength: 42,
-  contentSha256: digest("note"),
+  byteLength: NOTE_BYTES.byteLength,
+  contentSha256: sha256OfBytes(NOTE_BYTES),
 });
 
 const sourceImages = (): readonly CanonicalSourceImage[] => [
@@ -95,16 +111,16 @@ const sourceImages = (): readonly CanonicalSourceImage[] => [
     vaultRelativePath: "assets/b.png",
     realPath: "/vault/assets/b.png",
     decodedMime: "image/png",
-    byteLength: 20,
-    contentSha256: digest("source-b"),
+    byteLength: SOURCE_B_BYTES.byteLength,
+    contentSha256: sha256OfBytes(SOURCE_B_BYTES),
   },
   {
     sourceId: "image-a",
     vaultRelativePath: "assets/a.png",
     realPath: "/vault/assets/a.png",
     decodedMime: "image/png",
-    byteLength: 10,
-    contentSha256: digest("source-a"),
+    byteLength: SOURCE_A_BYTES.byteLength,
+    contentSha256: sha256OfBytes(SOURCE_A_BYTES),
   },
 ];
 
@@ -129,7 +145,10 @@ const barrierFor = (input: {
 }): FinalCaptureBarrier => ({
   profileSnapshotSha256: digest("profile"),
   dependencySnapshotSha256: digest("dependency"),
-  sourceNote: { byteLength: 42, contentSha256: digest("note") },
+  sourceNote: {
+    byteLength: NOTE_BYTES.byteLength,
+    contentSha256: sha256OfBytes(NOTE_BYTES),
+  },
   sourceImages: sourceImages().map(
     ({ sourceId, byteLength, contentSha256 }) => ({
       sourceId,
@@ -155,6 +174,7 @@ const buildInput = (
     dependencySnapshotSha256: digest("dependency"),
     sourceNote: sourceNote(),
     sourceImages: sourceImages(),
+    sourceBytes: sourceBytes(),
     documentSlug: "example",
     documentTitle: "Example",
     generatedMdxBytes: MDX_BYTES,
@@ -581,13 +601,16 @@ describe("buildExportPlan", () => {
       count: number,
       outputBytes?: number,
     ): ExportPlanBuildInput => {
+      const imageSourceBytes = Array.from({ length: count }, (_, index) =>
+        utf8(`png-source-${index}`),
+      );
       const images = Array.from({ length: count }, (_, index) => ({
         sourceId: `image-${String(index).padStart(3, "0")}`,
         vaultRelativePath: `assets/${index}.png`,
         realPath: `/vault/assets/${index}.png`,
         decodedMime: "image/png" as const,
-        byteLength: 10,
-        contentSha256: digest(`source-${index}`),
+        byteLength: imageSourceBytes[index]!.byteLength,
+        contentSha256: sha256OfBytes(imageSourceBytes[index]!),
       }));
       const targets = [
         {
@@ -608,6 +631,15 @@ describe("buildExportPlan", () => {
           ? {}
           : { generatedMdxBytes: new Uint8Array(outputBytes).fill(255) }),
         sourceImages: images,
+        sourceBytes: {
+          note: NOTE_BYTES,
+          images: new Map(
+            images.map((image, index) => [
+              image.sourceId,
+              imageSourceBytes[index]!,
+            ]),
+          ),
+        },
         transformedImages: images.map((image, index) => ({
           sourceId: image.sourceId,
           bytes:
@@ -656,6 +688,198 @@ describe("buildExportPlan", () => {
     expect(
       blockerCode(withImageCount(2, MDX_RELAY_LIMITS.sealedOutputBytes)),
     ).toBeUndefined();
+  });
+});
+
+describe("source-byte verification and locked source limits", () => {
+  const noteOf = (bytes: Uint8Array): SourceNoteMetadata => ({
+    ...sourceNote(),
+    byteLength: bytes.byteLength,
+    contentSha256: sha256OfBytes(bytes),
+  });
+
+  const withSourceNoteBytes = (bytes: Uint8Array): ExportPlanBuildInput => {
+    const input = buildInput();
+    return {
+      ...input,
+      sourceNote: noteOf(bytes),
+      sourceBytes: { ...sourceBytes(), note: bytes },
+      finalCapture: {
+        ...input.finalCapture,
+        sourceNote: {
+          byteLength: bytes.byteLength,
+          contentSha256: sha256OfBytes(bytes),
+        },
+      },
+    };
+  };
+
+  const withSourceImageBytes = (bytes: Uint8Array): ExportPlanBuildInput => {
+    const input = buildInput();
+    const images = input.sourceImages.map((image) =>
+      image.sourceId === "image-a"
+        ? {
+            ...image,
+            byteLength: bytes.byteLength,
+            contentSha256: sha256OfBytes(bytes),
+          }
+        : image,
+    );
+    return {
+      ...input,
+      sourceImages: images,
+      sourceBytes: {
+        note: NOTE_BYTES,
+        images: new Map([
+          ["image-a", bytes],
+          ["image-b", SOURCE_B_BYTES],
+        ]),
+      },
+      finalCapture: {
+        ...input.finalCapture,
+        sourceImages: images.map(({ sourceId, byteLength, contentSha256 }) => ({
+          sourceId,
+          byteLength,
+          contentSha256,
+        })),
+      },
+    };
+  };
+
+  it("enforces the locked note and source-image budgets exactly at the boundary", () => {
+    expect(
+      blockerCode(
+        withSourceNoteBytes(new Uint8Array(MDX_RELAY_LIMITS.noteBytes)),
+      ),
+    ).toBeUndefined();
+    expect(
+      blockerCode(
+        withSourceNoteBytes(new Uint8Array(MDX_RELAY_LIMITS.noteBytes + 1)),
+      ),
+    ).toBe(ISSUE_CODES.noteTooLarge);
+
+    expect(
+      blockerCode(
+        withSourceImageBytes(
+          new Uint8Array(MDX_RELAY_LIMITS.sourceImageBytes).fill(7),
+        ),
+      ),
+    ).toBeUndefined();
+    expect(
+      blockerCode(
+        withSourceImageBytes(
+          new Uint8Array(MDX_RELAY_LIMITS.sourceImageBytes + 1).fill(7),
+        ),
+      ),
+    ).toBe(ISSUE_CODES.sourceImageTooLarge);
+  });
+
+  it("refuses source metadata the captured bytes do not prove", () => {
+    const input = buildInput();
+    const forgedNote: ExportPlanBuildInput = {
+      ...input,
+      sourceNote: { ...input.sourceNote, contentSha256: digest("forged") },
+      finalCapture: {
+        ...input.finalCapture,
+        sourceNote: {
+          byteLength: input.sourceNote.byteLength,
+          contentSha256: digest("forged"),
+        },
+      },
+    };
+    expect(blockerCode(forgedNote)).toBe(ISSUE_CODES.staleDuringPlanning);
+
+    const forgedLength: ExportPlanBuildInput = {
+      ...input,
+      sourceNote: { ...input.sourceNote, byteLength: 1 },
+      finalCapture: {
+        ...input.finalCapture,
+        sourceNote: { byteLength: 1, contentSha256: sha256OfBytes(NOTE_BYTES) },
+      },
+    };
+    expect(blockerCode(forgedLength)).toBe(ISSUE_CODES.staleDuringPlanning);
+
+    for (const [label, images] of [
+      ["missing image bytes", new Map([["image-a", SOURCE_A_BYTES]])],
+      [
+        "extra image bytes",
+        new Map([
+          ["image-a", SOURCE_A_BYTES],
+          ["image-b", SOURCE_B_BYTES],
+          ["image-c", SOURCE_B_BYTES],
+        ]),
+      ],
+      [
+        "swapped image bytes",
+        new Map([
+          ["image-a", SOURCE_B_BYTES],
+          ["image-b", SOURCE_A_BYTES],
+        ]),
+      ],
+    ] as const)
+      expect(
+        blockerCode({
+          ...input,
+          sourceBytes: { note: NOTE_BYTES, images },
+        }),
+        label,
+      ).toBe(ISSUE_CODES.staleDuringPlanning);
+  });
+
+  it("carries only the canonical source bytes into the draft", () => {
+    const draft = buildOrThrow();
+    expect(draft.sourceBytes.note).toBe(NOTE_BYTES);
+    expect([...draft.sourceBytes.images.keys()].sort()).toEqual([
+      "image-a",
+      "image-b",
+    ]);
+    expect(draft.sourceBytes.images.get("image-a")).toBe(SOURCE_A_BYTES);
+  });
+
+  it("reports the exact reason a source fingerprint fails", () => {
+    const note = {
+      byteLength: NOTE_BYTES.byteLength,
+      contentSha256: sha256OfBytes(NOTE_BYTES),
+    };
+    const images = [
+      {
+        sourceId: "image-a",
+        byteLength: SOURCE_A_BYTES.byteLength,
+        contentSha256: sha256OfBytes(SOURCE_A_BYTES),
+      },
+      {
+        sourceId: "image-b",
+        byteLength: SOURCE_B_BYTES.byteLength,
+        contentSha256: sha256OfBytes(SOURCE_B_BYTES),
+      },
+    ];
+    expect(verifySourceBytes(note, images, sourceBytes())).toBeUndefined();
+    expect(
+      verifySourceBytes(note, [], { note: NOTE_BYTES, images: new Map() }),
+    ).toBeUndefined();
+    expect(
+      verifySourceBytes({ ...note, byteLength: note.byteLength + 1 }, [], {
+        note: NOTE_BYTES,
+        images: new Map(),
+      }),
+    ).toBe(ISSUE_CODES.staleDuringPlanning);
+  });
+
+  it("rejects lone UTF-16 surrogates and accepts astral Unicode", () => {
+    for (const wellFormed of ["", "plain", "ünïcode", "😀", "a\u{10FFFF}b"])
+      expect(isWellFormedUnicode(wellFormed), wellFormed).toBe(true);
+    for (const illFormed of [
+      "\uD800",
+      "\uDC00",
+      "a\uD800b",
+      "a\uDC00b",
+      "\uD800\uD800",
+      "\uDC00\uD800",
+      "trailing\uD83D",
+    ])
+      expect(isWellFormedUnicode(illFormed), JSON.stringify(illFormed)).toBe(
+        false,
+      );
   });
 });
 

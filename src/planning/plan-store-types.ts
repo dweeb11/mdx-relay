@@ -1,4 +1,5 @@
 import type { PlanId, Sha256Digest } from "../contracts/export-plan";
+import { MDX_RELAY_LIMITS } from "../core/limits";
 
 /**
  * The private plan store's shape and its narrow filesystem boundary.
@@ -35,6 +36,43 @@ export const PLAN_ID_PATTERN = /^plan-[0-9a-f]{64}$/u;
 /** Blob filenames are the lowercase hex digest of their own content. */
 export const PLAN_BLOB_NAME_PATTERN = /^[0-9a-f]{64}$/u;
 
+/**
+ * A pointer holds one plan ID and nothing else, so its canonical JSON is
+ * `{"planId":"plan-<64 hex>"}` -- 82 bytes. The ceiling triples that so a
+ * malformed pointer is still readable as evidence and an inflated one is not.
+ */
+export const MAX_PLAN_POINTER_BYTES = 256;
+
+/**
+ * Generous per-record allowance for one sealed output, source image or
+ * repository target as canonical JSON. Every such record is a fixed field set
+ * of digests, byte lengths and bounded portable paths, so a few kilobytes is
+ * far more than any honest record needs.
+ */
+const PLAN_DOCUMENT_RECORD_BYTES = 4096;
+/**
+ * Each bounded record can appear in the plan, its approval fingerprint, the
+ * actions, the repository targets and the blob map; eight covers every one of
+ * those positions with room to spare.
+ */
+const PLAN_DOCUMENT_RECORD_POSITIONS = 8;
+/**
+ * The largest plan document the store will read.
+ *
+ * A plan document is canonical JSON over one fixed field set, so its size is
+ * the sum of parts that locked limits already bound: at most
+ * `sealedOutputFiles` sealed outputs, source images and repository targets,
+ * each a bounded record in a fixed number of positions, plus the profile and
+ * dependency snapshots, neither of which can exceed the locked note budget.
+ * Pricing that structure generously refuses no honest plan and never reads a
+ * hostile document into memory.
+ */
+export const MAX_PLAN_DOCUMENT_BYTES =
+  2 * MDX_RELAY_LIMITS.noteBytes +
+  PLAN_DOCUMENT_RECORD_POSITIONS *
+    MDX_RELAY_LIMITS.sealedOutputFiles *
+    PLAN_DOCUMENT_RECORD_BYTES;
+
 export interface PlanStoreFileHandle {
   write(bytes: Uint8Array): Promise<void>;
   /** Flushes this file's bytes and metadata to durable storage. */
@@ -56,6 +94,11 @@ export interface PlanStoreFileSystem {
    * planted link reads back as widened permissions rather than as its target.
    */
   readPermissionBits(entryPath: string): Promise<number>;
+  /**
+   * Byte length of the entry itself, never of a symlink target, so an oversized
+   * stored file is refused against the locked limits before any of it is read.
+   */
+  byteLength(entryPath: string): Promise<number>;
   listDirectory(directoryPath: string): Promise<readonly string[]>;
   /** Removes a path and its contents; succeeds when the path is already gone. */
   removeRecursively(entryPath: string): Promise<void>;
