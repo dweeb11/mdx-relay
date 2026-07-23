@@ -860,6 +860,28 @@ describe("verifyStoredExportPlan", () => {
       );
   });
 
+  it("rejects transformed source digests that do not name a verified blob", () => {
+    const envelope = sealOrThrow();
+    const forged = reseal(envelope, (plan) => {
+      (
+        plan.sourceImages as { transformedOutputSha256: string }[]
+      )[0]!.transformedOutputSha256 = digest("forged-transform");
+      (
+        plan.approvalFingerprint as {
+          sourceImages: { transformedOutputSha256: string }[];
+        }
+      ).sourceImages[0]!.transformedOutputSha256 = (
+        plan.sourceImages as { transformedOutputSha256: string }[]
+      )[0]!.transformedOutputSha256;
+    });
+    expect(structuralCode(forged, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(tamperCode(forged, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+  });
+
   it("applies the whole frozen structural gate to no-changes plans", () => {
     const targets = unchangedTargets();
     const envelope = sealOrThrow({

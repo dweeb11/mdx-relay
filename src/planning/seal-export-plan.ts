@@ -236,6 +236,21 @@ const hasVerifiedBlobs = (
   });
 };
 
+/** Every source image must name one of the verified sealed blob digests. */
+const hasVerifiedSourceImageTransforms = (
+  plan: Record<string, unknown>,
+): boolean => {
+  const sourceImages = plan.sourceImages;
+  const blobs = plan.blobs;
+  if (!Array.isArray(sourceImages) || !isRecord(blobs)) return false;
+  const verifiedBlobDigests = new Set(Object.keys(blobs));
+  return sourceImages.every(
+    (image: Record<string, unknown>) =>
+      typeof image.transformedOutputSha256 === "string" &&
+      verifiedBlobDigests.has(image.transformedOutputSha256),
+  );
+};
+
 /** Every duplicated capture field must equal the approval fingerprint exactly. */
 const mirrorsApprovalCapture = (plan: Record<string, unknown>): boolean => {
   const approval = plan.approvalFingerprint;
@@ -416,6 +431,7 @@ const verifiedEnvelope = (
     candidate.dependencySnapshotSha256 !==
       sha256OfUtf8(candidate.dependencySnapshot) ||
     !hasVerifiedBlobs(candidate.blobs, blobBytes) ||
+    !hasVerifiedSourceImageTransforms(candidate) ||
     !mirrorsApprovalCapture(candidate)
   )
     return undefined;
