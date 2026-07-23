@@ -11,7 +11,7 @@ import {
 import { err, ok, type Result } from "../contracts/result";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 import { parseFrontmatter, type FrontmatterOptions } from "./frontmatter";
-import { findProtectedRanges } from "./protected-ranges";
+import { findProtectedRanges, mergeSourceRanges } from "./protected-ranges";
 import { validateMdx } from "./validate-mdx";
 
 export interface MarkdownImageReference {
@@ -371,11 +371,12 @@ const compactModuleDeclarations = (
 const firstUnsupported = (
   source: string,
   ranges: readonly SourceRange[],
+  wikilinkExcludedRanges: readonly SourceRange[],
 ): { readonly start: number; readonly end: number } | undefined => {
   const candidates: { readonly start: number; readonly end: number }[] = [];
   const wikilinks = proseMatches(
     source,
-    ranges,
+    wikilinkExcludedRanges,
     /(?<!!)\[\[([^\]\r\n]+)\]\]/gu,
   );
   const sourceForParsing = maskMatches(source, wikilinks);
@@ -422,7 +423,11 @@ const firstUnsupported = (
     return Object.freeze({ start: 0, end: Math.min(1, source.length) });
   }
 
-  const embeds = proseMatches(source, ranges, /!\[\[([^\]\r\n]*)\]\]/gu);
+  const embeds = proseMatches(
+    source,
+    wikilinkExcludedRanges,
+    /!\[\[([^\]\r\n]*)\]\]/gu,
+  );
   for (const match of embeds) {
     const imageSource = match[1]!.split("|", 1)[0]!;
     if (!isSupportedLocalImageSource(imageSource))
@@ -506,8 +511,12 @@ export async function transformMarkdown(
       parsed.value.bodyOffset + range.end.offset,
     );
   }
-  const ranges = protectedResult.value;
-  const blocked = firstUnsupported(body, ranges);
+  const ranges = protectedResult.value.code;
+  const wikilinkExcludedRanges = mergeSourceRanges(
+    ranges,
+    protectedResult.value.destinations,
+  );
+  const blocked = firstUnsupported(body, ranges, wikilinkExcludedRanges);
   if (blocked)
     return unsupported(
       source,
@@ -521,7 +530,11 @@ export async function transformMarkdown(
   let callouts = 0;
   let escaped = 0;
 
-  for (const match of proseMatches(body, ranges, /!\[\[([^\]\r\n]+)\]\]/gu)) {
+  for (const match of proseMatches(
+    body,
+    wikilinkExcludedRanges,
+    /!\[\[([^\]\r\n]+)\]\]/gu,
+  )) {
     const imageSource = match[1]!.split("|", 1)[0]!.trim();
     const destination = template(profile.images.filenameTemplate, {
       index: String(images.length + 1),
@@ -536,7 +549,7 @@ export async function transformMarkdown(
       replacement: `<${profile.images.component} src="${src}" alt="" />`,
     };
     /* v8 ignore next 7 -- edits originate from non-overlapping parser/regex candidates. */
-    if (!addEdit(edits, ranges, edit))
+    if (!addEdit(edits, wikilinkExcludedRanges, edit))
       return unsupported(
         source,
         parsed.value.bodyOffset + edit.start,
@@ -547,7 +560,7 @@ export async function transformMarkdown(
 
   for (const match of proseMatches(
     body,
-    ranges,
+    wikilinkExcludedRanges,
     /(?<!!)\[\[([^\]\r\n]+)\]\]/gu,
   )) {
     const inner = match[1]!;
@@ -561,7 +574,7 @@ export async function transformMarkdown(
       replacement: replacement.value,
     };
     /* v8 ignore next 7 -- edits originate from non-overlapping parser/regex candidates. */
-    if (!addEdit(edits, ranges, edit))
+    if (!addEdit(edits, wikilinkExcludedRanges, edit))
       return unsupported(
         source,
         parsed.value.bodyOffset + edit.start,
