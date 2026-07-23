@@ -28,14 +28,16 @@ import type {
  *   started/progress/completed  --wire-->    generation-token gate
  *                                            drop stale/late events
  *                                            plan + per-image budget timers
- *                                            timeout/cancel -> terminate()
  *                                            decode+verify -> brand event
+ *                                            every terminal -> terminate()
  *
  * The client owns one generation. It never trusts a structured-cloned wire
  * event: bytes, hashes, and severity channels are re-verified before the event
- * is branded a DecodedWorkerEvent. Timeout, cancellation, or a crash terminates
- * the worker and yields a parent-synthesized blocked event. Events whose
- * generation token does not match the active request are discarded.
+ * is branded a DecodedWorkerEvent. Timeout, cancellation, or a crash yields a
+ * parent-synthesized blocked event. Events whose generation token does not
+ * match the active request are discarded. Because each run owns a worker
+ * carrying an embedded WASM bundle, every terminal path releases it exactly
+ * once through the single `settle` funnel.
  */
 
 /** The subset of the Worker interface the client depends on. */
@@ -44,6 +46,8 @@ export interface WorkerLike {
   terminate(): void;
   onmessage: ((event: MessageEvent) => void) | null;
   onerror: ((event: unknown) => void) | null;
+  /** Fires when a posted message cannot be deserialized; always fail-closed. */
+  onmessageerror: ((event: unknown) => void) | null;
 }
 
 export interface ProcessingClientOptions {
@@ -112,18 +116,27 @@ export class ProcessingClient {
         }
       };
 
+      /**
+       * The single terminal funnel. Every path -- verified completion, a
+       * worker-returned blocked/cancelled event, a malformed response, a crash,
+       * a messageerror, cancellation, and either timeout -- releases the
+       * per-run worker exactly once. The worker owns an embedded WASM bundle,
+       * so leaking it on ordinary success is a real resource leak.
+       */
       const settle = (event: DecodedWorkerEvent): void => {
         if (settled) return;
         settled = true;
         clearTimers();
         worker.onmessage = null;
         worker.onerror = null;
-        this.cancelActive = undefined;
+        worker.onmessageerror = null;
+        // Only disown the shared cancel hook if it is still this run's.
+        if (this.cancelActive === cancelThisRun) this.cancelActive = undefined;
+        worker.terminate();
         resolve(event);
       };
 
-      const terminateWith = (issue: BlockerIssue): void => {
-        worker.terminate();
+      const blockWith = (issue: BlockerIssue): void => {
         settle(
           brand({
             type: "blocked",
@@ -134,25 +147,28 @@ export class ProcessingClient {
         );
       };
 
+      const cancelThisRun = (): void => {
+        if (settled) return;
+        worker.postMessage({ type: "cancel-generation", generationToken });
+        settle(brand({ type: "cancelled", generationToken }));
+      };
+
       const armImageTimer = (): void => {
         clearImageTimer();
         imageTimer = this.options.setTimer(
-          () => terminateWith(createIssue(ISSUE_CODES.workerImageTimeout)),
+          () => blockWith(createIssue(ISSUE_CODES.workerImageTimeout)),
           request.imageTimeoutMs,
         );
       };
 
       worker.onerror = (): void => {
-        if (settled) return;
-        worker.terminate();
-        settle(
-          brand({
-            type: "blocked",
-            generationToken,
-            ...(activeSourceId !== undefined ? { activeSourceId } : {}),
-            issues: [createIssue(ISSUE_CODES.workerCrashed)],
-          }),
-        );
+        blockWith(createIssue(ISSUE_CODES.workerCrashed));
+      };
+
+      // A message that cannot be deserialized is unusable wire data, so it
+      // fails closed on the same redacted channel as any malformed response.
+      worker.onmessageerror = (): void => {
+        settle(this.malformed(generationToken, activeSourceId));
       };
 
       worker.onmessage = (message: MessageEvent): void => {
@@ -202,19 +218,14 @@ export class ProcessingClient {
         }
       };
 
-      this.cancelActive = (): void => {
-        if (settled) return;
-        worker.postMessage({ type: "cancel-generation", generationToken });
-        worker.terminate();
-        settle(brand({ type: "cancelled", generationToken }));
-      };
+      this.cancelActive = cancelThisRun;
 
       const planDelay = Math.max(
         0,
         request.planDeadlineMs - this.options.now(),
       );
       planTimer = this.options.setTimer(
-        () => terminateWith(createIssue(ISSUE_CODES.planBudgetExhausted)),
+        () => blockWith(createIssue(ISSUE_CODES.planBudgetExhausted)),
         planDelay,
       );
 

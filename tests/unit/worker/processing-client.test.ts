@@ -38,23 +38,37 @@ const sha = (bytes: ArrayBuffer): Sha256Digest =>
 class FakeWorker implements WorkerLike {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
+  onmessageerror: ((event: unknown) => void) | null = null;
   readonly posted: {
     message: WorkerRequest;
     transfer: Transferable[] | undefined;
   }[] = [];
-  terminated = false;
+  terminateCount = 0;
+
+  get terminated(): boolean {
+    return this.terminateCount > 0;
+  }
 
   postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
+    // Mirrors the structured-clone algorithm: a transfer list holding the same
+    // ArrayBuffer twice is a DataCloneError, not a silent no-op.
+    if (transfer && new Set(transfer).size !== transfer.length) {
+      throw new DOMException("duplicate transferable", "DataCloneError");
+    }
     this.posted.push({ message, transfer });
   }
   terminate(): void {
-    this.terminated = true;
+    this.terminateCount += 1;
   }
-  emit(event: WorkerWireEvent): void {
+  /** Wire data is untrusted, so probes may emit anything a worker could post. */
+  emit(event: unknown): void {
     this.onmessage?.({ data: event } as MessageEvent);
   }
   emitError(): void {
     this.onerror?.({});
+  }
+  emitMessageError(): void {
+    this.onmessageerror?.({});
   }
 }
 
@@ -75,14 +89,22 @@ class Scheduler {
   get size(): number {
     return this.timers.size;
   }
-  fireSoonest(): void {
+  private soonest(): [number, { cb: () => void; delay: number }] {
     let soonest: [number, { cb: () => void; delay: number }] | undefined;
     for (const entry of this.timers) {
       if (!soonest || entry[1].delay < soonest[1].delay) soonest = entry;
     }
     if (!soonest) throw new Error("no timer scheduled");
-    this.timers.delete(soonest[0]);
-    soonest[1].cb();
+    return soonest;
+  }
+  fireSoonest(): void {
+    const [id, timer] = this.soonest();
+    this.timers.delete(id);
+    timer.cb();
+  }
+  /** The callback without dequeuing it, for already-dispatched timer races. */
+  peekSoonest(): () => void {
+    return this.soonest()[1].cb;
   }
 }
 
@@ -329,5 +351,106 @@ describe("ProcessingClient", () => {
     expect(terminal.type).toBe("blocked");
     if (terminal.type !== "blocked") return;
     expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+});
+
+/**
+ * A per-run worker owns an embedded WASM bundle, so every terminal path must
+ * release it. Regression cover for the reviewed head, which terminated only on
+ * cancel/crash/timeout and leaked the worker on ordinary success.
+ */
+describe("ProcessingClient terminal cleanup", () => {
+  const drive = async (
+    name: string,
+  ): Promise<ReturnType<typeof setup> & { type: string }> => {
+    const harness = setup();
+    const { worker, scheduler, client } = harness;
+    const done = client.process(request());
+    if (name === "completed") {
+      worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    } else if (name === "worker-blocked") {
+      worker.emit({
+        type: "blocked",
+        generationToken: token,
+        issues: [createIssue(ISSUE_CODES.imageDecodeFailed)],
+      });
+    } else if (name === "worker-cancelled") {
+      worker.emit({ type: "cancelled", generationToken: token });
+    } else if (name === "malformed") {
+      worker.emit(completedEvent({ ok: true, value: { nonsense: true } }));
+    } else if (name === "crash") {
+      worker.emitError();
+    } else if (name === "cancel") {
+      client.cancel();
+    } else if (name === "plan-timeout") {
+      scheduler.fireSoonest();
+    } else if (name === "image-timeout") {
+      worker.emit(progressEvent(token));
+      scheduler.fireSoonest();
+    } else if (name === "messageerror") {
+      worker.emitMessageError();
+    }
+    const terminal = await done;
+    return { ...harness, type: terminal.type };
+  };
+
+  const terminalPaths = [
+    "completed",
+    "worker-blocked",
+    "worker-cancelled",
+    "malformed",
+    "crash",
+    "cancel",
+    "plan-timeout",
+    "image-timeout",
+    "messageerror",
+  ] as const;
+
+  it.each(terminalPaths)(
+    "clears timers and handlers and terminates exactly once: %s",
+    async (name) => {
+      const { worker, scheduler } = await drive(name);
+      expect(worker.terminateCount, "terminate calls").toBe(1);
+      expect(scheduler.size, "live timers").toBe(0);
+      expect(worker.onmessage).toBeNull();
+      expect(worker.onerror).toBeNull();
+      expect(worker.onmessageerror).toBeNull();
+    },
+  );
+
+  it("does not double-settle or double-terminate when cancel races a completion", async () => {
+    const { worker, client, scheduler } = setup();
+    const done = client.process(request());
+    // The completion decode is async; cancel lands while it is still pending.
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    client.cancel();
+    const terminal = await done;
+    expect(terminal.type).toBe("cancelled");
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+  });
+
+  it("ignores a crash and a cancel that arrive after the run settled", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    await done;
+    expect(worker.terminateCount).toBe(1);
+    worker.emitError();
+    client.cancel();
+    worker.emitMessageError();
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("terminates once when a stale timer callback fires after settling", async () => {
+    const { worker, client, scheduler } = setup();
+    const done = client.process(request());
+    const planTimer = scheduler.peekSoonest();
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    await done;
+    expect(worker.terminateCount).toBe(1);
+    // Simulate a timer that had already been dispatched before clearTimer ran.
+    planTimer();
+    expect(worker.terminateCount).toBe(1);
   });
 });
