@@ -50,11 +50,9 @@ class FakeWorker implements WorkerLike {
   }
 
   postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
-    // Mirrors the structured-clone algorithm: a transfer list holding the same
-    // ArrayBuffer twice is a DataCloneError, not a silent no-op.
-    if (transfer && new Set(transfer).size !== transfer.length) {
-      throw new DOMException("duplicate transferable", "DataCloneError");
-    }
+    // Run the genuine structured-clone algorithm so duplicate and detached
+    // transferables fail exactly as a real Worker.postMessage would.
+    structuredClone(message, transfer ? { transfer } : undefined);
     this.posted.push({ message, transfer });
   }
   terminate(): void {
@@ -452,5 +450,104 @@ describe("ProcessingClient terminal cleanup", () => {
     // Simulate a timer that had already been dispatched before clearTimer ran.
     planTimer();
     expect(worker.terminateCount).toBe(1);
+  });
+});
+
+const detached = (): ArrayBuffer => {
+  const buffer = Uint8Array.of(1, 2, 3, 4).buffer;
+  structuredClone(buffer, { transfer: [buffer] });
+  return buffer;
+};
+
+/**
+ * `process()` documents that it never rejects. Building the transfer list
+ * straight from the request produced duplicate entries whenever inputs aliased
+ * one ArrayBuffer, and structured clone rejects a duplicated transferable with
+ * DataCloneError -- surfacing as a rejected promise instead of a terminal event.
+ */
+describe("ProcessingClient transfer list", () => {
+  const aliasedRequest = (
+    build: (
+      base: WorkerProcessRequest,
+      shared: ArrayBuffer,
+    ) => WorkerProcessRequest,
+  ): WorkerProcessRequest => {
+    const base = request();
+    return build(base, Uint8Array.of(1, 2, 3, 4).buffer);
+  };
+
+  it("deduplicates a buffer shared by the source note and an image", async () => {
+    const { worker, client } = setup();
+    const req = aliasedRequest((base, shared) => ({
+      ...base,
+      sourceNote: { ...base.sourceNote, bytes: shared },
+      images: [{ ...base.images[0]!, bytes: shared }],
+    }));
+    const done = client.process(req);
+    expect(worker.posted).toHaveLength(1);
+    const transfer = worker.posted[0]!.transfer!;
+    expect(transfer).toHaveLength(1);
+    expect(new Set(transfer).size).toBe(transfer.length);
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    expect((await done).type).toBe("completed");
+  });
+
+  it("deduplicates a buffer shared by two images", async () => {
+    const { worker, client } = setup();
+    const req = aliasedRequest((base, shared) => ({
+      ...base,
+      images: [
+        { ...base.images[0]!, sourceId: "a", bytes: shared },
+        { ...base.images[0]!, sourceId: "b", bytes: shared },
+      ],
+    }));
+    void client.process(req);
+    const transfer = worker.posted[0]!.transfer!;
+    // The note buffer plus the single shared image buffer.
+    expect(transfer).toHaveLength(2);
+    expect(new Set(transfer).size).toBe(transfer.length);
+  });
+
+  it("keeps distinct buffers in the transfer list", () => {
+    const { worker, client } = setup();
+    const req = request();
+    void client.process(req);
+    expect(worker.posted[0]!.transfer).toEqual([
+      req.sourceNote.bytes,
+      req.images[0]!.bytes,
+    ]);
+  });
+
+  it("returns one redacted terminal blocker when postMessage fails", async () => {
+    const { worker, client, scheduler } = setup();
+    const base = request();
+    const req: WorkerProcessRequest = {
+      ...base,
+      images: [{ ...base.images[0]!, bytes: detached() }],
+    };
+    const terminal = await client.process(req);
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues).toHaveLength(1);
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.workerCrashed);
+    expect(terminal.issues[0].displayDetails).toEqual({
+      summary: terminal.issues[0].displayDetails.summary,
+    });
+    // Fail-closed cleanup: nothing queued, no timers, worker released once.
+    expect(worker.posted).toHaveLength(0);
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+    expect(worker.onmessage).toBeNull();
+  });
+
+  it("never rejects even when the source note buffer is already detached", async () => {
+    const { client } = setup();
+    const base = request();
+    const req: WorkerProcessRequest = {
+      ...base,
+      sourceNote: { ...base.sourceNote, bytes: detached() },
+    };
+    const promise = client.process(req);
+    await expect(promise).resolves.toMatchObject({ type: "blocked" });
   });
 });

@@ -229,11 +229,23 @@ export class ProcessingClient {
         planDelay,
       );
 
+      // Inputs may alias one ArrayBuffer (a note and an image, or two images
+      // resolved to the same source). A transfer list naming the same buffer
+      // twice is a structured-clone DataCloneError, so dedupe by identity.
       const transfer: Transferable[] = [
-        request.sourceNote.bytes,
-        ...request.images.map((image) => image.bytes),
+        ...new Set<Transferable>([
+          request.sourceNote.bytes,
+          ...request.images.map((image) => image.bytes),
+        ]),
       ];
-      worker.postMessage(request, transfer);
+      try {
+        worker.postMessage(request, transfer);
+      } catch {
+        // A detached or otherwise untransferable input cannot be handed to the
+        // worker. process() never rejects, so fail closed with one redacted
+        // terminal blocker; settle() releases the worker it just created.
+        blockWith(createIssue(ISSUE_CODES.workerCrashed));
+      }
     });
   }
 
