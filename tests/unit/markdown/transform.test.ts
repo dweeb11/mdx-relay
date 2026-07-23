@@ -180,6 +180,65 @@ describe("transformMarkdown", () => {
     expect(result.value.mdx).toContain(body);
   });
 
+  it("leaves wikilink-shaped text inside Markdown destinations unchanged", async () => {
+    const body = [
+      "Prose [[id]] flattens beside protected destinations.",
+      "[ref](https://example.com/[[id]])",
+      '[titled](https://example.com/[[id]] "title")',
+      "[angled](<https://example.com/[[id]]>)",
+      "[photo](https://example.com/[[id]].png)",
+      "[ref][label]",
+      "",
+      "[label]: https://example.com/[[id]]",
+      "[angled-ref][angled-label]",
+      "",
+      "[angled-label]: <https://example.com/[[id]]>",
+      "[img]: https://example.com/assets/[[id]].png",
+      "`[[code]]` stays protected.",
+    ].join("\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(
+      "Prose id flattens beside protected destinations.",
+    );
+    expect(result.value.mdx).toContain("[ref](https://example.com/[[id]])");
+    expect(result.value.mdx).toContain(
+      '[titled](https://example.com/[[id]] "title")',
+    );
+    expect(result.value.mdx).toContain(
+      "[angled](<https://example.com/[[id]]>)",
+    );
+    expect(result.value.mdx).toContain(
+      "[photo](https://example.com/[[id]].png)",
+    );
+    expect(result.value.mdx).toContain("[label]: https://example.com/[[id]]");
+    expect(result.value.mdx).toContain(
+      "[angled-label]: <https://example.com/[[id]]>",
+    );
+    expect(result.value.mdx).toContain(
+      "[img]: https://example.com/assets/[[id]].png",
+    );
+    expect(result.value.mdx).toContain("`[[code]]` stays protected.");
+    expect(
+      issueCount(result.value.issues, ISSUE_CODES.wikilinksFlattened),
+    ).toBe(1);
+  });
+
+  it("still fails closed for Markdown images whose destinations contain wikilink text", async () => {
+    const source = note("![alt](https://example.com/[[id]].png)");
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+    expect(
+      source.slice(
+        result.error.sourceRange!.start.offset,
+        result.error.sourceRange!.end.offset,
+      ),
+    ).toBe("![alt](https://example.com/[[id]].png)");
+  });
+
   it("blocks compiler-incompatible CommonMark autolinks as INVALID_MDX", async () => {
     const result = await transformMarkdown(
       note("<https://example.invalid/path>"),

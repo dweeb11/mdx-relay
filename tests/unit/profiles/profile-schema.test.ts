@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
+import { parsePortableProfile } from "../../../src/profiles/parse-portable-profile";
 import {
   canonicalizeProfileData,
   validatePortableProfile,
@@ -60,6 +61,20 @@ describe("portable profile schema", () => {
       "sha256:3ce13ea7fab368516d05e8fdd55880a3a01e672812bfb32118c4c93a06c20ddb",
     );
     expect(result.value.snapshot).not.toContain("/Users/");
+  });
+
+  it("parsePortableProfile rejects lone surrogates without the sealing path", () => {
+    // validatePortableProfile rejects these via the plain-data graph check
+    // before schema parsing; the worker calls parsePortableProfile directly
+    // after JSON.parse, so the schema parser must fail closed on its own.
+    for (const name of [
+      `broken-high-${String.fromCharCode(0xd800)}`,
+      `broken-low-${String.fromCharCode(0xdc00)}`,
+    ]) {
+      const profile = cloneBuiltin();
+      profile.name = name;
+      expect(parsePortableProfile(profile)).toBeUndefined();
+    }
   });
 
   it("rejects every unknown key without reflecting it", () => {
