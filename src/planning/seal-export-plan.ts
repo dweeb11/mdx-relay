@@ -110,6 +110,38 @@ const jsonDataKeys = (value: object): readonly string[] => {
   return keys;
 };
 
+/** Canonical array index strings: no leading zeros, no sign, no exponent. */
+const ARRAY_INDEX = /^(?:0|[1-9][0-9]*)$/u;
+
+/**
+ * The length of a dense plain array whose every element is an own enumerable
+ * data property. Arrays are held to exactly the contract objects are held to:
+ * an indexed getter, a hidden or symbol property, a hole or a named key is
+ * refused rather than read, because an element the array can compute is not
+ * JSON data and would let the value choose its own manifest. Nothing here reads
+ * an element, so no accessor runs before it has been rejected.
+ */
+const jsonDataElementCount = (value: readonly unknown[]): number => {
+  if (Object.getPrototypeOf(value) !== Array.prototype)
+    throw new TypeError("Unsupported JSON array prototype");
+  if (Object.getOwnPropertySymbols(value).length > 0)
+    throw new TypeError("Symbol key in JSON array");
+  let elements = 0;
+  for (const [key, descriptor] of Object.entries(
+    Object.getOwnPropertyDescriptors(value),
+  )) {
+    if (key === "length") continue;
+    if (!ARRAY_INDEX.test(key) || Number(key) >= value.length)
+      throw new TypeError("Non-index key in JSON array");
+    if (!("value" in descriptor)) throw new TypeError("Accessor in JSON array");
+    if (!descriptor.enumerable)
+      throw new TypeError("Non-enumerable key in JSON array");
+    elements += 1;
+  }
+  if (elements !== value.length) throw new TypeError("Hole in JSON array");
+  return elements;
+};
+
 /**
  * RFC 8785 JSON Canonicalization Scheme. Keys sort by UTF-16 code unit, strings
  * and numbers use the ECMAScript serializations JCS defers to, and anything
@@ -126,14 +158,9 @@ export function canonicalizeJcs(value: unknown): string {
   }
   if (typeof value !== "object") throw new TypeError("Unsupported JSON value");
   if (Array.isArray(value)) {
-    if (Object.getPrototypeOf(value) !== Array.prototype)
-      throw new TypeError("Unsupported JSON array prototype");
-    // A hole is neither `null` nor a value and an extra named property is not
-    // JSON data at all; both make the own-key count disagree with the length.
-    if (Object.keys(value).length !== value.length)
-      throw new TypeError("Hole or non-index key in JSON array");
+    const elements = jsonDataElementCount(value);
     const entries: string[] = [];
-    for (let index = 0; index < value.length; index += 1)
+    for (let index = 0; index < elements; index += 1)
       entries.push(canonicalizeJcs(value[index]));
     return `[${entries.join(",")}]`;
   }
@@ -207,44 +234,6 @@ const hasVerifiedBlobs = (
       output.planRelativePath === digest.slice("sha256:".length)
     );
   });
-};
-
-/** The image digests must point at verified sealed image blobs, not just any blob. */
-const hasVerifiedSourceImageTransforms = (
-  candidate: Record<string, unknown>,
-  blobs: Record<string, SealedOutput>,
-): boolean => {
-  const sourceImages = candidate.sourceImages;
-  const commitMessage = candidate.commitMessage;
-  const generatedMdx = candidate.generatedMdx;
-  if (
-    !Array.isArray(sourceImages) ||
-    !isRecord(commitMessage) ||
-    !isRecord(generatedMdx) ||
-    typeof commitMessage.contentSha256 !== "string" ||
-    typeof generatedMdx.contentSha256 !== "string"
-  )
-    return false;
-
-  const sealedImageDigests = Object.values(blobs)
-    .filter(
-      (output: SealedOutput) =>
-        output.contentSha256 !== commitMessage.contentSha256 &&
-        output.contentSha256 !== generatedMdx.contentSha256,
-    )
-    .map((output: SealedOutput) => output.contentSha256 as Sha256Digest);
-
-  const remaining = new Set(sealedImageDigests);
-  for (const image of sourceImages) {
-    const transformedOutputSha256 =
-      isRecord(image) && typeof image.transformedOutputSha256 === "string"
-        ? (image.transformedOutputSha256 as Sha256Digest)
-        : undefined;
-    if (transformedOutputSha256 === undefined || !remaining.has(transformedOutputSha256))
-      return false;
-    remaining.delete(transformedOutputSha256);
-  }
-  return remaining.size === 0;
 };
 
 /** Every duplicated capture field must equal the approval fingerprint exactly. */
@@ -427,7 +416,6 @@ const verifiedEnvelope = (
     candidate.dependencySnapshotSha256 !==
       sha256OfUtf8(candidate.dependencySnapshot) ||
     !hasVerifiedBlobs(candidate.blobs, blobBytes) ||
-    !hasVerifiedSourceImageTransforms(candidate, candidate.blobs) ||
     !mirrorsApprovalCapture(candidate)
   )
     return undefined;

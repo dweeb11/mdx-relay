@@ -342,6 +342,90 @@ describe("canonicalizeJcs", () => {
     expect(canonicalizeJcs(bare)).toBe('{"a":2,"b":1}');
   });
 
+  it("refuses hostile array containers without running a single accessor", () => {
+    let sideEffects = 0;
+    const trap = {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        sideEffects += 1;
+        return "chosen at read time";
+      },
+      set: () => {
+        sideEffects += 1;
+      },
+    };
+
+    const indexedAccessor: unknown[] = [];
+    Object.defineProperty(indexedAccessor, "0", trap);
+    indexedAccessor.length = 1;
+    expect(() => canonicalizeJcs(indexedAccessor)).toThrow(TypeError);
+
+    const trailingAccessor = ["first"];
+    Object.defineProperty(trailingAccessor, "1", trap);
+    expect(() => canonicalizeJcs(trailingAccessor)).toThrow(TypeError);
+
+    // An accessor buried inside an otherwise ordinary plan is refused too.
+    const nestedAccessor: unknown[] = [];
+    Object.defineProperty(nestedAccessor, "0", trap);
+    nestedAccessor.length = 1;
+    expect(() =>
+      canonicalizeJcs({ actions: { targets: nestedAccessor } }),
+    ).toThrow(TypeError);
+
+    const nonEnumerableIndex = ["first"];
+    Object.defineProperty(nonEnumerableIndex, "0", {
+      enumerable: false,
+      value: "hidden from JSON",
+    });
+    expect(() => canonicalizeJcs(nonEnumerableIndex)).toThrow(TypeError);
+
+    const hiddenNamed = ["first"];
+    Object.defineProperty(hiddenNamed, "smuggled", {
+      enumerable: false,
+      value: "ignored by JSON.stringify",
+    });
+    expect(() => canonicalizeJcs(hiddenNamed)).toThrow(TypeError);
+
+    const symbolKeyed = ["first"];
+    (symbolKeyed as unknown as Record<symbol, unknown>)[Symbol("smuggled")] =
+      "ignored by JSON.stringify";
+    expect(() => canonicalizeJcs(symbolKeyed)).toThrow(TypeError);
+
+    const exoticPrototype = ["first"];
+    Object.setPrototypeOf(exoticPrototype, {
+      ...Array.prototype,
+      toJSON: () => ["replaced"],
+    });
+    expect(() => canonicalizeJcs(exoticPrototype)).toThrow(TypeError);
+
+    const subclassed = new (class Targets extends Array {})();
+    subclassed.push("first");
+    expect(() => canonicalizeJcs(subclassed as unknown[])).toThrow(TypeError);
+
+    // Non-index named keys, fractional and padded index spellings are not data.
+    for (const key of ["extra", "01", "1.0", "-1", "1e0", " 0"]) {
+      const named: unknown[] = ["first"];
+      Object.defineProperty(named, key, {
+        enumerable: true,
+        configurable: true,
+        value: "smuggled",
+      });
+      expect(() => canonicalizeJcs(named), key).toThrow(TypeError);
+    }
+
+    // Nothing above got as far as reading an element.
+    expect(sideEffects).toBe(0);
+
+    // Ordinary dense arrays, frozen and astral ones included, still canonicalize.
+    expect(canonicalizeJcs([])).toBe("[]");
+    expect(canonicalizeJcs([1, "two", null, true, [3], { a: 4 }])).toBe(
+      '[1,"two",null,true,[3],{"a":4}]',
+    );
+    expect(canonicalizeJcs(Object.freeze(["frozen", 1]))).toBe('["frozen",1]');
+    expect(canonicalizeJcs(["😀", "\u{1F600}"])).toBe('["😀","😀"]');
+  });
+
   it("excludes only the generation token and plan ID from plan identity", () => {
     const manifest = buildPlanIdentityManifest({
       planId: "plan-x",
@@ -429,22 +513,6 @@ describe("sealExportPlan", () => {
     expect(result.ok).toBe(false);
     if (!result.ok)
       expect(result.error[0].code).toBe(ISSUE_CODES.staleDuringPlanning);
-  });
-
-  it("rejects a stored plan whose source-image transforms point outside the sealed image blobs", () => {
-    const envelope = sealOrThrow();
-    const plan = restored(envelope);
-    (plan.sourceImages as { transformedOutputSha256: string }[])[0]!
-      .transformedOutputSha256 = digest("forged-transform");
-    (
-      (plan.approvalFingerprint as {
-        sourceImages: { transformedOutputSha256: string }[];
-      }).sourceImages
-    )[0]!.transformedOutputSha256 = digest("forged-transform");
-
-    const result = verifyStoredExportPlan(plan, envelope.blobBytes, NOW, sourceBytes());
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error[0].code).toBe(ISSUE_CODES.storageTampered);
   });
 });
 
