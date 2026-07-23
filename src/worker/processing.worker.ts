@@ -6,6 +6,7 @@ import pngWasm from "@jsquash/png/codec/pkg/squoosh_png_bg.wasm";
 import webpDecWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
 import webpEncWasm from "@jsquash/webp/codec/enc/webp_enc.wasm";
 
+import { readImageHeader } from "../images/image-metadata";
 import { createPortableWebpCodec } from "../images/portable-webp-codec";
 import { transformMarkdown } from "../markdown/transform";
 import type {
@@ -48,6 +49,7 @@ scope.addEventListener("message", (event: MessageEvent) => {
   if (request.type !== "process-plan") return;
   void processPlan(request, {
     codec,
+    readImageHeader,
     hash: sha256Digest,
     transformMarkdown,
     post,

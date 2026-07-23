@@ -6,7 +6,7 @@ import {
   type MdxRelayIssue,
   type WarningIssue,
 } from "../contracts/issues";
-import { mdxRelayErr, mdxRelayOk } from "../contracts/result";
+import { mdxRelayErr, mdxRelayOk, type Result } from "../contracts/result";
 import type {
   WorkerCompletion,
   WorkerImageOutput,
@@ -14,6 +14,7 @@ import type {
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
 import type { ImageCodec } from "../images/image-codec";
+import type { ImageHeader } from "../images/image-metadata";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import type { transformMarkdown } from "../markdown/transform";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
@@ -21,6 +22,14 @@ import type { PortableProfileV1 } from "../profiles/profile-schema";
 /** Injected collaborators so the worker core is unit-testable without a real Worker. */
 export interface ProcessPlanDeps {
   readonly codec: ImageCodec;
+  /**
+   * Bounded container-header probe returning the raw decoded size a source will
+   * cost. The cumulative decoded-work cap is a cap on work performed, so the
+   * cost must be known before the decode that would spend it.
+   */
+  readonly readImageHeader: (
+    bytes: Uint8Array,
+  ) => Result<ImageHeader, MdxRelayIssue>;
   /** Hashes output bytes to the canonical `sha256:<hex>` digest form. */
   readonly hash: (bytes: ArrayBuffer) => Promise<Sha256Digest>;
   readonly transformMarkdown: typeof transformMarkdown;
@@ -54,10 +63,12 @@ const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
  *
  * Cooperative budget checks fail closed between images; the parent enforces the
  * hard wall-clock ceiling by terminating a worker that overruns. Cumulative
- * decoded work is charged once per canonical source and checked both before and
- * after each decode, so an exhausted budget stops the work rather than merely
- * reporting it afterwards. The parent re-verifies the same budget from the
- * reported decoded dimensions and never trusts this accounting.
+ * decoded work is charged once per canonical source, from a bounded header
+ * probe taken *before* the decode: a source that would push the plan past the
+ * limit is refused without doing its work, and a decoder that disagrees with
+ * the header it was charged for fails the plan closed. The parent re-verifies
+ * the same budget from the reported decoded dimensions and never trusts this
+ * accounting.
  */
 export async function processPlan(
   request: WorkerProcessRequest,
@@ -131,9 +142,38 @@ export async function processPlan(
       continue;
     }
 
-    // Checked before the decode, not after: with the budget already spent
-    // there is no headroom for any image, so the work is never performed.
-    if (decodedPixels >= MDX_RELAY_LIMITS.cumulativeDecodedPixels) {
+    // What this source will cost, read from its container header alone. No
+    // decode or transform runs until the charge is known and affordable.
+    const header = deps.readImageHeader(new Uint8Array(image.bytes));
+    if (!header.ok) {
+      deps.post({
+        type: "completed",
+        generationToken,
+        result: blockerResult([header.error as BlockerIssue]),
+      });
+      return;
+    }
+    const { width, height } = header.value;
+    // Bounding each edge first keeps the area a safe integer, so a header
+    // declaring four-billion-pixel edges cannot overflow the comparison.
+    if (
+      width > MDX_RELAY_LIMITS.decodedImagePixels ||
+      height > MDX_RELAY_LIMITS.decodedImagePixels ||
+      width * height > MDX_RELAY_LIMITS.decodedImagePixels
+    ) {
+      deps.post({
+        type: "completed",
+        generationToken,
+        result: blockerResult([createIssue(ISSUE_CODES.decodedImageTooLarge)]),
+      });
+      return;
+    }
+    // The hard cap: a source that would push the plan past the cumulative limit
+    // is refused before its decode begins, so the work is never performed.
+    if (
+      decodedPixels + width * height >
+      MDX_RELAY_LIMITS.cumulativeDecodedPixels
+    ) {
       deps.post({
         type: "completed",
         generationToken,
@@ -143,6 +183,7 @@ export async function processPlan(
       });
       return;
     }
+    decodedPixels += width * height;
 
     const result = await deps.codec.transform(image.bytes, {
       maxDimension: profile.images.maxDimension,
@@ -156,15 +197,17 @@ export async function processPlan(
       });
       return;
     }
-
-    decodedPixels += result.value.decodedWidth * result.value.decodedHeight;
-    if (decodedPixels > MDX_RELAY_LIMITS.cumulativeDecodedPixels) {
+    // The budget was charged on the header's word. A decoder that disagrees
+    // means the charge was wrong, so the plan fails closed rather than let an
+    // under-charged decode stand.
+    if (
+      result.value.decodedWidth !== width ||
+      result.value.decodedHeight !== height
+    ) {
       deps.post({
         type: "completed",
         generationToken,
-        result: blockerResult([
-          createIssue(ISSUE_CODES.decodedWorkLimitExceeded),
-        ]),
+        result: blockerResult([createIssue(ISSUE_CODES.imageDecodeFailed)]),
       });
       return;
     }

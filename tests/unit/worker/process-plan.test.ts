@@ -83,6 +83,10 @@ interface Harness {
   readonly transformCalls: () => number;
 }
 
+/** Matches the default fake codec's decoded size, so the charge is coherent. */
+const defaultHeader = () =>
+  ok({ mime: "image/png" as const, width: 4, height: 4 });
+
 const harness = (
   overrides: Partial<ProcessPlanDeps> = {},
   codecTransform?: ImageCodec["transform"],
@@ -102,6 +106,7 @@ const harness = (
     );
   const deps: ProcessPlanDeps = {
     codec: { transform },
+    readImageHeader: defaultHeader,
     hash: async (bytes) => digest(`h${bytes.byteLength}`),
     transformMarkdown: (async () =>
       ok(markdownResult)) as ProcessPlanDeps["transformMarkdown"],
@@ -316,34 +321,50 @@ describe("processPlan image-work signalling", () => {
 
 /**
  * MDX_RELAY_LIMITS.cumulativeDecodedPixels caps the decoded work one plan may
- * perform, charged once per canonical source. The budget must stop the work,
- * not merely report it afterwards, so it is checked before every decode as well
- * as after.
+ * perform, charged once per canonical source. It is a cap on work performed,
+ * not a threshold reported after the fact: the cost of each source is read from
+ * its container header and refused before any decode that would overshoot.
  */
 describe("processPlan cumulative decoded-work budget", () => {
   const MEGAPIXEL = 1_000_000;
   const CUMULATIVE = MDX_RELAY_LIMITS.cumulativeDecodedPixels;
   const PER_IMAGE = MDX_RELAY_LIMITS.decodedImagePixels;
 
-  /** A codec whose decoded cost per call comes from a fixed schedule. */
+  /**
+   * A header probe and codec sharing one fixed cost schedule, indexed by
+   * canonical source. `performed()` is the decode work the codec actually did,
+   * which is what the cap governs; `probed()` counts headers inspected.
+   */
   const decoding = (pixelsPerCall: readonly number[]) => {
     const decodedPixels: number[] = [];
+    let probes = 0;
+    const sizeAt = (index: number): readonly [number, number] => {
+      const pixels = pixelsPerCall[index] ?? PER_IMAGE;
+      return [pixels / 1_000, 1_000];
+    };
+    const readImageHeader = ((): ProcessPlanDeps["readImageHeader"] => () => {
+      const [width, height] = sizeAt(probes);
+      probes += 1;
+      return ok({ mime: "image/png" as const, width, height });
+    })();
     const transform = vi.fn(async () => {
-      const pixels = pixelsPerCall[decodedPixels.length] ?? PER_IMAGE;
-      decodedPixels.push(pixels);
+      const [decodedWidth, decodedHeight] = sizeAt(decodedPixels.length);
+      decodedPixels.push(decodedWidth * decodedHeight);
       return ok({
         decodedMime: "image/png" as const,
-        decodedWidth: pixels / 1_000,
-        decodedHeight: 1_000,
+        decodedWidth,
+        decodedHeight,
         width: 2,
         height: 2,
         bytes: Uint8Array.of(9, 9).buffer,
       });
     });
     return {
+      readImageHeader,
       transform: transform as unknown as ImageCodec["transform"],
       performed: (): number => decodedPixels.reduce((sum, n) => sum + n, 0),
       calls: (): number => decodedPixels.length,
+      probed: (): number => probes,
     };
   };
 
@@ -367,13 +388,18 @@ describe("processPlan cumulative decoded-work budget", () => {
 
   it("never performs 440MP of work for eleven unique 40MP images", async () => {
     const codec = decoding(Array<number>(11).fill(PER_IMAGE));
-    const h = harness({}, codec.transform);
+    const h = harness(
+      { readImageHeader: codec.readImageHeader },
+      codec.transform,
+    );
     await processPlan(request(unique(11)), h.deps);
 
     // The eleventh image is never decoded: the budget is already spent.
     expect(codec.calls()).toBe(10);
     expect(codec.performed()).toBe(CUMULATIVE);
     expect(codec.performed()).toBeLessThan(11 * PER_IMAGE);
+    // Its header was inspected -- that is how the refusal was decided.
+    expect(codec.probed()).toBe(11);
     const result = terminalResult(h);
     expect(result.ok).toBe(false);
     expect(result.error![0]!.code).toBe(ISSUE_CODES.decodedWorkLimitExceeded);
@@ -381,24 +407,34 @@ describe("processPlan cumulative decoded-work budget", () => {
 
   it("completes ten unique 40MP images exactly at the budget", async () => {
     const codec = decoding(Array<number>(10).fill(PER_IMAGE));
-    const h = harness({}, codec.transform);
+    const h = harness(
+      { readImageHeader: codec.readImageHeader },
+      codec.transform,
+    );
     await processPlan(request(unique(10)), h.deps);
     expect(codec.calls()).toBe(10);
     expect(codec.performed()).toBe(CUMULATIVE);
     expect(terminalResult(h).ok).toBe(true);
   });
 
-  it("stops after the decode that pushes a partial budget over", async () => {
-    // 9 x 39MP = 351MP, then a 40MP image lands on 391MP, then 20MP -> 411MP.
+  it("blocks before the decode that would push a partial budget over", async () => {
+    // 9 x 39MP = 351MP, then a 40MP image lands exactly on 391MP. The next
+    // source costs 20MP, which would reach 411MP: it is never decoded.
     const codec = decoding([
       ...Array<number>(9).fill(39 * MEGAPIXEL),
       PER_IMAGE,
       20 * MEGAPIXEL,
     ]);
-    const h = harness({}, codec.transform);
+    const h = harness(
+      { readImageHeader: codec.readImageHeader },
+      codec.transform,
+    );
     await processPlan(request(unique(11)), h.deps);
-    expect(codec.calls()).toBe(11);
-    expect(codec.performed()).toBe(411 * MEGAPIXEL);
+    expect(codec.calls()).toBe(10);
+    expect(codec.performed()).toBe(391 * MEGAPIXEL);
+    // The cap is never exceeded by even one pixel of real work.
+    expect(codec.performed()).toBeLessThanOrEqual(CUMULATIVE);
+    expect(codec.probed()).toBe(11);
     const result = terminalResult(h);
     expect(result.ok).toBe(false);
     expect(result.error![0]!.code).toBe(ISSUE_CODES.decodedWorkLimitExceeded);
@@ -406,7 +442,10 @@ describe("processPlan cumulative decoded-work budget", () => {
 
   it("charges a canonical source once however many times it is embedded", async () => {
     const codec = decoding([PER_IMAGE]);
-    const h = harness({}, codec.transform);
+    const h = harness(
+      { readImageHeader: codec.readImageHeader },
+      codec.transform,
+    );
     // Twenty embeds of one 40MP source: 40MP of work, not 800MP.
     const repeats = Array.from({ length: 20 }, (_, index) =>
       image(`embed-${String(index)}`, "one-source"),
@@ -414,12 +453,17 @@ describe("processPlan cumulative decoded-work budget", () => {
     await processPlan(request(repeats), h.deps);
     expect(codec.calls()).toBe(1);
     expect(codec.performed()).toBe(PER_IMAGE);
+    // Dedupe happens before charging *and* before probing: one of each.
+    expect(codec.probed()).toBe(1);
     expect(terminalResult(h).ok).toBe(true);
   });
 
   it("reports the decoded source size on every output, including reused ones", async () => {
     const codec = decoding([PER_IMAGE]);
-    const h = harness({}, codec.transform);
+    const h = harness(
+      { readImageHeader: codec.readImageHeader },
+      codec.transform,
+    );
     await processPlan(
       request([image("a", "same"), image("b", "same")]),
       h.deps,
@@ -446,5 +490,82 @@ describe("processPlan cumulative decoded-work budget", () => {
       ["a", PER_IMAGE],
       ["b", PER_IMAGE],
     ]);
+  });
+});
+
+/**
+ * The preflight is the only thing standing between an over-budget source and
+ * the work it would cost, so every way it can fail must stop the plan before
+ * the codec runs -- and a decoder that contradicts the header it was charged
+ * for invalidates the accounting itself.
+ */
+describe("processPlan decoded-size preflight", () => {
+  const PER_IMAGE = MDX_RELAY_LIMITS.decodedImagePixels;
+
+  const blockedBy = async (
+    overrides: Partial<ProcessPlanDeps>,
+  ): Promise<{ code: string; transformCalls: number }> => {
+    const h = harness(overrides);
+    await processPlan(request([image("a", "aa")]), h.deps);
+    const result = (
+      h.posts.at(-1)!.event as {
+        result: { ok: boolean; error: { code: string }[] };
+      }
+    ).result;
+    expect(result.ok).toBe(false);
+    return {
+      code: result.error[0]!.code,
+      transformCalls: h.transformCalls(),
+    };
+  };
+
+  it("blocks an unreadable container without decoding it", async () => {
+    expect(
+      await blockedBy({
+        readImageHeader: () => err(createIssue(ISSUE_CODES.unsupportedImage)),
+      }),
+    ).toEqual({ code: ISSUE_CODES.unsupportedImage, transformCalls: 0 });
+    expect(
+      await blockedBy({
+        readImageHeader: () => err(createIssue(ISSUE_CODES.imageDecodeFailed)),
+      }),
+    ).toEqual({ code: ISSUE_CODES.imageDecodeFailed, transformCalls: 0 });
+  });
+
+  it("blocks a header past the per-image ceiling without decoding it", async () => {
+    expect(
+      await blockedBy({
+        readImageHeader: () =>
+          ok({ mime: "image/png" as const, width: 8_001, height: 5_000 }),
+      }),
+    ).toEqual({ code: ISSUE_CODES.decodedImageTooLarge, transformCalls: 0 });
+  });
+
+  it("blocks absurd declared edges instead of overflowing the charge", async () => {
+    // 0xFFFFFFFF squared is past MAX_SAFE_INTEGER: each edge is bounded first.
+    expect(
+      await blockedBy({
+        readImageHeader: () =>
+          ok({
+            mime: "image/png" as const,
+            width: 4_294_967_295,
+            height: 4_294_967_295,
+          }),
+      }),
+    ).toEqual({ code: ISSUE_CODES.decodedImageTooLarge, transformCalls: 0 });
+    expect(4_294_967_295 * 4_294_967_295).toBeGreaterThan(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(4_294_967_295).toBeGreaterThan(PER_IMAGE);
+  });
+
+  it("fails the plan closed when the decoder disagrees with the header", async () => {
+    // The default fake codec decodes 4x4; this header charged for 8x8.
+    expect(
+      await blockedBy({
+        readImageHeader: () =>
+          ok({ mime: "image/png" as const, width: 8, height: 8 }),
+      }),
+    ).toEqual({ code: ISSUE_CODES.imageDecodeFailed, transformCalls: 1 });
   });
 });
