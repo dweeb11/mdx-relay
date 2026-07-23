@@ -362,6 +362,25 @@ describe("private plan storage", () => {
     expect((await loadSealedPlan(deps, first.planId)).ok).toBe(true);
   });
 
+  it("stores the current generation token when republishing an identity", async () => {
+    const first = sealedPlan({
+      generationToken: "generation-1" as GenerationToken,
+    });
+    expect((await publishSealedPlan(deps, first)).ok).toBe(true);
+
+    const second = sealedPlan({
+      generationToken: "generation-2" as GenerationToken,
+    });
+    expect(second.planId).toBe(first.planId);
+    expect(second.plan.generationToken).not.toBe(first.plan.generationToken);
+    expect((await publishSealedPlan(deps, second)).ok).toBe(true);
+
+    const stored = await loadSealedPlan(deps, second.planId);
+    expect(stored.ok && stored.value.plan.generationToken).toBe("generation-2");
+    const active = await loadActivePlan(deps);
+    expect(active.ok && active.value.plan.generationToken).toBe("generation-2");
+  });
+
   it("stores approval as the exact plan ID and only for the pinned ready plan", async () => {
     const envelope = sealedPlan();
     await publishSealedPlan(deps, envelope);

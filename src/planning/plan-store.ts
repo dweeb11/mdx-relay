@@ -9,7 +9,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { PlanId } from "../contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../contracts/issues";
@@ -185,6 +185,19 @@ const writeVerifiedFile = async (
     throw new Error("Sealed file did not read back intact");
 };
 
+/** Atomically replaces one verified file and durably commits its directory entry. */
+const replaceVerifiedFile = async (
+  deps: PlanStoreDeps,
+  filePath: string,
+  bytes: Uint8Array,
+): Promise<void> => {
+  const temporaryPath = `${filePath}${TEMPORARY_SUFFIX}`;
+  await deps.fileSystem.removeRecursively(temporaryPath);
+  await writeVerifiedFile(deps, temporaryPath, bytes);
+  await deps.fileSystem.rename(temporaryPath, filePath);
+  await deps.fileSystem.syncDirectory(dirname(filePath));
+};
+
 const writePointer = async (
   deps: PlanStoreDeps,
   filePath: string,
@@ -302,10 +315,26 @@ export async function publishSealedPlan(
     await ensureOwnerOnlyDirectory(deps, plansDirectory(deps));
     await ensureOwnerOnlyDirectory(deps, approvalsDirectory(deps));
 
-    // The plan ID is content-derived, so an already published plan at this ID
-    // holds these exact bytes; republishing only needs to re-pin it.
+    // The plan ID excludes the per-run generation token. Preserve the immutable
+    // identity and blobs, but atomically refresh plan.json before re-pinning.
     const existing = await loadSealedPlan(deps, planId);
     if (existing.ok) {
+      if (
+        existing.value.plan.generationToken !== envelope.plan.generationToken
+      ) {
+        const verified = verifyStoredExportPlan(
+          envelope.plan,
+          envelope.blobBytes,
+          deps.now(),
+        );
+        if (!verified.ok || verified.value.planId !== planId)
+          return writeFailed();
+        await replaceVerifiedFile(
+          deps,
+          join(directory, PLAN_DOCUMENT_FILENAME),
+          new TextEncoder().encode(canonicalizeJcs(envelope.plan)),
+        );
+      }
       await writePointer(deps, activePlanFile(deps), planId);
       return mdxRelayOk(planId);
     }
