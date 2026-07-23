@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import {
-  findDestinationRanges,
   findProtectedRanges,
   isOffsetProtected,
   mergeSourceRanges,
@@ -12,7 +11,7 @@ const protectedSlices = (source: string): readonly string[] => {
   const result = findProtectedRanges(source);
   expect(result.ok).toBe(true);
   if (!result.ok) return [];
-  return result.value.map((range) =>
+  return result.value.code.map((range) =>
     source.slice(range.start.offset, range.end.offset),
   );
 };
@@ -51,10 +50,11 @@ describe("findProtectedRanges", () => {
     const result = findProtectedRanges(source);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const [range] = result.value;
+    const [range] = result.value.code;
     expect(source.slice(range!.start.offset, range!.end.offset)).toBe("`x`");
     expect(range!.start).toMatchObject({ line: 2, column: 1, offset: 8 });
     expect(Object.isFrozen(result.value)).toBe(true);
+    expect(Object.isFrozen(result.value.code)).toBe(true);
     expect(Object.isFrozen(range)).toBe(true);
     expect(Object.isFrozen(range!.start)).toBe(true);
   });
@@ -68,10 +68,12 @@ describe("findProtectedRanges", () => {
     const result = findProtectedRanges(source);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const range = result.value[0]!;
-    expect(isOffsetProtected(result.value, range.start.offset)).toBe(true);
-    expect(isOffsetProtected(result.value, range.end.offset - 1)).toBe(true);
-    expect(isOffsetProtected(result.value, range.end.offset)).toBe(false);
+    const range = result.value.code[0]!;
+    expect(isOffsetProtected(result.value.code, range.start.offset)).toBe(true);
+    expect(isOffsetProtected(result.value.code, range.end.offset - 1)).toBe(
+      true,
+    );
+    expect(isOffsetProtected(result.value.code, range.end.offset)).toBe(false);
   });
 
   it.each([
@@ -130,9 +132,7 @@ describe("findProtectedRanges", () => {
       summary: "The note contains unsupported Markdown or Obsidian syntax.",
     });
   });
-});
 
-describe("findDestinationRanges", () => {
   it("uses micromark positions for inline, image, and reference destinations", () => {
     const source = [
       "[ref](https://example.com/[[id]])",
@@ -141,11 +141,11 @@ describe("findDestinationRanges", () => {
       "",
       "[label]: <https://example.com/[[id]]>",
     ].join("\n");
-    const result = findDestinationRanges(source);
+    const result = findProtectedRanges(source);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(
-      result.value.map((range) =>
+      result.value.destinations.map((range) =>
         source.slice(range.start.offset, range.end.offset),
       ),
     ).toEqual([
@@ -153,36 +153,20 @@ describe("findDestinationRanges", () => {
       "https://example.com/[[id]].png",
       "https://example.com/[[id]]",
     ]);
-    expect(Object.isFrozen(result.value)).toBe(true);
-    expect(Object.isFrozen(result.value[0])).toBe(true);
-  });
-
-  it("fails closed when the parser throws", () => {
-    const parser = (() => {
-      throw new Error("synthetic parser failure");
-    }) as never;
-    const result = findDestinationRanges("x", parser);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
-    expect(result.error.sourceRange).toMatchObject({
-      start: { offset: 0 },
-      end: { offset: 1 },
-    });
+    expect(Object.isFrozen(result.value.destinations)).toBe(true);
+    expect(Object.isFrozen(result.value.destinations[0])).toBe(true);
   });
 });
 
 describe("mergeSourceRanges", () => {
   it("orders mixed code and destination ranges by start offset", () => {
     const source = "`code` then [ref](https://example.com/[[id]])";
-    const protectedResult = findProtectedRanges(source);
-    const destinationResult = findDestinationRanges(source);
-    expect(protectedResult.ok).toBe(true);
-    expect(destinationResult.ok).toBe(true);
-    if (!protectedResult.ok || !destinationResult.ok) return;
+    const result = findProtectedRanges(source);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
     const merged = mergeSourceRanges(
-      destinationResult.value,
-      protectedResult.value,
+      result.value.destinations,
+      result.value.code,
     );
     expect(
       merged.map((range) => source.slice(range.start.offset, range.end.offset)),

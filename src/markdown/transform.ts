@@ -11,11 +11,7 @@ import {
 import { err, ok, type Result } from "../contracts/result";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 import { parseFrontmatter, type FrontmatterOptions } from "./frontmatter";
-import {
-  findDestinationRanges,
-  findProtectedRanges,
-  mergeSourceRanges,
-} from "./protected-ranges";
+import { findProtectedRanges, mergeSourceRanges } from "./protected-ranges";
 import { validateMdx } from "./validate-mdx";
 
 export interface MarkdownImageReference {
@@ -515,21 +511,10 @@ export async function transformMarkdown(
       parsed.value.bodyOffset + range.end.offset,
     );
   }
-  const ranges = protectedResult.value;
-  const destinationResult = findDestinationRanges(body);
-  if (!destinationResult.ok) {
-    const range = destinationResult.error.sourceRange;
-    /* v8 ignore next -- findDestinationRanges always attaches a safe range to failures. */
-    if (!range) return destinationResult;
-    return unsupported(
-      source,
-      parsed.value.bodyOffset + range.start.offset,
-      parsed.value.bodyOffset + range.end.offset,
-    );
-  }
+  const ranges = protectedResult.value.code;
   const wikilinkExcludedRanges = mergeSourceRanges(
     ranges,
-    destinationResult.value,
+    protectedResult.value.destinations,
   );
   const blocked = firstUnsupported(body, ranges, wikilinkExcludedRanges);
   if (blocked)
