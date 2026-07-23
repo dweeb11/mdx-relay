@@ -22,6 +22,7 @@ import type {
   WorkerWireEvent,
 } from "../../../src/contracts/worker-protocol";
 import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
+import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 import {
   ProcessingClient,
   type ProcessingClientOptions,
@@ -117,6 +118,14 @@ const image = (sourceId: string): WorkerImageInput => ({
   bytes: Uint8Array.of(1, 2, 3, 4).buffer,
 });
 
+const profileSnapshot = (
+  maxDimension = DPW_MIND_NET_V1.images.maxDimension,
+): ValidatedPortableProfileSnapshot =>
+  JSON.stringify({
+    ...DPW_MIND_NET_V1,
+    images: { ...DPW_MIND_NET_V1.images, maxDimension },
+  }) as ValidatedPortableProfileSnapshot;
+
 const request = (
   overrides: Partial<WorkerProcessRequest> = {},
 ): WorkerProcessRequest => ({
@@ -132,7 +141,7 @@ const request = (
     contentSha256: digest("note"),
     bytes: new TextEncoder().encode("# hi\n").buffer,
   },
-  profileSnapshot: "{}" as ValidatedPortableProfileSnapshot,
+  profileSnapshot: profileSnapshot(),
   profileSnapshotSha256: digest("profile"),
   dependencySnapshot: "{}" as CanonicalDependencySnapshot,
   dependencySnapshotSha256: digest("deps"),
@@ -1367,12 +1376,14 @@ describe("ProcessingClient completion decoding", () => {
   });
 
   it("accepts an image exactly at the decoded-pixel limit", async () => {
+    // Decoded work may hit the 40MP ceiling; the output still has to respect
+    // the profile maxDimension (2000), so the sealed edges stay capped.
     const terminal = await completionWith((completion) => {
       const [output] = completion.transformedImages;
       output!.decodedWidth = 8_000;
       output!.decodedHeight = 5_000;
-      output!.width = 8_000;
-      output!.height = 5_000;
+      output!.width = 2_000;
+      output!.height = 1_250;
     });
     expect(terminal.type).toBe("completed");
   });
@@ -1606,8 +1617,33 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
     expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
   });
 
-  it("allows an orientation transpose that preserves the decoded area", async () => {
-    const plan = planOf(["one-source"]);
+  it("rejects a hashed output whose longest edge exceeds profile maxDimension", async () => {
+    // Decoded source is large enough that a no-upscale-only check would accept
+    // 4000px, but the profile caps the longest edge at 2000.
+    const plan = request({ profileSnapshot: profileSnapshot(2_000) });
+    const base = okCompletion();
+    const terminal = await settleWith(plan, {
+      ...base,
+      transformedImages: [
+        {
+          ...base.transformedImages[0]!,
+          sourceId: plan.images[0]!.sourceId,
+          decodedWidth: 4_000,
+          decodedHeight: 3_000,
+          width: 4_000,
+          height: 3_000,
+        },
+      ],
+    });
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("rejects a transposed output that skipped the profile resize", async () => {
+    // Orientation may swap axes, but the codec still resizes to maxDimension.
+    // A 2000x4000 report after a 4000x2000 decode is a hostile skip of resize.
+    const plan = request({ profileSnapshot: profileSnapshot(2_000) });
     const base = okCompletion();
     const terminal = await settleWith(plan, {
       ...base,
@@ -1622,7 +1658,58 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
         },
       ],
     });
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("allows an orientation transpose that respects maxDimension", async () => {
+    // 4000x2000 stored -> orient swaps to 2000x4000 -> resize to 1000x2000.
+    const plan = request({ profileSnapshot: profileSnapshot(2_000) });
+    const base = okCompletion();
+    const terminal = await settleWith(plan, {
+      ...base,
+      transformedImages: [
+        {
+          ...base.transformedImages[0]!,
+          sourceId: plan.images[0]!.sourceId,
+          decodedWidth: 4_000,
+          decodedHeight: 2_000,
+          width: 1_000,
+          height: 2_000,
+        },
+      ],
+    });
     expect(terminal.type).toBe("completed");
+  });
+
+  it("allows a source already within maxDimension without upscaling", async () => {
+    const plan = request({ profileSnapshot: profileSnapshot(2_000) });
+    const base = okCompletion();
+    const terminal = await settleWith(plan, {
+      ...base,
+      transformedImages: [
+        {
+          ...base.transformedImages[0]!,
+          sourceId: plan.images[0]!.sourceId,
+          decodedWidth: 800,
+          decodedHeight: 600,
+          width: 800,
+          height: 600,
+        },
+      ],
+    });
+    expect(terminal.type).toBe("completed");
+  });
+
+  it("rejects completions whose profile snapshot lacks a usable maxDimension", async () => {
+    const plan = request({
+      profileSnapshot: "{}" as ValidatedPortableProfileSnapshot,
+    });
+    const terminal = await settleWith(plan, okCompletion());
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
   });
 
   it("preserves a worker-reported decoded-work blocker verbatim", async () => {
