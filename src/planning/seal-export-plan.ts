@@ -256,8 +256,16 @@ const sealedImageTransformDigests = (
     return undefined;
 
   if (plan.state === "ready") {
-    if (!Array.isArray(plan.actions)) return undefined;
+    const generatedMdx = plan.generatedMdx;
+    if (
+      !Array.isArray(plan.actions) ||
+      !isRecord(generatedMdx) ||
+      typeof generatedMdx.contentSha256 !== "string" ||
+      !Object.prototype.hasOwnProperty.call(blobs, generatedMdx.contentSha256)
+    )
+      return undefined;
     const imageDigests = new Set<string>();
+    let generatedMdxActions = 0;
     for (const action of plan.actions) {
       if (
         !isRecord(action) ||
@@ -269,9 +277,15 @@ const sealedImageTransformDigests = (
       const digest = action.sealedOutput.contentSha256;
       if (!Object.prototype.hasOwnProperty.call(blobs, digest))
         return undefined;
-      if (action.documentOrder > 0) imageDigests.add(digest);
+      if (digest === generatedMdx.contentSha256) {
+        if (action.documentOrder !== 0) return undefined;
+        generatedMdxActions += 1;
+      } else {
+        if (action.documentOrder === 0) return undefined;
+        imageDigests.add(digest);
+      }
     }
-    return imageDigests;
+    return generatedMdxActions === 1 ? imageDigests : undefined;
   }
 
   if (plan.state === "no-changes") {

@@ -904,6 +904,39 @@ describe("verifyStoredExportPlan", () => {
       );
     }
 
+    const swappedDocumentOrder = reseal(envelope, (candidate) => {
+      const actions = candidate.actions as {
+        documentOrder: number;
+        sealedOutput: { contentSha256: string };
+      }[];
+      const mdxAction = actions.find(
+        (action) => action.sealedOutput.contentSha256 === mdxDigest,
+      )!;
+      const imageAction = actions.find(
+        (action) => action.sealedOutput.contentSha256 === imageDigest,
+      )!;
+      [mdxAction.documentOrder, imageAction.documentOrder] = [
+        imageAction.documentOrder,
+        mdxAction.documentOrder,
+      ];
+      (
+        candidate.sourceImages as { transformedOutputSha256: string }[]
+      )[0]!.transformedOutputSha256 = mdxDigest;
+      (
+        candidate.approvalFingerprint as {
+          sourceImages: { transformedOutputSha256: string }[];
+        }
+      ).sourceImages[0]!.transformedOutputSha256 = mdxDigest;
+    });
+    expect(
+      structuralCode(swappedDocumentOrder, envelope.blobBytes),
+      "generated MDX moved to image order",
+    ).toBe(ISSUE_CODES.storageTampered);
+    expect(
+      tamperCode(swappedDocumentOrder, envelope.blobBytes),
+      "generated MDX moved to image order",
+    ).toBe(ISSUE_CODES.storageTampered);
+
     const unchanged = unchangedTargets();
     const noChanges = sealOrThrow({
       priorTargets: unchanged,
