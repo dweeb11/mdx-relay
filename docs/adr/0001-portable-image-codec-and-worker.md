@@ -77,6 +77,25 @@ budgets by terminating the worker, synthesizes blocked events on
 timeout/cancel/crash, and re-verifies byte lengths, hashes, and severity
 channels before branding a `DecodedWorkerEvent`.
 
+### 7. Codecs report decoded source dimensions
+
+`MDX_RELAY_LIMITS.cumulativeDecodedPixels` (400 MP) bounds the decode work one
+plan may perform, but neither side could measure it: `TransformedImage` exposed
+only the *output* size, which resize has already reduced to at most
+2000px on the long edge. `TransformedImage` and `WorkerImageOutput` therefore
+gain `decodedWidth`/`decodedHeight` — the raw decoded source size, before EXIF
+orientation and resize. That is the decode cost actually paid, and it is the
+only honest unit for the budget.
+
+The budget is charged once per canonical source, matching the existing duplicate
+embed dedupe. The worker checks it *before* each decode as well as after, so an
+exhausted budget stops the work instead of reporting it afterwards: eleven
+unique 40 MP sources perform 400 MP and block, never 440 MP. The parent
+recomputes the same total from the reported dimensions using its own request
+hashes, so the worker's accounting is never taken on trust; a disagreement fails
+closed on `DECODED_WORK_LIMIT_EXCEEDED`, and repeat embeds that disagree about
+their decoded size are a malformed report.
+
 ## Determinism and architecture verification
 
 Repeated runs produce byte-identical WebP. Recorded output hashes (WebP q85,

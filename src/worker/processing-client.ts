@@ -76,6 +76,8 @@ const GENERATED_MDX_KEYS = ["contentSha256", "byteLength", "bytes"] as const;
 const IMAGE_OUTPUT_KEYS = [
   "sourceId",
   "decodedMime",
+  "decodedWidth",
+  "decodedHeight",
   "width",
   "height",
   "contentSha256",
@@ -113,6 +115,22 @@ const hasExactKeys = (
 
 const brand = (event: WorkerWireEvent): DecodedWorkerEvent =>
   Object.freeze(event) as DecodedWorkerEvent;
+
+/**
+ * Completion decoding has three outcomes, not two: a trustworthy result, an
+ * unusable payload, and a payload that decodes cleanly but breaks the plan's
+ * cumulative decoded-work budget -- which is a truthful budget blocker, not a
+ * malformed response.
+ */
+type DecodedCompletion =
+  | {
+      readonly kind: "completed";
+      readonly result: MdxRelayResult<WorkerCompletion>;
+    }
+  | { readonly kind: "malformed" }
+  | { readonly kind: "decoded-work-exceeded" };
+
+const MALFORMED: DecodedCompletion = Object.freeze({ kind: "malformed" });
 
 export class ProcessingClient {
   /** Cancels the in-flight run, if any; cleared when a run settles. */
@@ -339,16 +357,22 @@ export class ProcessingClient {
           if (!hasExactKeys(data, ["type", "generationToken", "result"]))
             return failClosed();
           clearTimers();
-          void this.decodeCompletion(request, data.result).then((result) => {
-            settle(
-              result
-                ? (Object.freeze({
-                    type: "completed",
-                    generationToken,
-                    result,
-                  }) as DecodedWorkerEvent)
-                : this.malformed(generationToken, activeSourceId),
-            );
+          void this.decodeCompletion(request, data.result).then((decoded) => {
+            if (decoded.kind === "completed") {
+              settle(
+                Object.freeze({
+                  type: "completed",
+                  generationToken,
+                  result: decoded.result,
+                }) as DecodedWorkerEvent,
+              );
+              return;
+            }
+            if (decoded.kind === "decoded-work-exceeded") {
+              blockWith(createIssue(ISSUE_CODES.decodedWorkLimitExceeded));
+              return;
+            }
+            settle(this.malformed(generationToken, activeSourceId));
           });
           return;
         }
@@ -468,7 +492,15 @@ export class ProcessingClient {
       !SUPPORTED_MIME.has(value.decodedMime) ||
       !isPositiveInteger(value.width) ||
       !isPositiveInteger(value.height) ||
-      value.width * value.height > MDX_RELAY_LIMITS.decodedImagePixels ||
+      !isPositiveInteger(value.decodedWidth) ||
+      !isPositiveInteger(value.decodedHeight) ||
+      value.decodedWidth * value.decodedHeight >
+        MDX_RELAY_LIMITS.decodedImagePixels ||
+      // The codec never upscales. Orientation may transpose the axes, so bound
+      // each output edge by the longer decoded edge and the area by the whole.
+      value.width * value.height > value.decodedWidth * value.decodedHeight ||
+      Math.max(value.width, value.height) >
+        Math.max(value.decodedWidth, value.decodedHeight) ||
       !isPositiveInteger(value.byteLength) ||
       !(await this.verifyOutputBytes(value as never))
     )
@@ -476,12 +508,46 @@ export class ProcessingClient {
     return Object.freeze({
       sourceId: expectedSourceId,
       decodedMime: value.decodedMime as WorkerImageOutput["decodedMime"],
+      decodedWidth: value.decodedWidth,
+      decodedHeight: value.decodedHeight,
       width: value.width,
       height: value.height,
       contentSha256: value.contentSha256 as Sha256Digest,
       byteLength: value.byteLength,
       bytes: value.bytes as ArrayBuffer,
     });
+  }
+
+  /**
+   * Re-derives the plan's cumulative decoded work from the reported decoded
+   * dimensions, charging each canonical source exactly once -- the same dedupe
+   * the worker applies, recomputed here from the request's own content hashes
+   * so the worker's accounting is never taken on trust. Repeat embeds of one
+   * source must agree on their decoded size, or the report is incoherent.
+   *
+   * Each product is already bounded by the per-image decoded-pixel limit and
+   * the sum short-circuits at the cumulative limit, so the running total stays
+   * far inside the safe-integer range.
+   */
+  private exceedsDecodedWorkBudget(
+    request: WorkerProcessRequest,
+    images: readonly WorkerImageOutput[],
+  ): boolean | undefined {
+    const charged = new Map<Sha256Digest, number>();
+    let decodedPixels = 0;
+    for (const [index, image] of images.entries()) {
+      const { contentSha256 } = request.images[index]!;
+      const pixels = image.decodedWidth * image.decodedHeight;
+      const previous = charged.get(contentSha256);
+      if (previous !== undefined) {
+        if (previous !== pixels) return undefined;
+        continue;
+      }
+      charged.set(contentSha256, pixels);
+      decodedPixels += pixels;
+      if (decodedPixels > MDX_RELAY_LIMITS.cumulativeDecodedPixels) return true;
+    }
+    return false;
   }
 
   /**
@@ -492,17 +558,19 @@ export class ProcessingClient {
   private async decodeCompletion(
     request: WorkerProcessRequest,
     value: unknown,
-  ): Promise<MdxRelayResult<WorkerCompletion> | undefined> {
-    if (!isRecord(value)) return undefined;
+  ): Promise<DecodedCompletion> {
+    if (!isRecord(value)) return MALFORMED;
     if (value.ok === false) {
-      if (!hasExactKeys(value, ["ok", "error"])) return undefined;
+      if (!hasExactKeys(value, ["ok", "error"])) return MALFORMED;
       const issues = this.decodeErrorIssues(value.error);
-      return issues ? mdxRelayErr(issues) : undefined;
+      return issues
+        ? { kind: "completed", result: mdxRelayErr(issues) }
+        : MALFORMED;
     }
     if (value.ok !== true || !hasExactKeys(value, ["ok", "value"]))
-      return undefined;
+      return MALFORMED;
     if (!isRecord(value.value) || !hasExactKeys(value.value, COMPLETION_KEYS))
-      return undefined;
+      return MALFORMED;
     const completion = value.value;
     const generatedMdx = await this.decodeGeneratedMdx(completion.generatedMdx);
     // One output per canonical input, in request order: duplicate embeds each
@@ -512,14 +580,14 @@ export class ProcessingClient {
       !Array.isArray(completion.transformedImages) ||
       completion.transformedImages.length !== request.images.length
     )
-      return undefined;
+      return MALFORMED;
     const transformedImages: WorkerImageOutput[] = [];
     for (const [index, raw] of completion.transformedImages.entries()) {
       const image = await this.decodeImage(
         raw,
         request.images[index]!.sourceId,
       );
-      if (!image) return undefined;
+      if (!image) return MALFORMED;
       transformedImages.push(image);
     }
     if (
@@ -529,12 +597,20 @@ export class ProcessingClient {
           isMdxRelayIssue(issue) && issue.severity === "warning",
       )
     )
-      return undefined;
-    return mdxRelayOk<WorkerCompletion>({
-      generatedMdx,
-      transformedImages,
-      warnings: completion.warnings,
-    });
+      return MALFORMED;
+    const exceeded = this.exceedsDecodedWorkBudget(request, transformedImages);
+    if (exceeded === undefined) return MALFORMED;
+    // A worker that completed past the cumulative budget disagrees with the
+    // parent. The parent's independent recount decides, and it fails closed.
+    if (exceeded) return { kind: "decoded-work-exceeded" };
+    return {
+      kind: "completed",
+      result: mdxRelayOk<WorkerCompletion>({
+        generatedMdx,
+        transformedImages,
+        warnings: completion.warnings,
+      }),
+    };
   }
 
   private decodeErrorIssues(

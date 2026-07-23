@@ -22,6 +22,13 @@ export interface ImageTransformParams {
 /** Deterministic WebP output plus the decoded source format and final size. */
 export interface TransformedImage {
   readonly decodedMime: SupportedImageMime;
+  /**
+   * Dimensions of the raw decoded source, before EXIF orientation and resize.
+   * This is the decode cost the caller actually paid, so it -- not the output
+   * size -- is what a cumulative decoded-work budget must be measured in.
+   */
+  readonly decodedWidth: number;
+  readonly decodedHeight: number;
   readonly width: number;
   readonly height: number;
   readonly bytes: ArrayBuffer;

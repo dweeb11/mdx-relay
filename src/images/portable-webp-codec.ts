@@ -149,6 +149,8 @@ export function createPortableWebpCodec(wasm: PortableCodecWasm): ImageCodec {
       return ok(
         Object.freeze({
           decodedMime: mime,
+          decodedWidth: decoded.width,
+          decodedHeight: decoded.height,
           width: resized.width,
           height: resized.height,
           bytes: output.buffer,

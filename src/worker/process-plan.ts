@@ -14,6 +14,7 @@ import type {
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
 import type { ImageCodec } from "../images/image-codec";
+import { MDX_RELAY_LIMITS } from "../core/limits";
 import type { transformMarkdown } from "../markdown/transform";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 
@@ -52,7 +53,11 @@ const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
  *   started -> progress* -> completed(ok | blocker-first error)
  *
  * Cooperative budget checks fail closed between images; the parent enforces the
- * hard wall-clock ceiling by terminating a worker that overruns.
+ * hard wall-clock ceiling by terminating a worker that overruns. Cumulative
+ * decoded work is charged once per canonical source and checked both before and
+ * after each decode, so an exhausted budget stops the work rather than merely
+ * reporting it afterwards. The parent re-verifies the same budget from the
+ * reported decoded dimensions and never trusts this accounting.
  */
 export async function processPlan(
   request: WorkerProcessRequest,
@@ -88,6 +93,8 @@ export async function processPlan(
   const transformedImages: WorkerImageOutput[] = [];
   // Decode/transform each unique source once; reuse the output for repeats.
   const bySource = new Map<Sha256Digest, WorkerImageOutput>();
+  // Cumulative decoded work for the plan, counted once per canonical source.
+  let decodedPixels = 0;
 
   for (let index = 0; index < totalImages; index += 1) {
     const image = request.images[index]!;
@@ -118,8 +125,23 @@ export async function processPlan(
 
     const cached = bySource.get(image.contentSha256);
     if (cached) {
+      // A repeat embed of a canonical source costs no decode, so it spends
+      // none of the cumulative budget.
       transformedImages.push({ ...cached, sourceId: image.sourceId });
       continue;
+    }
+
+    // Checked before the decode, not after: with the budget already spent
+    // there is no headroom for any image, so the work is never performed.
+    if (decodedPixels >= MDX_RELAY_LIMITS.cumulativeDecodedPixels) {
+      deps.post({
+        type: "completed",
+        generationToken,
+        result: blockerResult([
+          createIssue(ISSUE_CODES.decodedWorkLimitExceeded),
+        ]),
+      });
+      return;
     }
 
     const result = await deps.codec.transform(image.bytes, {
@@ -135,9 +157,23 @@ export async function processPlan(
       return;
     }
 
+    decodedPixels += result.value.decodedWidth * result.value.decodedHeight;
+    if (decodedPixels > MDX_RELAY_LIMITS.cumulativeDecodedPixels) {
+      deps.post({
+        type: "completed",
+        generationToken,
+        result: blockerResult([
+          createIssue(ISSUE_CODES.decodedWorkLimitExceeded),
+        ]),
+      });
+      return;
+    }
+
     const output: WorkerImageOutput = {
       sourceId: image.sourceId,
       decodedMime: result.value.decodedMime,
+      decodedWidth: result.value.decodedWidth,
+      decodedHeight: result.value.decodedHeight,
       width: result.value.width,
       height: result.value.height,
       contentSha256: await deps.hash(result.value.bytes),

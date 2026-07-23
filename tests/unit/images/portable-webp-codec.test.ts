@@ -98,6 +98,33 @@ describe("portable WebP codec", () => {
     expect([untouched.value.width, untouched.value.height]).toEqual([16, 12]);
   });
 
+  it("reports the raw decoded source size, before orientation and resize", async () => {
+    // The cumulative decoded-work budget is measured in decode cost, so these
+    // must describe the source the codec actually decoded, not the output.
+    const shrunk = await codec.transform(await imageFixture("wide.png"), {
+      maxDimension: 24,
+      webpQuality: 85,
+    });
+    expect(shrunk.ok).toBe(true);
+    if (!shrunk.ok) return;
+    expect([shrunk.value.decodedWidth, shrunk.value.decodedHeight]).toEqual([
+      48, 12,
+    ]);
+    expect([shrunk.value.width, shrunk.value.height]).toEqual([24, 6]);
+
+    // Orientation 6 transposes the output but not the decoded source.
+    const oriented = await codec.transform(
+      await imageFixture("oriented-6.jpg"),
+      quality85,
+    );
+    expect(oriented.ok).toBe(true);
+    if (!oriented.ok) return;
+    expect([oriented.value.decodedWidth, oriented.value.decodedHeight]).toEqual(
+      [6, 2],
+    );
+    expect([oriented.value.width, oriented.value.height]).toEqual([2, 6]);
+  });
+
   it("blocks unsupported formats with a stable issue code", async () => {
     const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]).buffer;
     const result = await codec.transform(gif, quality85);
