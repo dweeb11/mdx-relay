@@ -59,6 +59,15 @@ required WASM assets are embedded inside `dist/processing.worker.js` and proven
 live by the production-bundle smoke, which instantiates and runs them. The bundle
 allowlist is `{main.js, processing.worker.js}` and rejects any `.node` file.
 
+The smoke starts the built artifact in a real Node worker thread
+(`scripts/bundle-worker-thread.mjs` supplies only the
+`DedicatedWorkerGlobalScope` surface — `addEventListener`/`postMessage` over
+`parentPort` — and stubs nothing else), transfers the note and PNG buffers across
+a genuine structured-clone boundary, and asserts the returned bytes are a real
+WebP container whose sha256 matches the recorded deterministic hash. Loading the
+bundle in the parent process and calling its handler directly would prove none of
+that, so it is not an acceptable substitute.
+
 ### 5. Worker built with the `"worker"` export condition
 
 esbuild builds the worker with `conditions: ["worker"]`. This makes DOM-less
