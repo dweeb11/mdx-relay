@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import type { ImageCodec } from "../../../src/images/image-codec";
+import { readImageHeader } from "../../../src/images/image-metadata";
 import { createPortableWebpCodec } from "../../../src/images/portable-webp-codec";
 import { imageFixture, loadCodecWasm } from "../../helpers/codec-wasm";
 
@@ -123,6 +124,34 @@ describe("portable WebP codec", () => {
       [6, 2],
     );
     expect([oriented.value.width, oriented.value.height]).toEqual([2, 6]);
+  });
+
+  it("decodes exactly the size the bounded header probe predicted", async () => {
+    // The cumulative budget is charged from the header before any decode runs,
+    // so the probe and the real decoder must agree on every supported format.
+    for (const name of [
+      "gradient.png",
+      "gradient.jpg",
+      "gradient.webp",
+      "wide.png",
+      "oriented-6.jpg",
+    ] as const) {
+      const source = await imageFixture(name);
+      const header = readImageHeader(new Uint8Array(source));
+      expect(header.ok, name).toBe(true);
+      if (!header.ok) return;
+      const result = await codec.transform(source, quality85);
+      expect(result.ok, name).toBe(true);
+      if (!result.ok) return;
+      expect(
+        [
+          result.value.decodedMime,
+          result.value.decodedWidth,
+          result.value.decodedHeight,
+        ],
+        name,
+      ).toEqual([header.value.mime, header.value.width, header.value.height]);
+    }
   });
 
   it("blocks unsupported formats with a stable issue code", async () => {
