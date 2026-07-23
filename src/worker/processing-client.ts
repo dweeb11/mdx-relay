@@ -568,23 +568,29 @@ export class ProcessingClient {
    * Each product is already bounded by the per-image decoded-pixel limit and
    * the sum short-circuits at the cumulative limit, so the running total stays
    * far inside the safe-integer range.
+   *
+   * Repeats are compared on their exact decoded edges, not their area: 2x6 and
+   * 3x4 are the same twelve pixels but cannot be the same decode.
    */
   private exceedsDecodedWorkBudget(
     request: WorkerProcessRequest,
     images: readonly WorkerImageOutput[],
   ): boolean | undefined {
-    const charged = new Map<Sha256Digest, number>();
+    const charged = new Map<Sha256Digest, readonly [number, number]>();
     let decodedPixels = 0;
     for (const [index, image] of images.entries()) {
       const { contentSha256 } = request.images[index]!;
-      const pixels = image.decodedWidth * image.decodedHeight;
       const previous = charged.get(contentSha256);
       if (previous !== undefined) {
-        if (previous !== pixels) return undefined;
+        if (
+          previous[0] !== image.decodedWidth ||
+          previous[1] !== image.decodedHeight
+        )
+          return undefined;
         continue;
       }
-      charged.set(contentSha256, pixels);
-      decodedPixels += pixels;
+      charged.set(contentSha256, [image.decodedWidth, image.decodedHeight]);
+      decodedPixels += image.decodedWidth * image.decodedHeight;
       if (decodedPixels > MDX_RELAY_LIMITS.cumulativeDecodedPixels) return true;
     }
     return false;

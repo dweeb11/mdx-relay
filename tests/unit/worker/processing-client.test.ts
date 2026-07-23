@@ -1416,6 +1416,20 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
     expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
   });
 
+  it("rejects repeated sources with equal area but different dimensions", async () => {
+    // One canonical source cannot have decoded as both 2x6 and 3x4. Comparing
+    // only the 12-pixel area accepted the contradiction; the exact edges are
+    // what the dedupe claim actually asserts.
+    const plan = planOf(["one-source", "one-source"]);
+    const terminal = await settleWith(
+      plan,
+      completionFor(plan, (index) => (index === 0 ? [2, 6] : [3, 4])),
+    );
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
   it("rejects decoded dimensions that are absent, zero, or absurd", async () => {
     for (const decoded of [
       [0, 5_000],
