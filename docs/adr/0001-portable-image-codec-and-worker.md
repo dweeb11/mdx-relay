@@ -97,13 +97,55 @@ orientation and resize. That is the decode cost actually paid, and it is the
 only honest unit for the budget.
 
 The budget is charged once per canonical source, matching the existing duplicate
-embed dedupe. The worker checks it *before* each decode as well as after, so an
-exhausted budget stops the work instead of reporting it afterwards: eleven
-unique 40 MP sources perform 400 MP and block, never 440 MP. The parent
-recomputes the same total from the reported dimensions using its own request
-hashes, so the worker's accounting is never taken on trust; a disagreement fails
-closed on `DECODED_WORK_LIMIT_EXCEEDED`, and repeat embeds that disagree about
-their decoded size are a malformed report.
+embed dedupe. The parent recomputes the same total from the reported dimensions
+using its own request hashes, so the worker's accounting is never taken on
+trust; a disagreement fails closed on `DECODED_WORK_LIMIT_EXCEEDED`. Repeat
+embeds are compared on their exact decoded edges rather than their area — 2x6
+and 3x4 are the same twelve pixels but cannot be the same decode — and any
+disagreement is a malformed report.
+
+### 8. A bounded header probe makes the cumulative cap a real work cap
+
+Charging the budget from the *reported* decoded size can only ever report an
+overshoot after paying for it: the worker decoded the next source, added its
+cost, and blocked afterwards, so a plan could perform up to 440 MP against a
+400 MP limit. A cap enforced after the work is a reporting threshold, not a cap.
+
+`readImageHeader` (`src/images/image-metadata.ts`) therefore probes only
+fixed-position container header fields — PNG `IHDR`, the JPEG `SOFn` frame
+header, and the WebP `VP8 `/`VP8L`/`VP8X` chunks — and never touches pixel data.
+It returns the raw stored size, which is exactly the `decodedWidth`/
+`decodedHeight` a decode reports, so the cost of a source is known before the
+decode that would spend it. Truncated, malformed, and unrecognized inputs fail
+closed on the same `UNSUPPORTED_IMAGE`/`IMAGE_DECODE_FAILED` channels the codec
+uses.
+
+Consequences in `processPlan`: dedupe by parent-owned content hash happens
+before probing *and* charging; each edge is bounded against the 40 MP per-image
+ceiling before the two are multiplied, so a header declaring `0xFFFFFFFF` edges
+cannot overflow the charge; a source that would push the plan past 400 MP is
+refused without doing its work; and a decoder that disagrees with the header it
+was charged for fails the plan closed rather than leaving the accounting wrong.
+The probe is proven against the real WASM codec for every fixture, including the
+EXIF-orientation-6 source whose output is transposed but whose decode is not.
+
+### 9. The parent enforces the emission order and bounds its own verification
+
+`started -> progress* -> terminal` is a trust boundary, not documentation.
+`progress` is the only wire signal that arms the per-image clock, so a
+completion trusted without it buys image work no timer ever governed. A success
+completion is accepted only after `started` and exactly all expected image
+progress events in ascending order; zero-image plans still require `started`; an
+error arm may still stop at the image that failed, because it carries no trusted
+output. Anything arriving after an accepted terminal fails closed.
+
+Parent-side hash verification is asynchronous and is itself a place the run can
+hang or throw. The per-image clock stops when the completion arrives — image
+work really is over and must not govern parent hashing — but the plan deadline
+stays armed through verification as the hard bound, and a digest that rejects
+settles once on the redacted `MALFORMED_WORKER_RESPONSE` channel. `process()`
+never rejects, and both paths release the worker through the single `settle`
+funnel.
 
 ## Determinism and architecture verification
 
