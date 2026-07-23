@@ -23,6 +23,7 @@ import type {
 import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
 import {
   ProcessingClient,
+  type ProcessingClientOptions,
   type WorkerLike,
 } from "../../../src/worker/processing-client";
 
@@ -138,7 +139,7 @@ const request = (
   ...overrides,
 });
 
-const setup = () => {
+const setup = (overrides: Partial<ProcessingClientOptions> = {}) => {
   const worker = new FakeWorker();
   const scheduler = new Scheduler();
   const client = new ProcessingClient({
@@ -147,6 +148,7 @@ const setup = () => {
     now: () => 1_000,
     setTimer: scheduler.set,
     clearTimer: scheduler.clear,
+    ...overrides,
   });
   return { worker, scheduler, client };
 };
@@ -167,6 +169,34 @@ const progressEvent = (generationToken: GenerationToken): WorkerWireEvent => ({
   elapsedMs: 10,
   remainingPlanBudgetMs: 599_000,
 });
+
+/**
+ * The frozen order is `started -> progress* -> terminal`, and a trusted
+ * completion may only follow the whole sequence. Tests that care about the
+ * *payload* drive the valid lifecycle first so the payload is what is on trial.
+ */
+const emitLifecycle = (
+  worker: FakeWorker,
+  plan: WorkerProcessRequest = request(),
+): void => {
+  worker.emit({
+    type: "started",
+    generationToken: plan.generationToken,
+    imageCount: plan.images.length,
+  });
+  plan.images.forEach((input, imageIndex) => {
+    worker.emit({
+      type: "progress",
+      generationToken: plan.generationToken,
+      sourceId: input.sourceId,
+      imageIndex,
+      completedImages: imageIndex,
+      totalImages: plan.images.length,
+      elapsedMs: 10,
+      remainingPlanBudgetMs: 599_000,
+    });
+  });
+};
 
 const okCompletion = () => {
   const mdxBytes = new TextEncoder().encode("# hi\n").buffer;
@@ -239,15 +269,17 @@ describe("ProcessingClient", () => {
     worker.emit(
       completedEvent({ ok: true, value: okCompletion() }, otherToken),
     );
+    emitLifecycle(worker);
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     const terminal = await done;
-    expect(seen).toEqual([]);
+    expect(seen).toEqual(["started", "progress"]);
     expect(terminal.type).toBe("completed");
   });
 
   it("discards late events after the run has settled", async () => {
     const { worker, client } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     await done;
     expect(worker.onmessage).toBeNull();
@@ -308,6 +340,7 @@ describe("ProcessingClient", () => {
   it("rejects a completion whose declared hash does not verify", async () => {
     const { client, worker } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     const completion = okCompletion();
     completion.generatedMdx.contentSha256 = digest("tampered");
     worker.emit(completedEvent({ ok: true, value: completion }));
@@ -320,6 +353,7 @@ describe("ProcessingClient", () => {
   it("rejects a completion whose byte length disagrees with its buffer", async () => {
     const { client, worker } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     const completion = okCompletion();
     completion.generatedMdx.byteLength += 1;
     worker.emit(completedEvent({ ok: true, value: completion }));
@@ -332,6 +366,7 @@ describe("ProcessingClient", () => {
   it("preserves a worker blocker-first error completion", async () => {
     const { client, worker } = setup();
     const done = client.process(request());
+    worker.emit(startedEvent(token));
     worker.emit(
       completedEvent({
         ok: false,
@@ -349,6 +384,7 @@ describe("ProcessingClient", () => {
   it("rejects a completion warning channel that carries a blocker", async () => {
     const { client, worker } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     const completion = okCompletion();
     (completion.warnings as unknown[]) = [createIssue(ISSUE_CODES.invalidMdx)];
     worker.emit(completedEvent({ ok: true, value: completion }));
@@ -372,16 +408,20 @@ describe("ProcessingClient terminal cleanup", () => {
     const { worker, scheduler, client } = harness;
     const done = client.process(request());
     if (name === "completed") {
+      emitLifecycle(worker);
       worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     } else if (name === "worker-blocked") {
+      worker.emit(startedEvent(token));
       worker.emit({
         type: "blocked",
         generationToken: token,
         issues: [createIssue(ISSUE_CODES.imageDecodeFailed)],
       });
     } else if (name === "worker-cancelled") {
+      worker.emit(startedEvent(token));
       worker.emit({ type: "cancelled", generationToken: token });
     } else if (name === "malformed") {
+      emitLifecycle(worker);
       worker.emit(completedEvent({ ok: true, value: { nonsense: true } }));
     } else if (name === "crash") {
       worker.emitError();
@@ -427,6 +467,7 @@ describe("ProcessingClient terminal cleanup", () => {
   it("does not double-settle or double-terminate when cancel races a completion", async () => {
     const { worker, client, scheduler } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     // The completion decode is async; cancel lands while it is still pending.
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     client.cancel();
@@ -439,6 +480,7 @@ describe("ProcessingClient terminal cleanup", () => {
   it("ignores a crash and a cancel that arrive after the run settled", async () => {
     const { worker, client } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     await done;
     expect(worker.terminateCount).toBe(1);
@@ -452,6 +494,7 @@ describe("ProcessingClient terminal cleanup", () => {
     const { worker, client, scheduler } = setup();
     const done = client.process(request());
     const planTimer = scheduler.peekSoonest();
+    emitLifecycle(worker);
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     await done;
     expect(worker.terminateCount).toBe(1);
@@ -496,6 +539,7 @@ describe("ProcessingClient transfer list", () => {
     const transfer = worker.posted[0]!.transfer!;
     expect(transfer).toHaveLength(1);
     expect(new Set(transfer).size).toBe(transfer.length);
+    emitLifecycle(worker, req);
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     expect((await done).type).toBe("completed");
   });
@@ -636,6 +680,271 @@ describe("ProcessingClient per-image budget", () => {
     expect(terminal.type).toBe("blocked");
     if (terminal.type !== "blocked") return;
     expect(terminal.issues[0].code).toBe(ISSUE_CODES.planBudgetExhausted);
+  });
+});
+
+/**
+ * `started -> progress* -> terminal` is the frozen worker contract, and the
+ * per-image clock is armed from `progress` alone. A completion trusted without
+ * that sequence therefore buys image work that no timer ever governed, so the
+ * order is enforced, not assumed: a success completion is trusted only after
+ * `started` and every expected image progress event.
+ */
+describe("ProcessingClient completion lifecycle", () => {
+  const twoImages = (): WorkerProcessRequest =>
+    request({ images: [image("a"), image("b")] });
+
+  const okFor = (plan: WorkerProcessRequest): unknown => {
+    const base = okCompletion();
+    return {
+      ...base,
+      transformedImages: plan.images.map((input) => ({
+        ...base.transformedImages[0]!,
+        sourceId: input.sourceId,
+      })),
+    };
+  };
+
+  const expectFailsClosed = async (
+    plan: WorkerProcessRequest,
+    drive: (worker: FakeWorker) => void,
+  ): Promise<void> => {
+    const { worker, client } = setup();
+    const done = client.process(plan);
+    drive(worker);
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    expect(worker.terminateCount).toBe(1);
+  };
+
+  it("fails closed on a completion that arrives without started", async () => {
+    const plan = request();
+    await expectFailsClosed(plan, (worker) => {
+      worker.emit(completedEvent({ ok: true, value: okFor(plan) }));
+    });
+  });
+
+  it("fails closed on a completion that skips every image progress", async () => {
+    const plan = twoImages();
+    await expectFailsClosed(plan, (worker) => {
+      worker.emit({ type: "started", generationToken: token, imageCount: 2 });
+      worker.emit(completedEvent({ ok: true, value: okFor(plan) }));
+    });
+  });
+
+  it("fails closed on a completion that skips the last image progress", async () => {
+    const plan = twoImages();
+    await expectFailsClosed(plan, (worker) => {
+      worker.emit({ type: "started", generationToken: token, imageCount: 2 });
+      worker.emit({
+        type: "progress",
+        generationToken: token,
+        sourceId: "a",
+        imageIndex: 0,
+        completedImages: 0,
+        totalImages: 2,
+        elapsedMs: 10,
+        remainingPlanBudgetMs: 599_000,
+      });
+      worker.emit(completedEvent({ ok: true, value: okFor(plan) }));
+    });
+  });
+
+  it("fails closed on a zero-image completion that arrives without started", async () => {
+    const plan = request({ images: [] });
+    await expectFailsClosed(plan, (worker) => {
+      worker.emit(
+        completedEvent({
+          ok: true,
+          value: { ...okCompletion(), transformedImages: [] },
+        }),
+      );
+    });
+  });
+
+  it("accepts a zero-image completion once started has been seen", async () => {
+    const { worker, client } = setup();
+    const plan = request({ images: [] });
+    const done = client.process(plan);
+    worker.emit({ type: "started", generationToken: token, imageCount: 0 });
+    worker.emit(
+      completedEvent({
+        ok: true,
+        value: { ...okCompletion(), transformedImages: [] },
+      }),
+    );
+    expect((await done).type).toBe("completed");
+  });
+
+  it.each([
+    ["blocked", { type: "blocked", generationToken: token, issues: [] }],
+    ["cancelled", { type: "cancelled", generationToken: token }],
+  ])(
+    "fails closed on a %s event that arrives without started",
+    async (name, event) => {
+      const shaped =
+        name === "blocked"
+          ? { ...event, issues: [createIssue(ISSUE_CODES.imageDecodeFailed)] }
+          : event;
+      await expectFailsClosed(request(), (worker) => {
+        worker.emit(shaped);
+      });
+    },
+  );
+
+  it("fails closed on any event that follows an accepted completion", async () => {
+    const { worker, client } = setup();
+    const plan = request();
+    const done = client.process(plan);
+    emitLifecycle(worker, plan);
+    worker.emit(completedEvent({ ok: true, value: okFor(plan) }));
+    // Lands while the completion's hash verification is still in flight.
+    worker.emit(progressEvent(token));
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("still accepts an error completion that stops at the failing image", async () => {
+    // The worker legitimately abandons a plan mid-way: `progress*` is
+    // zero-or-more, and an error arm carries no trusted output to gate.
+    const { worker, client } = setup();
+    const plan = twoImages();
+    const done = client.process(plan);
+    worker.emit({ type: "started", generationToken: token, imageCount: 2 });
+    worker.emit({
+      type: "progress",
+      generationToken: token,
+      sourceId: "a",
+      imageIndex: 0,
+      completedImages: 0,
+      totalImages: 2,
+      elapsedMs: 10,
+      remainingPlanBudgetMs: 599_000,
+    });
+    worker.emit(
+      completedEvent({
+        ok: false,
+        error: [createIssue(ISSUE_CODES.imageDecodeFailed)],
+      }),
+    );
+    const terminal = await done;
+    expect(terminal.type).toBe("completed");
+    if (terminal.type !== "completed") return;
+    expect(terminal.result.ok).toBe(false);
+  });
+});
+
+/**
+ * Parent-side hash verification is asynchronous, so it is a place the run can
+ * hang or throw. Clearing every timer before verifying left a never-resolving
+ * digest with no clock at all -- a pending promise and an unterminated worker
+ * owning an embedded WASM bundle -- and a rejected digest escaped as an
+ * unhandled rejection from an API documented never to reject.
+ */
+describe("ProcessingClient completion verification", () => {
+  const hangingHash = (): (() => Promise<Sha256Digest>) => {
+    return () => new Promise<Sha256Digest>(() => undefined);
+  };
+
+  it("drops the per-image clock but keeps the plan deadline while verifying", async () => {
+    const { worker, scheduler, client } = setup({ hash: hangingHash() });
+    const plan = request();
+    const done = client.process(plan);
+    emitLifecycle(worker, plan);
+    expect(scheduler.size).toBe(2); // plan budget + the in-flight image
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    // Image work is over, so the per-image timer must not govern verification;
+    // the plan deadline is the hard bound that remains.
+    expect(scheduler.size).toBe(1);
+    scheduler.fireSoonest();
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.planBudgetExhausted);
+  });
+
+  it("settles once and releases the worker when the digest never resolves", async () => {
+    const { worker, scheduler, client } = setup({ hash: hangingHash() });
+    const plan = request();
+    const done = client.process(plan);
+    emitLifecycle(worker, plan);
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    scheduler.fireSoonest();
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+    expect(worker.onmessage).toBeNull();
+  });
+
+  it("settles once with a redacted blocker when the digest rejects", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const { worker, scheduler, client } = setup({
+        hash: async () => {
+          await Promise.resolve();
+          throw new Error("digest unavailable");
+        },
+      });
+      const plan = request();
+      const done = client.process(plan);
+      emitLifecycle(worker, plan);
+      worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+      const terminal = await done;
+      expect(terminal.type).toBe("blocked");
+      if (terminal.type !== "blocked") return;
+      expect(terminal.issues).toHaveLength(1);
+      expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+      expect(terminal.issues[0].displayDetails).toEqual({
+        summary: terminal.issues[0].displayDetails.summary,
+      });
+      expect(worker.terminateCount).toBe(1);
+      expect(scheduler.size).toBe(0);
+      // Nothing escaped the never-reject contract.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
+  it("never rejects when the digest rejects", async () => {
+    const { worker, client } = setup({
+      hash: () => Promise.reject(new Error("digest unavailable")),
+    });
+    const plan = request();
+    const promise = client.process(plan);
+    emitLifecycle(worker, plan);
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    await expect(promise).resolves.toMatchObject({ type: "blocked" });
+  });
+
+  it("ignores a digest that resolves after the deadline already settled", async () => {
+    let release: ((digest: Sha256Digest) => void) | undefined;
+    const { worker, scheduler, client } = setup({
+      hash: () =>
+        new Promise<Sha256Digest>((resolve) => {
+          release = resolve;
+        }),
+    });
+    const plan = request();
+    const done = client.process(plan);
+    emitLifecycle(worker, plan);
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    scheduler.fireSoonest();
+    expect((await done).type).toBe("blocked");
+    release?.(digest("late"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(worker.terminateCount).toBe(1);
   });
 });
 
@@ -847,10 +1156,10 @@ describe("ProcessingClient wire-event validation", () => {
       generationToken: otherToken,
       junk: CANARY,
     });
-    worker.emit(startedEvent(token));
+    emitLifecycle(worker);
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     expect((await done).type).toBe("completed");
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(2);
   });
 
   it("delivers only the contract fields of a valid progress event", async () => {
@@ -893,6 +1202,7 @@ describe("ProcessingClient completion decoding", () => {
   ) => {
     const { worker, client } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     const completion = okCompletion();
     const value = mutate(completion) ?? completion;
     worker.emit(completedEvent({ ok: true, value }));
@@ -992,6 +1302,7 @@ describe("ProcessingClient completion decoding", () => {
   it("rejects an extra field on the result envelope", async () => {
     const { worker, client } = setup();
     const done = client.process(request());
+    emitLifecycle(worker);
     worker.emit(
       completedEvent({ ok: true, value: okCompletion(), secret: CANARY }),
     );
@@ -1051,6 +1362,7 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
   ) => {
     const { worker, client } = setup();
     const done = client.process(plan);
+    emitLifecycle(worker, plan);
     worker.emit(completedEvent({ ok: true, value: completion }));
     return done;
   };
@@ -1168,6 +1480,7 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
   it("preserves a worker-reported decoded-work blocker verbatim", async () => {
     const { worker, client } = setup();
     const done = client.process(request());
+    worker.emit(startedEvent(token));
     worker.emit(
       completedEvent({
         ok: false,

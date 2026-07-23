@@ -28,17 +28,22 @@ import type {
  *   ------------------------                 -----------------------------
  *   started/progress/completed  --wire-->    generation-token gate
  *                                            drop stale/late events
+ *                                            started -> progress* -> terminal
  *                                            plan + per-image budget timers
  *                                            decode+verify -> brand event
  *                                            every terminal -> terminate()
  *
  * The client owns one generation. It never trusts a structured-cloned wire
  * event: bytes, hashes, and severity channels are re-verified before the event
- * is branded a DecodedWorkerEvent. Timeout, cancellation, or a crash yields a
- * parent-synthesized blocked event. Events whose generation token does not
- * match the active request are discarded. Because each run owns a worker
- * carrying an embedded WASM bundle, every terminal path releases it exactly
- * once through the single `settle` funnel.
+ * is branded a DecodedWorkerEvent. The emission order is enforced rather than
+ * assumed -- a success completion is trusted only after `started` and every
+ * expected image progress event, because `progress` is what arms the per-image
+ * clock. Timeout, cancellation, a crash, or an unverifiable digest yields a
+ * parent-synthesized blocked event; the plan deadline stays armed through
+ * completion verification so a stalled digest cannot hang the run. Events whose
+ * generation token does not match the active request are discarded. Because
+ * each run owns a worker carrying an embedded WASM bundle, every terminal path
+ * releases it exactly once through the single `settle` funnel.
  */
 
 /** The subset of the Worker interface the client depends on. */
@@ -237,12 +242,15 @@ export class ProcessingClient {
         settle(this.malformed(generationToken, activeSourceId));
       };
 
-      // Sequential-emission state. The worker's contract is exactly one
-      // `started`, then one `progress` per image in ascending index order, so
-      // repeats, gaps, and out-of-order events are all detectable here.
+      // Sequential-emission state for the frozen
+      // `started -> progress* -> terminal` order: exactly one `started`, then
+      // one `progress` per image in ascending index order, then one terminal
+      // event. Repeats, gaps, out-of-order events, and anything following the
+      // terminal are all detectable here.
       const totalImages = request.images.length;
       let startedSeen = false;
       let nextImageIndex = 0;
+      let terminalSeen = false;
 
       worker.onmessage = (message: MessageEvent): void => {
         if (settled) return;
@@ -252,6 +260,9 @@ export class ProcessingClient {
         if (!isRecord(data)) return failClosed();
         // Stale generation and late events are silently discarded.
         if (data.generationToken !== generationToken) return;
+        // A terminal event was accepted; verification may still be running, but
+        // the protocol is over, so anything further is off-contract.
+        if (terminalSeen) return failClosed();
 
         if (data.type === "started") {
           if (
@@ -276,6 +287,11 @@ export class ProcessingClient {
           return;
         }
 
+        // Every remaining arm belongs after `started`. A worker that skips it
+        // skips the whole sequence the per-image clock is armed from, so the
+        // run fails closed instead of trusting an unmeasured plan.
+        if (!startedSeen) return failClosed();
+
         if (data.type === "progress") {
           const planWindowMs = Math.max(
             0,
@@ -283,7 +299,6 @@ export class ProcessingClient {
           );
           const expected = request.images[nextImageIndex];
           if (
-            !startedSeen ||
             expected === undefined ||
             !hasExactKeys(data, PROGRESS_KEYS) ||
             data.totalImages !== totalImages ||
@@ -356,24 +371,49 @@ export class ProcessingClient {
         if (data.type === "completed") {
           if (!hasExactKeys(data, ["type", "generationToken", "result"]))
             return failClosed();
-          clearTimers();
-          void this.decodeCompletion(request, data.result).then((decoded) => {
-            if (decoded.kind === "completed") {
-              settle(
-                Object.freeze({
-                  type: "completed",
-                  generationToken,
-                  result: decoded.result,
-                }) as DecodedWorkerEvent,
-              );
-              return;
-            }
-            if (decoded.kind === "decoded-work-exceeded") {
-              blockWith(createIssue(ISSUE_CODES.decodedWorkLimitExceeded));
-              return;
-            }
-            settle(this.malformed(generationToken, activeSourceId));
-          });
+          // Only the success arm carries output the host will trust, and it is
+          // trustworthy only if every expected image announced its own work
+          // first -- otherwise the worker decoded images no per-image timer
+          // ever governed. An error arm legitimately stops at the image that
+          // failed, so `progress*` stays zero-or-more there.
+          if (
+            isRecord(data.result) &&
+            data.result.ok === true &&
+            nextImageIndex !== totalImages
+          )
+            return failClosed();
+          terminalSeen = true;
+          // Image work is over, so the per-image clock stops. The plan deadline
+          // deliberately stays armed: parent-side hash verification is async
+          // and can stall, and this is the hard bound that ends the run and
+          // releases the worker when it does.
+          clearImageTimer();
+          void this.decodeCompletion(request, data.result).then(
+            (decoded) => {
+              if (decoded.kind === "completed") {
+                settle(
+                  Object.freeze({
+                    type: "completed",
+                    generationToken,
+                    result: decoded.result,
+                  }) as DecodedWorkerEvent,
+                );
+                return;
+              }
+              if (decoded.kind === "decoded-work-exceeded") {
+                blockWith(createIssue(ISSUE_CODES.decodedWorkLimitExceeded));
+                return;
+              }
+              settle(this.malformed(generationToken, activeSourceId));
+            },
+            // A digest that throws leaves the response unverifiable. process()
+            // never rejects, so this settles once on the redacted channel and
+            // releases the worker rather than escaping as an unhandled
+            // rejection.
+            () => {
+              settle(this.malformed(generationToken, activeSourceId));
+            },
+          );
           return;
         }
 
