@@ -236,19 +236,67 @@ const hasVerifiedBlobs = (
   });
 };
 
-/** Every source image must name one of the verified sealed blob digests. */
+/**
+ * Digests of sealed blobs that a source-image transform may name.
+ *
+ * Blob-map membership alone is not enough: a forged transform can point at the
+ * generated MDX or commit-message blob and still recompute a matching plan ID.
+ * Ready plans bind transforms to image-embed actions (`documentOrder > 0`); the
+ * order-0 action is always the document MDX. No-changes plans have no actions,
+ * so only the commit-message digest is excluded from the verified blob keys.
+ */
+const sealedImageTransformDigests = (
+  plan: Record<string, unknown>,
+): Set<string> | undefined => {
+  const blobs = plan.blobs;
+  const commitMessage = plan.commitMessage;
+  if (!isRecord(blobs) || !isRecord(commitMessage)) return undefined;
+  if (typeof commitMessage.contentSha256 !== "string") return undefined;
+  if (!Object.prototype.hasOwnProperty.call(blobs, commitMessage.contentSha256))
+    return undefined;
+
+  if (plan.state === "ready") {
+    if (!Array.isArray(plan.actions)) return undefined;
+    const imageDigests = new Set<string>();
+    for (const action of plan.actions) {
+      if (
+        !isRecord(action) ||
+        !isRecord(action.sealedOutput) ||
+        typeof action.documentOrder !== "number" ||
+        typeof action.sealedOutput.contentSha256 !== "string"
+      )
+        return undefined;
+      const digest = action.sealedOutput.contentSha256;
+      if (!Object.prototype.hasOwnProperty.call(blobs, digest))
+        return undefined;
+      if (action.documentOrder > 0) imageDigests.add(digest);
+    }
+    return imageDigests;
+  }
+
+  if (plan.state === "no-changes") {
+    const digests = new Set(Object.keys(blobs));
+    digests.delete(commitMessage.contentSha256);
+    return digests;
+  }
+
+  return undefined;
+};
+
+/** Every source image must name a verified sealed image-transform blob. */
 const hasVerifiedSourceImageTransforms = (
   plan: Record<string, unknown>,
 ): boolean => {
   const sourceImages = plan.sourceImages;
-  const blobs = plan.blobs;
-  if (!Array.isArray(sourceImages) || !isRecord(blobs)) return false;
-  const verifiedBlobDigests = new Set(Object.keys(blobs));
-  return sourceImages.every(
-    (image: Record<string, unknown>) =>
+  const allowed = sealedImageTransformDigests(plan);
+  if (!Array.isArray(sourceImages) || allowed === undefined) return false;
+  return sourceImages.every((image) => {
+    if (!isRecord(image)) return false;
+    return (
       typeof image.transformedOutputSha256 === "string" &&
-      verifiedBlobDigests.has(image.transformedOutputSha256),
-  );
+      allowed.has(image.transformedOutputSha256)
+    );
+  });
 };
 
 /** Every duplicated capture field must equal the approval fingerprint exactly. */

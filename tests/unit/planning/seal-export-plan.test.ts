@@ -860,26 +860,72 @@ describe("verifyStoredExportPlan", () => {
       );
   });
 
-  it("rejects transformed source digests that do not name a verified blob", () => {
+  it("rejects transformed source digests that do not name a sealed image blob", () => {
     const envelope = sealOrThrow();
-    const forged = reseal(envelope, (plan) => {
-      (
-        plan.sourceImages as { transformedOutputSha256: string }[]
-      )[0]!.transformedOutputSha256 = digest("forged-transform");
-      (
-        plan.approvalFingerprint as {
-          sourceImages: { transformedOutputSha256: string }[];
-        }
-      ).sourceImages[0]!.transformedOutputSha256 = (
-        plan.sourceImages as { transformedOutputSha256: string }[]
-      )[0]!.transformedOutputSha256;
+    expect(envelope.state).toBe("ready");
+    const plan = envelope.plan as {
+      actions: readonly {
+        documentOrder: number;
+        sealedOutput: { contentSha256: string };
+      }[];
+      commitMessage: { contentSha256: string };
+      sourceImages: readonly { transformedOutputSha256: string }[];
+    };
+    const imageDigest = plan.sourceImages[0]!.transformedOutputSha256;
+    const mdxDigest = plan.actions.find((action) => action.documentOrder === 0)!
+      .sealedOutput.contentSha256;
+    const commitDigest = plan.commitMessage.contentSha256;
+    expect(mdxDigest).not.toBe(imageDigest);
+    expect(commitDigest).not.toBe(imageDigest);
+
+    const forgeTransform = (sealed: typeof envelope, digestValue: string) =>
+      reseal(sealed, (candidate) => {
+        (
+          candidate.sourceImages as { transformedOutputSha256: string }[]
+        )[0]!.transformedOutputSha256 = digestValue;
+        (
+          candidate.approvalFingerprint as {
+            sourceImages: { transformedOutputSha256: string }[];
+          }
+        ).sourceImages[0]!.transformedOutputSha256 = digestValue;
+      });
+
+    for (const [label, digestValue] of [
+      ["a forged digest", digest("forged-transform")],
+      ["the generated MDX blob", mdxDigest],
+      ["the commit-message blob", commitDigest],
+    ] as const) {
+      const forged = forgeTransform(envelope, digestValue);
+      expect(structuralCode(forged, envelope.blobBytes), label).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+      expect(tamperCode(forged, envelope.blobBytes), label).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+    }
+
+    const unchanged = unchangedTargets();
+    const noChanges = sealOrThrow({
+      priorTargets: unchanged,
+      finalCapture: { ...buildInput().finalCapture, targets: unchanged },
     });
-    expect(structuralCode(forged, envelope.blobBytes)).toBe(
-      ISSUE_CODES.storageTampered,
-    );
-    expect(tamperCode(forged, envelope.blobBytes)).toBe(
-      ISSUE_CODES.storageTampered,
-    );
+    expect(noChanges.state).toBe("no-changes");
+    for (const [label, digestValue] of [
+      ["no-changes forged digest", digest("forged-transform")],
+      [
+        "no-changes commit-message blob",
+        (noChanges.plan as { commitMessage: { contentSha256: string } })
+          .commitMessage.contentSha256,
+      ],
+    ] as const) {
+      const forged = forgeTransform(noChanges, digestValue);
+      expect(structuralCode(forged, noChanges.blobBytes), label).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+      expect(tamperCode(forged, noChanges.blobBytes), label).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+    }
   });
 
   it("applies the whole frozen structural gate to no-changes plans", () => {
