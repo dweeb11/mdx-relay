@@ -1,0 +1,7 @@
+# Byte-exact regression fixtures. The Markdown transform contract is about
+# preserving source bytes outside approved edits, so reformatting these silently
+# re-baselines the very thing they prove. Never let a formatter touch them.
+tests/fixtures/
+
+dist/
+coverage/

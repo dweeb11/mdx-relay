@@ -83,6 +83,13 @@ export interface WorkerGeneratedMdxOutput {
 export interface WorkerImageOutput {
   readonly sourceId: string;
   readonly decodedMime: "image/png" | "image/jpeg" | "image/webp";
+  /**
+   * Raw decoded source dimensions, before orientation and resize. Reported so
+   * the parent can independently re-verify the cumulative decoded-work budget
+   * instead of trusting the worker's own accounting.
+   */
+  readonly decodedWidth: number;
+  readonly decodedHeight: number;
   readonly width: number;
   readonly height: number;
   readonly contentSha256: Sha256Digest;
