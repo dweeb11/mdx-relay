@@ -147,6 +147,26 @@ settles once on the redacted `MALFORMED_WORKER_RESPONSE` channel. `process()`
 never rejects, and both paths release the worker through the single `settle`
 funnel.
 
+### 10. The never-throw boundary spans construction and cancellation
+
+"`process()` never throws or rejects" and "`cancel()` never throws" are the
+client's whole public contract, so neither may depend on a call that can fail.
+Two did. `createWorker()` ran before any handler, timer, or cancel hook existed,
+so a constructor that throws — a missing bundle, a blocked worker URL — escaped
+`process()` synchronously. And `cancel()` posted `cancel-generation` before
+settling, so a `postMessage` that throws escaped `cancel()` and left the run
+pending with its timers armed and its worker alive.
+
+Both now fail closed toward the parent's decision. A construction failure yields
+a parent-synthesized, redacted `WORKER_CRASHED` blocker — the same channel as an
+unpostable request — carrying neither the thrown message nor its stack; there is
+no worker to terminate and no cancel hook is installed, so the client stays
+clean for the next generation. Cancellation is parent-authoritative: the posted
+message only lets a healthy worker stop early, and termination is what actually
+ends the run, so a refused post is swallowed and the run still settles exactly
+once on the canonical `cancelled` event through `settle`. Repeat cancels and
+late events after either failure stay harmless.
+
 ## Determinism and architecture verification
 
 Repeated runs produce byte-identical WebP. Recorded output hashes (WebP q85,

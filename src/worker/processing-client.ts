@@ -44,6 +44,11 @@ import type {
  * generation token does not match the active request are discarded. Because
  * each run owns a worker carrying an embedded WASM bundle, every terminal path
  * releases it exactly once through the single `settle` funnel.
+ *
+ * The never-throw boundary spans the whole surface, not just the message path:
+ * a worker that cannot even be constructed is itself the redacted worker-crash
+ * blocker, and a cancellation the worker cannot be told about still ends the
+ * run, because the parent -- not the wire -- owns that decision.
  */
 
 /** The subset of the Worker interface the client depends on. */
@@ -146,7 +151,8 @@ export class ProcessingClient {
   /**
    * Cancels the active generation: posts cancel-generation, terminates the
    * worker, and settles the in-flight run with a cancelled event. No-op when
-   * nothing is running.
+   * nothing is running. Never throws: the post to the worker is a courtesy the
+   * parent's decision does not depend on.
    */
   cancel(): void {
     this.cancelActive?.();
@@ -162,7 +168,25 @@ export class ProcessingClient {
     onProgress?: (event: DecodedWorkerEvent) => void,
   ): Promise<DecodedWorkerEvent> {
     const { generationToken } = request;
-    const worker = this.options.createWorker();
+    let worker: WorkerLike;
+    try {
+      worker = this.options.createWorker();
+    } catch {
+      // Construction is the one step that runs before any handler, timer, or
+      // cancel hook exists, so a throw here -- a missing bundle, a blocked
+      // worker URL -- has no worker to terminate and no run to clean up. The
+      // boundary still owes a terminal event, so it fails closed on the same
+      // redacted worker-crash channel as an unpostable request. No active
+      // generation is installed, so cancel() stays a no-op and the next
+      // process() call starts from a clean client.
+      return Promise.resolve(
+        brand({
+          type: "blocked",
+          generationToken,
+          issues: [createIssue(ISSUE_CODES.workerCrashed)],
+        }),
+      );
+    }
     return new Promise<DecodedWorkerEvent>((resolve) => {
       let settled = false;
       let activeSourceId: string | undefined;
@@ -216,7 +240,16 @@ export class ProcessingClient {
 
       const cancelThisRun = (): void => {
         if (settled) return;
-        worker.postMessage({ type: "cancel-generation", generationToken });
+        // Cancellation is parent-authoritative. The wire notification only
+        // lets a healthy worker stop early; the run ends either way, because
+        // settle() terminates the worker. A post that throws must therefore
+        // not defeat the decision by leaving the run pending with its timers
+        // armed and its worker -- and embedded WASM bundle -- alive.
+        try {
+          worker.postMessage({ type: "cancel-generation", generationToken });
+        } catch {
+          // Nothing to report: the worker learns of it by being terminated.
+        }
         settle(brand({ type: "cancelled", generationToken }));
       };
 

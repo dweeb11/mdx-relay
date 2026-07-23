@@ -15,6 +15,7 @@ import {
   type SafePathLabel,
 } from "../../../src/contracts/issues";
 import type {
+  DecodedWorkerEvent,
   WorkerImageInput,
   WorkerProcessRequest,
   WorkerRequest,
@@ -504,6 +505,74 @@ describe("ProcessingClient terminal cleanup", () => {
   });
 });
 
+/**
+ * Cancellation is parent-authoritative: the posted `cancel-generation` only
+ * lets a healthy worker stop early, and termination is what actually ends the
+ * run. The reviewed head let that courtesy decide the outcome -- a
+ * `postMessage` that threw escaped `cancel()`, leaving the promise pending, the
+ * plan and per-image timers armed, and the worker and its embedded WASM bundle
+ * alive.
+ */
+describe("ProcessingClient cancellation", () => {
+  /** A worker that accepts the plan but refuses the cancellation message. */
+  class RefusingWorker extends FakeWorker {
+    override postMessage(
+      message: WorkerRequest,
+      transfer?: Transferable[],
+    ): void {
+      if (message.type === "cancel-generation")
+        throw new Error("cancel post failed");
+      super.postMessage(message, transfer);
+    }
+  }
+
+  const started = () => {
+    const worker = new RefusingWorker();
+    const harness = setup({ createWorker: () => worker });
+    const done = harness.client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit(progressEvent(token)); // the per-image timer is armed too
+    expect(harness.scheduler.size).toBe(2);
+    return { ...harness, worker, done };
+  };
+
+  it("settles cancelled even when the cancel message cannot be posted", async () => {
+    const { worker, scheduler, client, done } = started();
+    expect(() => client.cancel()).not.toThrow();
+    const terminal = await done;
+    expect(terminal.type).toBe("cancelled");
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+    expect(worker.onmessage).toBeNull();
+    expect(worker.onerror).toBeNull();
+    expect(worker.onmessageerror).toBeNull();
+    // The plan request was accepted; the refused cancellation never queued.
+    expect(worker.posted).toHaveLength(1);
+    expect(worker.posted[0]!.message.type).toBe("process-plan");
+  });
+
+  it("stays idempotent when cancel is called again after a failed post", async () => {
+    const { worker, client, done } = started();
+    client.cancel();
+    expect(() => client.cancel()).not.toThrow();
+    expect(() => client.cancel()).not.toThrow();
+    expect((await done).type).toBe("cancelled");
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("ignores a late terminal event after a failed cancel post", async () => {
+    const { worker, scheduler, client, done } = started();
+    client.cancel();
+    const terminal = await done;
+    expect(() =>
+      worker.emit(completedEvent({ ok: true, value: okCompletion() })),
+    ).not.toThrow();
+    expect(terminal.type).toBe("cancelled");
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+  });
+});
+
 const detached = (): ArrayBuffer => {
   const buffer = Uint8Array.of(1, 2, 3, 4).buffer;
   structuredClone(buffer, { transfer: [buffer] });
@@ -601,6 +670,71 @@ describe("ProcessingClient transfer list", () => {
     };
     const promise = client.process(req);
     await expect(promise).resolves.toMatchObject({ type: "blocked" });
+  });
+});
+
+/**
+ * `createWorker()` runs before any handler, timer, or cancel hook exists, and
+ * the reviewed head called it unguarded: a constructor that throws -- a missing
+ * bundle, a blocked worker URL -- escaped `process()` synchronously, from an
+ * API documented never to throw or reject. There is no worker to terminate, but
+ * the boundary still owes one redacted terminal event and a client fit for the
+ * next generation.
+ */
+describe("ProcessingClient worker construction", () => {
+  const CONSTRUCTOR_MESSAGE = "worker constructor failed";
+  const refuse = (): WorkerLike => {
+    throw new Error(CONSTRUCTOR_MESSAGE);
+  };
+
+  it("returns one redacted terminal blocker when the constructor throws", async () => {
+    const { scheduler, client } = setup({ createWorker: refuse });
+    const terminal = await client.process(request());
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues).toHaveLength(1);
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.workerCrashed);
+    expect(terminal.issues[0].displayDetails).toEqual({
+      summary: terminal.issues[0].displayDetails.summary,
+    });
+    // Neither the thrown message nor its stack may reach the host.
+    expect(JSON.stringify(terminal)).not.toContain(CONSTRUCTOR_MESSAGE);
+    expect(JSON.stringify(terminal)).not.toContain("processing-client");
+    expect(scheduler.size).toBe(0);
+  });
+
+  it("never throws or rejects when the constructor throws", async () => {
+    const { client } = setup({ createWorker: refuse });
+    let promise: Promise<DecodedWorkerEvent> | undefined;
+    expect(() => {
+      promise = client.process(request());
+    }).not.toThrow();
+    await expect(promise!).resolves.toMatchObject({ type: "blocked" });
+  });
+
+  it("installs no active generation, so a later cancel stays a no-op", async () => {
+    const { client } = setup({ createWorker: refuse });
+    await client.process(request());
+    expect(() => client.cancel()).not.toThrow();
+  });
+
+  it("still runs a later generation after a construction failure", async () => {
+    const worker = new FakeWorker();
+    let attempts = 0;
+    const { client, scheduler } = setup({
+      createWorker: () => {
+        attempts += 1;
+        if (attempts === 1) refuse();
+        return worker;
+      },
+    });
+    expect((await client.process(request())).type).toBe("blocked");
+    const done = client.process(request());
+    emitLifecycle(worker);
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    expect((await done).type).toBe("completed");
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
   });
 });
 
