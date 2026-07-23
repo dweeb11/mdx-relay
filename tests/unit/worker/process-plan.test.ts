@@ -229,6 +229,78 @@ describe("processPlan", () => {
     expect(result.error[0]!.code).toBe(ISSUE_CODES.invalidProfile);
   });
 
+  it.each([
+    ["empty object", "{}"],
+    ["array", "[]"],
+    ["primitive string", '"profile"'],
+    ["primitive number", "42"],
+    ["primitive null", "null"],
+    ["primitive boolean", "true"],
+    [
+      "missing fields",
+      JSON.stringify({ schemaVersion: 1, id: "dpw-mind-net-v1" }),
+    ],
+    [
+      "extra top-level field",
+      JSON.stringify({ ...DPW_MIND_NET_V1, extra: true }),
+    ],
+    [
+      "out-of-range maxDimension",
+      JSON.stringify({
+        ...DPW_MIND_NET_V1,
+        images: { ...DPW_MIND_NET_V1.images, maxDimension: 0 },
+      }),
+    ],
+    [
+      "out-of-range webpQuality",
+      JSON.stringify({
+        ...DPW_MIND_NET_V1,
+        images: { ...DPW_MIND_NET_V1.images, webpQuality: 101 },
+      }),
+    ],
+  ])(
+    "blocks invalid profile snapshot shape (%s) as INVALID_PROFILE",
+    async (_label, snapshot) => {
+      const transformMarkdown = vi.fn(async () => ok(markdownResult));
+      const h = harness({
+        transformMarkdown:
+          transformMarkdown as unknown as ProcessPlanDeps["transformMarkdown"],
+      });
+      await processPlan(
+        request([image("a", "aa")], {
+          profileSnapshot: snapshot as ValidatedPortableProfileSnapshot,
+        }),
+        h.deps,
+      );
+      expect(types(h.posts)).toEqual(["started", "completed"]);
+      const result = (
+        h.posts.at(-1)!.event as {
+          result: { ok: boolean; error: { code: string }[] };
+        }
+      ).result;
+      expect(result.ok).toBe(false);
+      expect(result.error[0]!.code).toBe(ISSUE_CODES.invalidProfile);
+      expect(transformMarkdown).not.toHaveBeenCalled();
+      expect(h.transformCalls()).toBe(0);
+    },
+  );
+
+  it("accepts a valid frozen portable profile unchanged", async () => {
+    const seen: unknown[] = [];
+    const h = harness({
+      transformMarkdown: (async (_note, profile) => {
+        seen.push(profile);
+        return ok(markdownResult);
+      }) as ProcessPlanDeps["transformMarkdown"],
+    });
+    await processPlan(request([]), h.deps);
+    const result = (h.posts.at(-1)!.event as { result: { ok: boolean } })
+      .result;
+    expect(result.ok).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual(DPW_MIND_NET_V1);
+  });
+
   it("fails closed with PLAN_BUDGET_EXHAUSTED when the deadline has passed", async () => {
     const h = harness({ now: () => 700_000 });
     await processPlan(request([image("a", "aa")]), h.deps);

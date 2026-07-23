@@ -17,6 +17,7 @@ import type { ImageCodec } from "../images/image-codec";
 import type { ImageHeader } from "../images/image-metadata";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import type { transformMarkdown } from "../markdown/transform";
+import { parsePortableProfile } from "../profiles/parse-portable-profile";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 
 /** Injected collaborators so the worker core is unit-testable without a real Worker. */
@@ -42,9 +43,14 @@ export interface ProcessPlanDeps {
   readonly now: () => number;
 }
 
+/**
+ * Parse then validate against the canonical portable-profile schema. Any JSON
+ * that is not an exact `PortableProfileV1` fails closed as undefined so the
+ * worker can emit `INVALID_PROFILE` instead of throwing on missing fields.
+ */
 const parseProfile = (snapshot: string): PortableProfileV1 | undefined => {
   try {
-    return JSON.parse(snapshot) as PortableProfileV1;
+    return parsePortableProfile(JSON.parse(snapshot) as unknown);
   } catch {
     return undefined;
   }
