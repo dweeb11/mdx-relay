@@ -12,6 +12,7 @@ import {
   mdxRelayOk,
   type MdxRelayResult,
 } from "../contracts/result";
+import { MDX_RELAY_LIMITS } from "../core/limits";
 import type {
   DecodedWorkerEvent,
   WorkerCompletion,
@@ -59,16 +60,59 @@ export interface ProcessingClientOptions {
 }
 
 const SUPPORTED_MIME = new Set(["image/png", "image/jpeg", "image/webp"]);
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+
+const PROGRESS_KEYS = [
+  "type",
+  "generationToken",
+  "sourceId",
+  "imageIndex",
+  "completedImages",
+  "totalImages",
+  "elapsedMs",
+  "remainingPlanBudgetMs",
+] as const;
+const GENERATED_MDX_KEYS = ["contentSha256", "byteLength", "bytes"] as const;
+const IMAGE_OUTPUT_KEYS = [
+  "sourceId",
+  "decodedMime",
+  "width",
+  "height",
+  "contentSha256",
+  "byteLength",
+  "bytes",
+] as const;
+const COMPLETION_KEYS = [
+  "generatedMdx",
+  "transformedImages",
+  "warnings",
+] as const;
 
 const isArrayBuffer = (value: unknown): value is ArrayBuffer =>
   value instanceof ArrayBuffer;
 const isNonnegativeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isInteger(value) && value >= 0;
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const isPositiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object";
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const isDigest = (value: unknown): value is string =>
+  typeof value === "string" && SHA256_DIGEST.test(value);
+
+/**
+ * Exact-shape gate: the payload must carry these own keys and nothing else.
+ * Unknown extras are rejected rather than ignored, so a hostile worker cannot
+ * smuggle fields past the decoder and into host state or the UI.
+ */
+const hasExactKeys = (
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean =>
+  Object.keys(value).length === keys.length &&
+  keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 
 const brand = (event: WorkerWireEvent): DecodedWorkerEvent =>
-  event as DecodedWorkerEvent;
+  Object.freeze(event) as DecodedWorkerEvent;
 
 export class ProcessingClient {
   /** Cancels the in-flight run, if any; cleared when a run settles. */
@@ -171,44 +215,131 @@ export class ProcessingClient {
         settle(this.malformed(generationToken, activeSourceId));
       };
 
+      const failClosed = (): void => {
+        settle(this.malformed(generationToken, activeSourceId));
+      };
+
+      // Sequential-emission state. The worker's contract is exactly one
+      // `started`, then one `progress` per image in ascending index order, so
+      // repeats, gaps, and out-of-order events are all detectable here.
+      const totalImages = request.images.length;
+      let startedSeen = false;
+      let nextImageIndex = 0;
+
       worker.onmessage = (message: MessageEvent): void => {
         if (settled) return;
-        const data = message.data as WorkerWireEvent | undefined;
+        const data: unknown = message.data;
+        // Wire data that is not even an object cannot be matched to a
+        // generation, so it is malformed rather than merely stale.
+        if (!isRecord(data)) return failClosed();
         // Stale generation and late events are silently discarded.
-        if (!isRecord(data) || data.generationToken !== generationToken) return;
+        if (data.generationToken !== generationToken) return;
 
         if (data.type === "started") {
+          if (
+            startedSeen ||
+            nextImageIndex > 0 ||
+            !hasExactKeys(data, ["type", "generationToken", "imageCount"]) ||
+            data.imageCount !== totalImages
+          )
+            return failClosed();
+          startedSeen = true;
+          // Rebuilt from parent-owned values: no wire field is reflected on.
           // `started` precedes the Markdown transform and carries no image, so
           // it must not start the per-image clock. Until the first `progress`
           // the plan budget is the only clock that can expire.
-          onProgress?.(brand(data));
-          return;
-        }
-        if (data.type === "progress") {
-          activeSourceId =
-            typeof data.sourceId === "string" ? data.sourceId : activeSourceId;
-          // Emitted immediately before this image's decode/encode: the one
-          // wire signal that marks image-work start.
-          armImageTimer();
-          onProgress?.(brand(data));
-          return;
-        }
-        if (data.type === "cancelled") {
-          settle(brand(data));
-          return;
-        }
-        if (data.type === "blocked") {
-          const issues = this.decodeBlockerIssues(data.issues);
-          settle(
-            issues
-              ? brand({ type: "blocked", generationToken, issues })
-              : this.malformed(generationToken, activeSourceId),
+          onProgress?.(
+            brand({
+              type: "started",
+              generationToken,
+              imageCount: totalImages,
+            }),
           );
           return;
         }
+
+        if (data.type === "progress") {
+          const planWindowMs = Math.max(
+            0,
+            request.planDeadlineMs - request.planStartedAtMs,
+          );
+          const expected = request.images[nextImageIndex];
+          if (
+            !startedSeen ||
+            expected === undefined ||
+            !hasExactKeys(data, PROGRESS_KEYS) ||
+            data.totalImages !== totalImages ||
+            data.imageIndex !== nextImageIndex ||
+            data.completedImages !== nextImageIndex ||
+            data.sourceId !== expected.sourceId ||
+            !isNonnegativeInteger(data.elapsedMs) ||
+            !isNonnegativeInteger(data.remainingPlanBudgetMs) ||
+            data.remainingPlanBudgetMs > planWindowMs
+          )
+            return failClosed();
+          const { elapsedMs, remainingPlanBudgetMs } = data;
+          activeSourceId = expected.sourceId;
+          nextImageIndex += 1;
+          // Emitted immediately before this image's decode/encode: the one
+          // wire signal that marks image-work start.
+          armImageTimer();
+          onProgress?.(
+            brand({
+              type: "progress",
+              generationToken,
+              sourceId: expected.sourceId,
+              imageIndex: data.imageIndex,
+              completedImages: data.completedImages,
+              totalImages,
+              elapsedMs,
+              remainingPlanBudgetMs,
+            }),
+          );
+          return;
+        }
+
+        if (data.type === "cancelled") {
+          if (!hasExactKeys(data, ["type", "generationToken"]))
+            return failClosed();
+          settle(brand({ type: "cancelled", generationToken }));
+          return;
+        }
+
+        if (data.type === "blocked") {
+          const optional =
+            "activeSourceId" in data ? (["activeSourceId"] as const) : [];
+          const issues = this.decodeBlockerIssues(data.issues);
+          if (
+            !hasExactKeys(data, [
+              "type",
+              "generationToken",
+              "issues",
+              ...optional,
+            ]) ||
+            (optional.length > 0 &&
+              !request.images.some(
+                (candidate) => candidate.sourceId === data.activeSourceId,
+              )) ||
+            !issues
+          )
+            return failClosed();
+          // The parent owns the active-source diagnostic, not the wire event.
+          settle(
+            brand({
+              type: "blocked",
+              generationToken,
+              ...(activeSourceId !== undefined ? { activeSourceId } : {}),
+              issues,
+            }),
+          );
+          return;
+        }
+
         if (data.type === "completed") {
+          if (!hasExactKeys(data, ["type", "generationToken", "result"]))
+            return failClosed();
           clearTimers();
-          void this.decodeCompletion(data.result).then((result) => {
+          void this.decodeCompletion(request, data.result).then((result) => {
             settle(
               result
                 ? (Object.freeze({
@@ -219,7 +350,11 @@ export class ProcessingClient {
                 : this.malformed(generationToken, activeSourceId),
             );
           });
+          return;
         }
+
+        // Any other `type` is outside the protocol and fails closed.
+        return failClosed();
       };
 
       this.cancelActive = cancelThisRun;
@@ -278,14 +413,20 @@ export class ProcessingClient {
     return value as [BlockerIssue, ...BlockerIssue[]];
   }
 
+  /**
+   * Byte-channel check shared by every output: a canonical digest, a byte
+   * length that is a safe integer within the locked per-output ceiling, a real
+   * ArrayBuffer of exactly that length, and a hash that re-computes.
+   */
   private async verifyOutputBytes(output: {
     contentSha256: unknown;
     byteLength: unknown;
     bytes: unknown;
   }): Promise<boolean> {
     if (
-      typeof output.contentSha256 !== "string" ||
+      !isDigest(output.contentSha256) ||
       !isNonnegativeInteger(output.byteLength) ||
+      output.byteLength > MDX_RELAY_LIMITS.sealedOutputBytes ||
       !isArrayBuffer(output.bytes) ||
       output.bytes.byteLength !== output.byteLength
     )
@@ -296,37 +437,51 @@ export class ProcessingClient {
   private async decodeGeneratedMdx(
     value: unknown,
   ): Promise<WorkerGeneratedMdxOutput | undefined> {
-    if (!isRecord(value) || !(await this.verifyOutputBytes(value as never)))
-      return undefined;
-    return {
-      contentSha256: value.contentSha256 as Sha256Digest,
-      byteLength: value.byteLength as number,
-      bytes: value.bytes as ArrayBuffer,
-    };
-  }
-
-  private async decodeImage(
-    value: unknown,
-  ): Promise<WorkerImageOutput | undefined> {
     if (
       !isRecord(value) ||
-      typeof value.sourceId !== "string" ||
-      typeof value.decodedMime !== "string" ||
-      !SUPPORTED_MIME.has(value.decodedMime) ||
-      !isNonnegativeInteger(value.width) ||
-      !isNonnegativeInteger(value.height) ||
+      !hasExactKeys(value, GENERATED_MDX_KEYS) ||
       !(await this.verifyOutputBytes(value as never))
     )
       return undefined;
-    return {
-      sourceId: value.sourceId,
+    return Object.freeze({
+      contentSha256: value.contentSha256 as Sha256Digest,
+      byteLength: value.byteLength as number,
+      bytes: value.bytes as ArrayBuffer,
+    });
+  }
+
+  /**
+   * Dimensions are a trust boundary, not a display detail: downstream sealing
+   * sizes buffers from them. They must be positive safe integers whose product
+   * stays inside the locked per-image decoded-pixel ceiling, so neither a zero
+   * nor an absurd forged dimension can cross into host state.
+   */
+  private async decodeImage(
+    value: unknown,
+    expectedSourceId: string,
+  ): Promise<WorkerImageOutput | undefined> {
+    if (
+      !isRecord(value) ||
+      !hasExactKeys(value, IMAGE_OUTPUT_KEYS) ||
+      value.sourceId !== expectedSourceId ||
+      typeof value.decodedMime !== "string" ||
+      !SUPPORTED_MIME.has(value.decodedMime) ||
+      !isPositiveInteger(value.width) ||
+      !isPositiveInteger(value.height) ||
+      value.width * value.height > MDX_RELAY_LIMITS.decodedImagePixels ||
+      !isPositiveInteger(value.byteLength) ||
+      !(await this.verifyOutputBytes(value as never))
+    )
+      return undefined;
+    return Object.freeze({
+      sourceId: expectedSourceId,
       decodedMime: value.decodedMime as WorkerImageOutput["decodedMime"],
       width: value.width,
       height: value.height,
       contentSha256: value.contentSha256 as Sha256Digest,
-      byteLength: value.byteLength as number,
+      byteLength: value.byteLength,
       bytes: value.bytes as ArrayBuffer,
-    };
+    });
   }
 
   /**
@@ -335,21 +490,35 @@ export class ProcessingClient {
    * channels. Returns undefined for any malformed payload.
    */
   private async decodeCompletion(
+    request: WorkerProcessRequest,
     value: unknown,
   ): Promise<MdxRelayResult<WorkerCompletion> | undefined> {
     if (!isRecord(value)) return undefined;
     if (value.ok === false) {
+      if (!hasExactKeys(value, ["ok", "error"])) return undefined;
       const issues = this.decodeErrorIssues(value.error);
       return issues ? mdxRelayErr(issues) : undefined;
     }
-    if (value.ok !== true || !isRecord(value.value)) return undefined;
+    if (value.ok !== true || !hasExactKeys(value, ["ok", "value"]))
+      return undefined;
+    if (!isRecord(value.value) || !hasExactKeys(value.value, COMPLETION_KEYS))
+      return undefined;
     const completion = value.value;
     const generatedMdx = await this.decodeGeneratedMdx(completion.generatedMdx);
-    if (!generatedMdx || !Array.isArray(completion.transformedImages))
+    // One output per canonical input, in request order: duplicate embeds each
+    // keep their own entry, so a short, padded, or reordered list is malformed.
+    if (
+      !generatedMdx ||
+      !Array.isArray(completion.transformedImages) ||
+      completion.transformedImages.length !== request.images.length
+    )
       return undefined;
     const transformedImages: WorkerImageOutput[] = [];
-    for (const raw of completion.transformedImages) {
-      const image = await this.decodeImage(raw);
+    for (const [index, raw] of completion.transformedImages.entries()) {
+      const image = await this.decodeImage(
+        raw,
+        request.images[index]!.sourceId,
+      );
       if (!image) return undefined;
       transformedImages.push(image);
     }

@@ -10,6 +10,7 @@ date: 26.07.22
 summary: A synthetic note for public regression testing
 title: A Public Example’s Contract
 ---
+
 Opening bytes stay exactly here.
 
 See [[Publishing Guide|the guide]] and [[Reference]].
@@ -21,10 +22,10 @@ A comparison is < 5 and an object is {safe}.
 
 Inline code stays `[[linked]] {raw} < 2`.
 
-~~~md
+```md
 > [!warning] untouched
-![[inside.png]]
-~~~
+> ![[inside.png]]
+```
 
     [[indented]] {raw}
 

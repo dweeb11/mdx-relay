@@ -280,6 +280,7 @@ describe("ProcessingClient", () => {
   it("terminates and blocks when an image exceeds its timeout", async () => {
     const { worker, scheduler, client } = setup();
     const done = client.process(request());
+    worker.emit(startedEvent(token));
     worker.emit(progressEvent(token)); // arms the per-image timer for source "a"
     scheduler.fireSoonest(); // image timeout (60s) fires before the plan (600s)
     const terminal = await done;
@@ -386,6 +387,7 @@ describe("ProcessingClient terminal cleanup", () => {
     } else if (name === "plan-timeout") {
       scheduler.fireSoonest();
     } else if (name === "image-timeout") {
+      worker.emit(startedEvent(token));
       worker.emit(progressEvent(token));
       scheduler.fireSoonest();
     } else if (name === "messageerror") {
@@ -631,5 +633,366 @@ describe("ProcessingClient per-image budget", () => {
     expect(terminal.type).toBe("blocked");
     if (terminal.type !== "blocked") return;
     expect(terminal.issues[0].code).toBe(ISSUE_CODES.planBudgetExhausted);
+  });
+});
+
+const CANARY = "CANARY_MUST_NOT_REACH_THE_HOST";
+
+/**
+ * Wire data is untrusted. The reviewed head branded `started`, `progress`, and
+ * `cancelled` after only an object check plus a generation-token match, so a
+ * hostile or buggy worker could hand the host negative counts, wrong types, and
+ * extra fields, and the client reflected them verbatim into onProgress.
+ */
+describe("ProcessingClient wire-event validation", () => {
+  const emitOne = async (
+    event: unknown,
+    before: readonly unknown[] = [],
+  ): Promise<{
+    terminal: Awaited<ReturnType<ProcessingClient["process"]>>;
+    seen: unknown[];
+    worker: FakeWorker;
+  }> => {
+    const { worker, client } = setup();
+    const seen: unknown[] = [];
+    const done = client.process(request(), (progress) => seen.push(progress));
+    for (const earlier of before) worker.emit(earlier);
+    worker.emit(event);
+    return { terminal: await done, seen, worker };
+  };
+
+  const expectMalformed = async (
+    event: unknown,
+    before: readonly unknown[] = [],
+  ): Promise<void> => {
+    const { terminal, seen, worker } = await emitOne(event, before);
+    expect(terminal.type, JSON.stringify(event)).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    // Nothing malformed is ever delivered as progress, and the run is closed.
+    expect(seen.filter((value) => value !== undefined)).toHaveLength(
+      before.length,
+    );
+    expect(worker.terminateCount).toBe(1);
+    expect(JSON.stringify(terminal)).not.toContain(CANARY);
+  };
+
+  it("rejects the forged progress event and never reflects its fields", async () => {
+    const forged = {
+      type: "progress",
+      generationToken: token,
+      sourceId: "not-a-planned-source",
+      imageIndex: -5,
+      completedImages: -1,
+      totalImages: "many",
+      elapsedMs: Number.NaN,
+      remainingPlanBudgetMs: -999,
+      secret: CANARY,
+    };
+    const { terminal, seen } = await emitOne(forged, [startedEvent(token)]);
+    expect(seen.map((event) => (event as { type: string }).type)).toEqual([
+      "started",
+    ]);
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    expect(JSON.stringify(terminal)).not.toContain(CANARY);
+    expect(JSON.stringify(seen)).not.toContain(CANARY);
+  });
+
+  it.each([
+    ["missing imageCount", { type: "started", generationToken: token }],
+    [
+      "negative imageCount",
+      { type: "started", generationToken: token, imageCount: -3 },
+    ],
+    [
+      "fractional imageCount",
+      { type: "started", generationToken: token, imageCount: 1.5 },
+    ],
+    [
+      "imageCount disagreeing with the plan",
+      { type: "started", generationToken: token, imageCount: 7 },
+    ],
+    [
+      "an extra field",
+      {
+        type: "started",
+        generationToken: token,
+        imageCount: 1,
+        secret: CANARY,
+      },
+    ],
+  ])("fails closed on a started event with %s", async (_name, event) => {
+    await expectMalformed(event);
+  });
+
+  it.each([
+    ["a repeated started event", [startedEvent(token), startedEvent(token)]],
+    ["progress before started", [progressEvent(token)]],
+    [
+      "a repeated progress index",
+      [startedEvent(token), progressEvent(token), progressEvent(token)],
+    ],
+    [
+      "a skipped progress index",
+      [
+        startedEvent(token),
+        {
+          ...(progressEvent(token) as object),
+          imageIndex: 1,
+          completedImages: 1,
+        },
+      ],
+    ],
+  ])("fails closed on %s", async (_name, events) => {
+    const emitted = [...events];
+    await expectMalformed(emitted.pop(), emitted);
+  });
+
+  it.each([
+    [
+      "completedImages disagreeing with imageIndex",
+      { ...(progressEvent(token) as object), completedImages: 5 },
+    ],
+    [
+      "totalImages disagreeing with the plan",
+      { ...(progressEvent(token) as object), totalImages: 9 },
+    ],
+    [
+      "an unplanned sourceId",
+      { ...(progressEvent(token) as object), sourceId: CANARY },
+    ],
+    [
+      "a remaining budget beyond the plan window",
+      {
+        ...(progressEvent(token) as object),
+        remainingPlanBudgetMs: 900_000,
+      },
+    ],
+    [
+      "an infinite elapsed time",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: Number.POSITIVE_INFINITY,
+      },
+    ],
+  ])("fails closed on a progress event with %s", async (_name, event) => {
+    await expectMalformed(event, [startedEvent(token)]);
+  });
+
+  it.each([
+    [
+      "cancelled",
+      { type: "cancelled", generationToken: token, secret: CANARY },
+    ],
+    [
+      "blocked",
+      {
+        type: "blocked",
+        generationToken: token,
+        issues: [createIssue(ISSUE_CODES.workerCrashed)],
+        secret: CANARY,
+      },
+    ],
+    [
+      "completed",
+      {
+        type: "completed",
+        generationToken: token,
+        result: { ok: true, value: okCompletion() },
+        secret: CANARY,
+      },
+    ],
+  ])(
+    "fails closed on a %s event carrying an extra field",
+    async (_n, event) => {
+      await expectMalformed(event);
+    },
+  );
+
+  it.each([
+    ["an unknown type", { type: "surprise", generationToken: token }],
+    ["a missing type", { generationToken: token }],
+    ["a non-string type", { type: 7, generationToken: token }],
+  ])("fails closed on %s", async (_name, event) => {
+    await expectMalformed(event);
+  });
+
+  it.each([
+    ["a bare string", "completed"],
+    ["a number", 7],
+    ["null", null],
+    ["an array", [{ type: "completed", generationToken: token }]],
+  ])("fails closed on wire data that is %s", async (_name, data) => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(data);
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("still silently discards a stale generation instead of failing closed", async () => {
+    const { worker, client } = setup();
+    const seen: unknown[] = [];
+    const done = client.process(request(), (event) => seen.push(event));
+    // Malformed *and* stale: the token gate wins, so this is simply dropped.
+    worker.emit({
+      type: "progress",
+      generationToken: otherToken,
+      junk: CANARY,
+    });
+    worker.emit(startedEvent(token));
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    expect((await done).type).toBe("completed");
+    expect(seen).toHaveLength(1);
+  });
+
+  it("delivers only the contract fields of a valid progress event", async () => {
+    const { worker, client } = setup();
+    const seen: Record<string, unknown>[] = [];
+    const done = client.process(request(), (event) =>
+      seen.push(event as unknown as Record<string, unknown>),
+    );
+    worker.emit(startedEvent(token));
+    worker.emit(progressEvent(token));
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    await done;
+    expect(Object.keys(seen[0]!).sort()).toEqual([
+      "generationToken",
+      "imageCount",
+      "type",
+    ]);
+    expect(Object.keys(seen[1]!).sort()).toEqual([
+      "completedImages",
+      "elapsedMs",
+      "generationToken",
+      "imageIndex",
+      "remainingPlanBudgetMs",
+      "sourceId",
+      "totalImages",
+      "type",
+    ]);
+    expect(Object.isFrozen(seen[1])).toBe(true);
+  });
+});
+
+/**
+ * Completion dimensions are a trust boundary: sealing sizes buffers from them.
+ * The reviewed head accepted any nonnegative integer, so a zero or a forged
+ * four-billion-pixel edge crossed into host state as a verified completion.
+ */
+describe("ProcessingClient completion decoding", () => {
+  const completionWith = async (
+    mutate: (completion: ReturnType<typeof okCompletion>) => unknown,
+  ) => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    const completion = okCompletion();
+    const value = mutate(completion) ?? completion;
+    worker.emit(completedEvent({ ok: true, value }));
+    return done;
+  };
+
+  const expectRejected = async (
+    mutate: (completion: ReturnType<typeof okCompletion>) => unknown,
+  ): Promise<void> => {
+    const terminal = await completionWith(mutate);
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  };
+
+  it.each([
+    ["zero width", 0, 4],
+    ["zero height", 4, 0],
+    ["a negative width", -1, 4],
+    ["a fractional height", 4, 2.5],
+    ["an absurd forged height", 1, 4_000_000_000],
+    ["a product beyond the decoded-pixel limit", 40_000, 1_001],
+  ])("rejects a completion image with %s", async (_name, width, height) => {
+    await expectRejected((completion) => {
+      completion.transformedImages[0]!.width = width;
+      completion.transformedImages[0]!.height = height;
+    });
+  });
+
+  it("accepts an image exactly at the decoded-pixel limit", async () => {
+    const terminal = await completionWith((completion) => {
+      completion.transformedImages[0]!.width = 8_000;
+      completion.transformedImages[0]!.height = 5_000;
+    });
+    expect(terminal.type).toBe("completed");
+  });
+
+  it("rejects an output byte length beyond the sealed-output limit", async () => {
+    await expectRejected((completion) => {
+      completion.generatedMdx.byteLength = 26_214_401;
+    });
+  });
+
+  it("rejects a non-canonical content digest", async () => {
+    await expectRejected((completion) => {
+      completion.generatedMdx.contentSha256 = digest("not-hex");
+    });
+  });
+
+  it("rejects a transformed-image list that does not match the request", async () => {
+    await expectRejected((completion) => {
+      completion.transformedImages = [];
+    });
+    await expectRejected((completion) => {
+      completion.transformedImages = [
+        completion.transformedImages[0]!,
+        completion.transformedImages[0]!,
+      ];
+    });
+    await expectRejected((completion) => {
+      completion.transformedImages[0]!.sourceId = "unplanned";
+    });
+  });
+
+  it.each([
+    [
+      "the completion value",
+      (completion: Record<string, unknown>) => {
+        completion.secret = CANARY;
+      },
+    ],
+    [
+      "the generated MDX output",
+      (completion: Record<string, unknown>) => {
+        (completion.generatedMdx as Record<string, unknown>).secret = CANARY;
+      },
+    ],
+    [
+      "an image output",
+      (completion: Record<string, unknown>) => {
+        (
+          (
+            completion.transformedImages as Record<string, unknown>[]
+          )[0] as Record<string, unknown>
+        ).secret = CANARY;
+      },
+    ],
+  ])("rejects an extra field on %s", async (_name, mutate) => {
+    await expectRejected((completion) => {
+      mutate(completion as unknown as Record<string, unknown>);
+    });
+  });
+
+  it("rejects an extra field on the result envelope", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(
+      completedEvent({ ok: true, value: okCompletion(), secret: CANARY }),
+    );
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    expect(JSON.stringify(terminal)).not.toContain(CANARY);
   });
 });
