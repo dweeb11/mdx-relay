@@ -548,14 +548,45 @@ export class ProcessingClient {
   }
 
   /**
+   * Re-derives the approved longest-edge resize bound from the request's own
+   * profile snapshot. The snapshot is branded validated before the worker
+   * boundary, but the parent still reads the bound from bytes it holds rather
+   * than trusting any worker-supplied number. Missing, non-integer, or
+   * out-of-range values yield undefined so the completion fails closed.
+   */
+  private approvedMaxDimension(
+    snapshot: WorkerProcessRequest["profileSnapshot"],
+  ): number | undefined {
+    try {
+      const parsed: unknown = JSON.parse(snapshot);
+      if (!isRecord(parsed) || !isRecord(parsed.images)) return undefined;
+      const { maxDimension } = parsed.images;
+      if (
+        typeof maxDimension !== "number" ||
+        !Number.isInteger(maxDimension) ||
+        maxDimension < 1 ||
+        maxDimension >
+          Math.floor(Math.sqrt(MDX_RELAY_LIMITS.decodedImagePixels))
+      )
+        return undefined;
+      return maxDimension;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Dimensions are a trust boundary, not a display detail: downstream sealing
    * sizes buffers from them. They must be positive safe integers whose product
    * stays inside the locked per-image decoded-pixel ceiling, so neither a zero
-   * nor an absurd forged dimension can cross into host state.
+   * nor an absurd forged dimension can cross into host state. The longest
+   * output edge is also capped by the profile maxDimension (no upscale past
+   * the decoded source, and no resize past the approved profile bound).
    */
   private async decodeImage(
     value: unknown,
     expectedSourceId: string,
+    maxDimension: number,
   ): Promise<WorkerImageOutput | undefined> {
     if (
       !isRecord(value) ||
@@ -574,6 +605,9 @@ export class ProcessingClient {
       value.width * value.height > value.decodedWidth * value.decodedHeight ||
       Math.max(value.width, value.height) >
         Math.max(value.decodedWidth, value.decodedHeight) ||
+      // Profile resize bound: a hostile worker must not seal a 4000px output
+      // for a 2000px profile just because the decoded source was that large.
+      Math.max(value.width, value.height) > maxDimension ||
       !isPositiveInteger(value.byteLength) ||
       !(await this.verifyOutputBytes(value as never))
     )
@@ -660,11 +694,16 @@ export class ProcessingClient {
       completion.transformedImages.length !== request.images.length
     )
       return MALFORMED;
+    // Derive the resize bound once from the parent's request snapshot. Without
+    // a usable maxDimension, every image output is untrustworthy.
+    const maxDimension = this.approvedMaxDimension(request.profileSnapshot);
+    if (maxDimension === undefined) return MALFORMED;
     const transformedImages: WorkerImageOutput[] = [];
     for (const [index, raw] of completion.transformedImages.entries()) {
       const image = await this.decodeImage(
         raw,
         request.images[index]!.sourceId,
+        maxDimension,
       );
       if (!image) return MALFORMED;
       transformedImages.push(image);
