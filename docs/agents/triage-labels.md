@@ -3,19 +3,20 @@
 The skills speak in terms of five canonical triage roles. This file maps those roles to the
 actual label strings used in this repo's issue tracker (Linear).
 
-| Role in mattpocock/skills | Label in our tracker (Linear) | Meaning                                  |
-| ------------------------- | ----------------------------- | ---------------------------------------- |
-| `needs-triage`            | `needs-triage`                | Maintainer needs to evaluate this issue  |
-| `needs-info`              | `needs-info`                  | Waiting on reporter for more information |
-| `ready-for-agent`         | `ready-for-agent`             | Fully specified, ready for an AFK agent  |
-| `ready-for-human`         | `ready-for-human`             | Requires human implementation            |
-| `wontfix`                 | `wontfix`                     | Will not be actioned                     |
+| Role in mattpocock/skills | In our tracker (Linear)          | Meaning                                  |
+| ------------------------- | -------------------------------- | ---------------------------------------- |
+| `needs-triage`            | **`Triage` workflow state**      | Maintainer needs to evaluate this issue  |
+| `needs-info`              | `needs-info` label               | Waiting on reporter for more information |
+| `ready-for-agent`         | `ready-for-agent` label          | Fully specified, ready for an AFK agent  |
+| `ready-for-human`         | `ready-for-human` label          | Requires human implementation            |
+| `wontfix`                 | `wontfix` label                  | Will not be actioned                     |
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the
-corresponding label string from this table.
+corresponding mapping from this table.
 
-These are Linear labels. Discover the workspace's actual labels with `list_issue_labels`
-before applying — if a label doesn't exist yet, create it (or map the role to an existing
-one and edit the right-hand column here). If you'd rather express some roles as Linear
-**workflow states** instead of labels (e.g. `needs-triage` → the Triage state, `wontfix` →
-Cancelled), change the right-hand column to name that state and note it here.
+**`needs-triage` is a workflow STATE, not a label** (decided 2026-07-24): file issues
+awaiting evaluation with `state: "Triage"` and do NOT apply a `needs-triage` label — the
+label exists in the workspace but is not used for this repo. The other four roles are
+Linear labels; discover the workspace's actual labels with `list_issue_labels` before
+applying. A role label may coexist with the Triage state (e.g. an issue can sit in Triage
+already carrying `ready-for-agent`).
