@@ -56,7 +56,7 @@ Issues are tracked in **Linear** (the canonical tracker for this repo and all pr
 
 ### Triage labels
 
-Canonical five-role vocabulary, used as-is (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) as Linear labels. See `docs/agents/triage-labels.md`.
+Canonical five-role vocabulary, used as-is (`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) as Linear labels. 'needs-triage' is not a label but a workflow state. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
