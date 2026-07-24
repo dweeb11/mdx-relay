@@ -161,6 +161,18 @@ export interface ExportPlanDraft {
 const WINDOWS_RESERVED_SEGMENT =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
+/**
+ * Common filesystem component limit (NAME_MAX) on macOS, Windows, and Linux.
+ * A portable-valid slug can still exceed this and fail only at execute time.
+ */
+export const MAX_PORTABLE_PATH_SEGMENT_LENGTH = 255;
+
+/**
+ * Matches the bounded portable relative-path contract used for profile roots
+ * (`contentRoot` / `assetRoot` in portable-profile validation).
+ */
+export const MAX_PORTABLE_REPOSITORY_PATH_LENGTH = 240;
+
 const hasControlCharacter = (value: string): boolean => {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
@@ -171,6 +183,7 @@ const hasControlCharacter = (value: string): boolean => {
 
 const isPortableSegment = (segment: string): boolean =>
   segment.length > 0 &&
+  segment.length <= MAX_PORTABLE_PATH_SEGMENT_LENGTH &&
   !segment.includes("/") &&
   !segment.includes("\\") &&
   segment !== "." &&
@@ -184,6 +197,7 @@ const isPortableSegment = (segment: string): boolean =>
 /** Mirrors the repository-target path shape the frozen plan contract accepts. */
 export const isPortableRepositoryPath = (value: string): boolean =>
   value.length > 0 &&
+  value.length <= MAX_PORTABLE_REPOSITORY_PATH_LENGTH &&
   !value.startsWith("/") &&
   !value.includes("\\") &&
   !/^[A-Za-z]:/u.test(value) &&

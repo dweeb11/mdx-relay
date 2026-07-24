@@ -16,6 +16,8 @@ import {
   deepEquals,
   isPortableRepositoryPath,
   isWellFormedUnicode,
+  MAX_PORTABLE_PATH_SEGMENT_LENGTH,
+  MAX_PORTABLE_REPOSITORY_PATH_LENGTH,
   sha256OfBytes,
   verifySourceBytes,
   type CanonicalSourceImage,
@@ -433,6 +435,68 @@ describe("buildExportPlan", () => {
             repository: repositoryState(),
             targets: collidingTargets,
           }),
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("rejects overlong slugs and planned target paths with UNSAFE_PATH", () => {
+    const overlongSlug = "a".repeat(MAX_PORTABLE_PATH_SEGMENT_LENGTH + 1);
+    expect(blockerCode(buildInput({ documentSlug: overlongSlug }))).toBe(
+      ISSUE_CODES.unsafePath,
+    );
+
+    // Segment-valid slug whose composed MDX filename exceeds NAME_MAX.
+    const slugForOverlongMdxSegment = "a".repeat(
+      MAX_PORTABLE_PATH_SEGMENT_LENGTH - ".mdx".length + 1,
+    );
+    expect(
+      blockerCode(buildInput({ documentSlug: slugForOverlongMdxSegment })),
+    ).toBe(ISSUE_CODES.unsafePath);
+
+    // Segment-valid slug that still pushes the composed repository path past
+    // the bounded portable-path contract used for profile roots.
+    const contentRoot = DPW_MIND_NET_V1.output.contentRoot;
+    const maxSlugForPath =
+      MAX_PORTABLE_REPOSITORY_PATH_LENGTH -
+      contentRoot.length -
+      1 -
+      ".mdx".length;
+    const overlongPathSlug = "b".repeat(maxSlugForPath + 1);
+    expect(overlongPathSlug.length).toBeLessThanOrEqual(
+      MAX_PORTABLE_PATH_SEGMENT_LENGTH,
+    );
+    expect(blockerCode(buildInput({ documentSlug: overlongPathSlug }))).toBe(
+      ISSUE_CODES.unsafePath,
+    );
+
+    const maxSafeSlug = "c".repeat(
+      Math.min(
+        maxSlugForPath,
+        MAX_PORTABLE_PATH_SEGMENT_LENGTH - ".mdx".length,
+      ),
+    );
+    const repository = repositoryState();
+    const safeTargets = [
+      {
+        normalizedPath: `${contentRoot}/${maxSafeSlug}.mdx`,
+        symlinkStatus: "not-symlink" as const,
+        approvedPriorTarget: absent,
+      },
+    ];
+    expect(
+      blockerCode(
+        buildInput({
+          documentSlug: maxSafeSlug,
+          imageEmbeds: [],
+          sourceImages: [],
+          transformedImages: [],
+          sourceBytes: { note: NOTE_BYTES, images: new Map() },
+          priorTargets: safeTargets,
+          finalCapture: {
+            ...barrierFor({ repository, targets: safeTargets }),
+            sourceImages: [],
+          },
         }),
       ),
     ).toBeUndefined();
@@ -901,8 +965,13 @@ describe("planning path and equality helpers", () => {
       "content/a.",
       "content/a ",
       "content/a\u0000b",
+      "a".repeat(MAX_PORTABLE_REPOSITORY_PATH_LENGTH + 1),
+      `content/${"a".repeat(MAX_PORTABLE_PATH_SEGMENT_LENGTH + 1)}`,
     ])
       expect(isPortableRepositoryPath(value), value).toBe(false);
+    expect(
+      isPortableRepositoryPath("a".repeat(MAX_PORTABLE_REPOSITORY_PATH_LENGTH)),
+    ).toBe(true);
   });
 
   it("compares plain planning data structurally", () => {

@@ -11,6 +11,16 @@ import { err, ok, type Result } from "../contracts/result";
 
 const protectedTokenTypes = new Set(["codeText", "codeFenced", "codeIndented"]);
 
+const destinationTokenTypes = new Set([
+  "resourceDestinationString",
+  "definitionDestinationString",
+]);
+
+export interface MarkdownSourceRanges {
+  readonly code: readonly SourceRange[];
+  readonly destinations: readonly SourceRange[];
+}
+
 const freezePoint = (point: {
   readonly line: number;
   readonly column: number;
@@ -82,27 +92,41 @@ export function isOffsetProtected(
   return range !== undefined && offset >= range.start.offset;
 }
 
+export function mergeSourceRanges(
+  ...groups: readonly (readonly SourceRange[])[]
+): readonly SourceRange[] {
+  return Object.freeze(
+    groups.flat().sort((left, right) => left.start.offset - right.start.offset),
+  );
+}
+
+const rangesForTypes = (
+  events: ReturnType<typeof postprocess>,
+  tokenTypes: ReadonlySet<string>,
+): readonly SourceRange[] =>
+  Object.freeze(
+    events
+      .filter((event) => event[0] === "enter" && tokenTypes.has(event[1].type))
+      .map((event) =>
+        freezeRange(freezePoint(event[1].start), freezePoint(event[1].end)),
+      )
+      .sort((left, right) => left.start.offset - right.start.offset),
+  );
+
 export function findProtectedRanges(
   source: string,
   parser: typeof parse = parse,
-): Result<readonly SourceRange[], MdxRelayIssue> {
+): Result<MarkdownSourceRanges, MdxRelayIssue> {
   try {
     const events = postprocess(
       parser()
         .document()
         .write(preprocess()(source, "utf8", true)),
     );
-    const ranges = events
-      .filter(
-        (event) =>
-          event[0] === "enter" && protectedTokenTypes.has(event[1].type),
-      )
-      .map((event) =>
-        freezeRange(freezePoint(event[1].start), freezePoint(event[1].end)),
-      )
-      .sort((left, right) => left.start.offset - right.start.offset);
+    const code = rangesForTypes(events, protectedTokenTypes);
+    const destinations = rangesForTypes(events, destinationTokenTypes);
 
-    for (const range of ranges) {
+    for (const range of code) {
       if (
         range.start.column <= 4 &&
         /^ {0,3}(?:`{3,}|~{3,})/u.test(
@@ -116,7 +140,7 @@ export function findProtectedRanges(
 
     const fence = /^ {0,3}(?:`{3,}|~{3,})/gmu;
     for (const match of source.matchAll(fence)) {
-      if (!isOffsetProtected(ranges, match.index))
+      if (!isOffsetProtected(code, match.index))
         return unsupportedAt(
           source,
           match.index,
@@ -125,7 +149,7 @@ export function findProtectedRanges(
     }
 
     for (let offset = 0; offset < source.length; offset += 1) {
-      if (isOffsetProtected(ranges, offset) || source[offset] !== "`") continue;
+      if (isOffsetProtected(code, offset) || source[offset] !== "`") continue;
       let escapes = 0;
       for (let index = offset - 1; source[index] === "\\"; index -= 1)
         escapes += 1;
@@ -135,7 +159,12 @@ export function findProtectedRanges(
       return unsupportedAt(source, offset, end);
     }
 
-    return ok(Object.freeze(ranges));
+    return ok(
+      Object.freeze({
+        code: Object.freeze(code),
+        destinations: Object.freeze(destinations),
+      }),
+    );
   } catch {
     return unsupportedAt(source, 0, Math.min(1, source.length));
   }
