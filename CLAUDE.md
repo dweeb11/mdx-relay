@@ -48,6 +48,20 @@ Follow `AGENTS.md` for the current package, test, build, and verification comman
 - No broad staging, deletion, force push, pull/rebase, or automatic conflict handling.
 - Post-commit ambiguity is a truthful recovery state, not success.
 
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in **Linear** (the canonical tracker for this repo and all projects). GitHub holds code and PRs only; external PRs are **not** a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical five-role vocabulary, used as-is (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) as Linear labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## Documentation
 
 - `PITCH.md` — human-owned product vision
