@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { canonicalizeJcs } from "../../../src/canonical";
 import {
   matchesApprovalContext,
   type ApprovedPriorTarget,
@@ -20,7 +21,6 @@ import {
 } from "../../../src/planning/build-export-plan";
 import {
   buildPlanIdentityManifest,
-  canonicalizeJcs,
   computePlanId,
   sealExportPlan,
   verifyStoredExportPlan,

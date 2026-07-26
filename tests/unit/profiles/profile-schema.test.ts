@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { canonicalizeJcs } from "../../../src/canonical";
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 import { parsePortableProfile } from "../../../src/profiles/parse-portable-profile";
-import {
-  canonicalizeProfileData,
-  validatePortableProfile,
-} from "../../../src/profiles/portable-profile";
+import { validatePortableProfile } from "../../../src/profiles/portable-profile";
 
 const expectBlocked = (value: unknown, code: string) => {
   const result = validatePortableProfile(value);
@@ -305,38 +303,28 @@ describe("portable profile schema", () => {
   });
 
   it("canonicalizes every JSON value shape and rejects non-JSON values", () => {
-    expect(canonicalizeProfileData(null)).toBe("null");
-    expect(canonicalizeProfileData(true)).toBe("true");
-    expect(canonicalizeProfileData("profile")).toBe('"profile"');
-    expect(canonicalizeProfileData([1, "two", false])).toBe('[1,"two",false]');
+    expect(canonicalizeJcs(null)).toBe("null");
+    expect(canonicalizeJcs(true)).toBe("true");
+    expect(canonicalizeJcs("profile")).toBe('"profile"');
+    expect(canonicalizeJcs([1, "two", false])).toBe('[1,"two",false]');
     for (const surrogate of [
       String.fromCharCode(0xd800),
       String.fromCharCode(0xdc00),
     ]) {
-      expect(() => canonicalizeProfileData({ value: surrogate })).toThrow(
-        "Non-JSON profile value",
-      );
+      expect(() => canonicalizeJcs({ value: surrogate })).toThrow(TypeError);
     }
     expect(() =>
-      canonicalizeProfileData({ [String.fromCharCode(0xd800)]: "value" }),
-    ).toThrow("Non-JSON profile value");
-    expect(() => canonicalizeProfileData(Number.NaN)).toThrow(
-      "Non-finite JSON number",
-    );
-    expect(() => canonicalizeProfileData(undefined)).toThrow(
-      "Non-JSON profile value",
-    );
-    expect(() => canonicalizeProfileData({ invalid: undefined })).toThrow(
-      "Non-JSON profile value",
-    );
+      canonicalizeJcs({ [String.fromCharCode(0xd800)]: "value" }),
+    ).toThrow(TypeError);
+    expect(() => canonicalizeJcs(Number.NaN)).toThrow("Non-finite JSON number");
+    expect(() => canonicalizeJcs(undefined)).toThrow(TypeError);
+    expect(() => canonicalizeJcs({ invalid: undefined })).toThrow(TypeError);
 
     const hidden = Object.defineProperty({}, "hidden", {
       enumerable: false,
       value: "silently dropped",
     });
-    expect(() => canonicalizeProfileData(hidden)).toThrow(
-      "Non-JSON profile value",
-    );
+    expect(() => canonicalizeJcs(hidden)).toThrow(TypeError);
 
     let getterCalls = 0;
     const accessor = Object.defineProperty({}, "value", {
@@ -346,22 +334,16 @@ describe("portable profile schema", () => {
         return "not read";
       },
     });
-    expect(() => canonicalizeProfileData(accessor)).toThrow(
-      "Non-JSON profile value",
-    );
+    expect(() => canonicalizeJcs(accessor)).toThrow(TypeError);
     expect(getterCalls).toBe(0);
 
     const sparse = Array.from({ length: 2 }) as unknown[];
     sparse[0] = "present";
     delete sparse[1];
-    expect(() => canonicalizeProfileData(sparse)).toThrow(
-      "Non-JSON profile value",
-    );
+    expect(() => canonicalizeJcs(sparse)).toThrow(TypeError);
 
     const nonPlainArray = ["value"];
     Object.setPrototypeOf(nonPlainArray, null);
-    expect(() => canonicalizeProfileData(nonPlainArray)).toThrow(
-      "Non-JSON profile value",
-    );
+    expect(() => canonicalizeJcs(nonPlainArray)).toThrow(TypeError);
   });
 });

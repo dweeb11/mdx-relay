@@ -4,8 +4,8 @@
 
 ## Tasks
 
-- [ ] S1 — extract `src/core/predicates.ts`; unify `isRecord` ×6, `hasExactKeys` ×4, `isNonnegativeInteger` on `Number.isSafeInteger` (APP-628)
-- [ ] S2 — `src/canonical/index.ts`: one self-guarding `canonicalizeJcs`, Node-free, at 100% coverage (APP-629)
+- [x] S1 — extract `src/core/predicates.ts`; unify `isRecord` ×6, `hasExactKeys` ×4, `isNonnegativeInteger` on `Number.isSafeInteger` (APP-628)
+- [x] S2 — `src/canonical/index.ts`: one self-guarding `canonicalizeJcs`, Node-free, at 100% coverage (APP-629)
 - [ ] S3 — `src/canonical/hash.ts`: move sha256 helpers out of the planner, add `sha256OfCanonical` (APP-630) — blocked by S2
 
 Umbrella: APP-622. Sequenced before APP-620 (single owner for plan verification), which also needs the `export-plan.ts` split first.

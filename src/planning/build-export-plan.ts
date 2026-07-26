@@ -25,6 +25,7 @@ import {
   mdxRelayOk,
   type MdxRelayResult,
 } from "../contracts/result";
+import { deepEquals } from "../canonical";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 
@@ -210,25 +211,6 @@ export const sha256OfUtf8 = (value: string): Sha256Digest =>
   `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}` as Sha256Digest;
 
 /**
- * True only for strings that are well-formed Unicode. A lone UTF-16 surrogate
- * has no UTF-8 encoding, so Node substitutes U+FFFD when hashing it and two
- * different lone surrogates would collapse to the same digest. Everything that
- * canonicalizes or hashes text refuses such a string instead.
- */
-export const isWellFormedUnicode = (value: string): boolean => {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xdc00 && code <= 0xdfff) return false;
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const low = value.charCodeAt(index + 1);
-      if (!(low >= 0xdc00 && low <= 0xdfff)) return false;
-      index += 1;
-    }
-  }
-  return true;
-};
-
-/**
  * Recomputes the source-note and every source-image fingerprint from the bytes
  * a capture actually read, and applies the locked source budgets to those
  * recomputed lengths. Recorded metadata is never the evidence: a plan whose
@@ -262,38 +244,6 @@ export function verifySourceBytes(
   }
   return undefined;
 }
-
-/** Structural equality over the plain JSON data planning produces. */
-export const deepEquals = (left: unknown, right: unknown): boolean => {
-  if (left === right) return true;
-  if (Array.isArray(left) || Array.isArray(right))
-    return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
-      left.length === right.length &&
-      left.every((value, index) => deepEquals(value, right[index]))
-    );
-  if (
-    left === null ||
-    right === null ||
-    typeof left !== "object" ||
-    typeof right !== "object"
-  )
-    return false;
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  return (
-    leftKeys.length === rightKeys.length &&
-    leftKeys.every(
-      (key, index) =>
-        key === rightKeys[index] &&
-        deepEquals(
-          (left as Record<string, unknown>)[key],
-          (right as Record<string, unknown>)[key],
-        ),
-    )
-  );
-};
 
 const compareCodeUnits = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;

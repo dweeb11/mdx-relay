@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { canonicalizeJcs, isPlainDataPropertyGraph } from "../canonical";
 import type { Sha256Digest } from "../contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../contracts/issues";
 import {
@@ -21,56 +22,6 @@ export interface ValidatedMachineBinding {
   readonly binding: MachineBindingV1;
   readonly fingerprint: Sha256Digest;
 }
-
-const hasValidUnicode = (value: string): boolean => {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-};
-
-const isPlainDataPropertyGraph = (
-  value: unknown,
-  ancestors: WeakSet<object> = new WeakSet(),
-): boolean => {
-  if (value === null) return true;
-  if (typeof value === "string") return hasValidUnicode(value);
-  if (typeof value === "boolean" || typeof value === "number") return true;
-  if (typeof value !== "object" || Array.isArray(value) || ancestors.has(value))
-    return false;
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  if (prototype !== Object.prototype) return false;
-  const keys = Reflect.ownKeys(value);
-  if (
-    keys.some(
-      (key) => typeof key === "symbol" || !hasValidUnicode(key as string),
-    )
-  )
-    return false;
-
-  ancestors.add(value);
-  for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (
-      !descriptor ||
-      !descriptor.enumerable ||
-      !("value" in descriptor) ||
-      !isPlainDataPropertyGraph(descriptor.value, ancestors)
-    ) {
-      ancestors.delete(value);
-      return false;
-    }
-  }
-  ancestors.delete(value);
-  return true;
-};
 
 const containsCredentialUrl = (value: unknown): boolean => {
   if (typeof value === "string") return isCredentialBearingRepositoryUrl(value);
@@ -160,13 +111,6 @@ const isCredentialFreeRepositoryUrl = (value: unknown): value is string => {
 const cloneAndFreeze = (binding: MachineBindingV1): MachineBindingV1 =>
   Object.freeze(structuredClone(binding));
 
-const canonicalizeMachineBinding = (binding: MachineBindingV1): string =>
-  `{"profileId":${JSON.stringify(binding.profileId)},"repositoryRoot":${JSON.stringify(
-    binding.repositoryRoot,
-  )},"repositoryUrl":${JSON.stringify(
-    binding.repositoryUrl,
-  )},"schemaVersion":${JSON.stringify(binding.schemaVersion)}}`;
-
 const invalid = (
   code: keyof Pick<
     typeof ISSUE_CODES,
@@ -203,7 +147,7 @@ export function validateMachineBinding(
       return invalid("invalidProfile");
     const binding = cloneAndFreeze(value as unknown as MachineBindingV1);
     const fingerprint = `sha256:${createHash("sha256")
-      .update(canonicalizeMachineBinding(binding), "utf8")
+      .update(canonicalizeJcs(binding), "utf8")
       .digest("hex")}` as Sha256Digest;
     return mdxRelayOk(Object.freeze({ binding, fingerprint }));
   } catch {
