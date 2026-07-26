@@ -19,6 +19,7 @@ import {
   type MdxRelayResult,
 } from "../contracts/result";
 import { MDX_RELAY_LIMITS } from "../core/limits";
+import { canonicalizeJcs } from "../canonical";
 import { sha256OfBytes, type PlanSourceBytes } from "./build-export-plan";
 import {
   ACTIVE_PLAN_FILENAME,
@@ -39,7 +40,6 @@ import {
   type PlanStoreReadHandle,
 } from "./plan-store-types";
 import {
-  canonicalizeJcs,
   verifyStoredExportPlan,
   type SealedExportPlanEnvelope,
 } from "./seal-export-plan";

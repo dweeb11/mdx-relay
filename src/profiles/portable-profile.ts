@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { canonicalizeJcs, isPlainDataPropertyGraph } from "../canonical";
 import { createIssue, ISSUE_CODES } from "../contracts/issues";
 import type {
   Sha256Digest,
@@ -23,76 +24,6 @@ export interface ValidatedPortableProfile {
   readonly snapshot: ValidatedPortableProfileSnapshot;
   readonly profileSnapshotSha256: Sha256Digest;
 }
-
-type JsonRecord = Record<string, unknown>;
-
-const hasValidUnicode = (value: string): boolean => {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-};
-
-const isPlainDataPropertyGraph = (
-  value: unknown,
-  ancestors: WeakSet<object> = new WeakSet(),
-): boolean => {
-  if (value === null) return true;
-  if (typeof value === "string") return hasValidUnicode(value);
-  if (typeof value === "boolean" || typeof value === "number") return true;
-  if (typeof value !== "object" || ancestors.has(value)) return false;
-
-  const isArray = Array.isArray(value);
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  if (
-    (isArray && prototype !== Array.prototype) ||
-    (!isArray && prototype !== Object.prototype)
-  )
-    return false;
-
-  const keys = Reflect.ownKeys(value);
-  if (
-    keys.some(
-      (key) => typeof key === "symbol" || !hasValidUnicode(key as string),
-    )
-  )
-    return false;
-  if (
-    isArray &&
-    (keys.length !== value.length + 1 ||
-      !keys.every(
-        (key) =>
-          key === "length" ||
-          (/^(?:0|[1-9]\d*)$/u.test(key as string) &&
-            Number(key) < value.length),
-      ))
-  )
-    return false;
-
-  ancestors.add(value);
-  for (const key of keys) {
-    if (isArray && key === "length") continue;
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (
-      !descriptor ||
-      !descriptor.enumerable ||
-      !("value" in descriptor) ||
-      !isPlainDataPropertyGraph(descriptor.value, ancestors)
-    ) {
-      ancestors.delete(value);
-      return false;
-    }
-  }
-  ancestors.delete(value);
-  return true;
-};
 
 const supportedSchemePrefix = /^(https?|ssh|git):/iu;
 const strictSupportedSchemeUrl = /^(?:https?|ssh|git):\/\//iu;
@@ -141,39 +72,6 @@ const containsCredentialUrl = (value: unknown): boolean => {
   });
 };
 
-const canonicalizeValidated = (value: unknown): string => {
-  if (value === null || typeof value === "boolean" || typeof value === "string")
-    return JSON.stringify(value);
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("Non-finite JSON number");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value))
-    return `[${value
-      .map((_, index) =>
-        canonicalizeValidated(
-          Object.getOwnPropertyDescriptor(value, String(index))!.value,
-        ),
-      )
-      .join(",")}]`;
-  const record = value as JsonRecord;
-  return `{${(Reflect.ownKeys(record) as string[])
-    .sort()
-    .map(
-      (key) =>
-        `${JSON.stringify(key)}:${canonicalizeValidated(
-          Object.getOwnPropertyDescriptor(record, key)!.value,
-        )}`,
-    )
-    .join(",")}}`;
-};
-
-export const canonicalizeProfileData = (value: unknown): string => {
-  if (!isPlainDataPropertyGraph(value))
-    throw new TypeError("Non-JSON profile value");
-  return canonicalizeValidated(value);
-};
-
 const cloneAndFreeze = <T>(value: T): T => {
   const clone = structuredClone(value);
   const freeze = (entry: unknown): void => {
@@ -210,7 +108,7 @@ export function validatePortableProfile(
     const profile = parsePortableProfile(value);
     if (!profile) return invalid(ISSUE_CODES.invalidProfile);
     const stableProfile = cloneAndFreeze(profile);
-    const snapshot = canonicalizeProfileData(
+    const snapshot = canonicalizeJcs(
       stableProfile,
     ) as ValidatedPortableProfileSnapshot;
     const profileSnapshotSha256 = `sha256:${createHash("sha256")

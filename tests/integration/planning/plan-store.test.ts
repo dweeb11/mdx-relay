@@ -14,6 +14,7 @@ import { isAbsolute, join, relative } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { canonicalizeJcs } from "../../../src/canonical";
 import type {
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
@@ -54,7 +55,6 @@ import {
   type PlanStoreFileSystem,
 } from "../../../src/planning/plan-store-types";
 import {
-  canonicalizeJcs,
   sealExportPlan,
   type SealedExportPlanEnvelope,
 } from "../../../src/planning/seal-export-plan";

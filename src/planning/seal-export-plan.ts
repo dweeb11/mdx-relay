@@ -15,10 +15,9 @@ import {
   mdxRelayOk,
   type MdxRelayResult,
 } from "../contracts/result";
+import { canonicalizeJcs, deepEquals, isWellFormedUnicode } from "../canonical";
 import { isRecord } from "../core/predicates";
 import {
-  deepEquals,
-  isWellFormedUnicode,
   sha256OfBytes,
   sha256OfUtf8,
   verifySourceBytes,
@@ -78,99 +77,6 @@ export type SealedExportPlanEnvelope =
 
 const compareCodeUnits = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
-
-const canonicalString = (value: string): string => {
-  // RFC 8785 requires canonicalization to terminate on invalid Unicode rather
-  // than emit an escape for a code unit that has no UTF-8 encoding.
-  if (!isWellFormedUnicode(value))
-    throw new TypeError("Lone UTF-16 surrogate in JSON string");
-  return JSON.stringify(value);
-};
-
-/**
- * Own enumerable data properties in their own insertion order. Accessors, own
- * symbol keys and exotic prototypes are refused instead of being read: JCS
- * output has to be a function of JSON data alone, and a getter or a `toJSON`
- * would let the value being canonicalized choose its own manifest.
- */
-const jsonDataKeys = (value: object): readonly string[] => {
-  const prototype: unknown = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null)
-    throw new TypeError("Unsupported JSON object prototype");
-  if (Object.getOwnPropertySymbols(value).length > 0)
-    throw new TypeError("Symbol key in JSON object");
-  const keys: string[] = [];
-  for (const [key, descriptor] of Object.entries(
-    Object.getOwnPropertyDescriptors(value),
-  )) {
-    if (!("value" in descriptor))
-      throw new TypeError("Accessor in JSON object");
-    if (descriptor.enumerable) keys.push(key);
-    else throw new TypeError("Non-enumerable key in JSON object");
-  }
-  return keys;
-};
-
-/** Canonical array index strings: no leading zeros, no sign, no exponent. */
-const ARRAY_INDEX = /^(?:0|[1-9][0-9]*)$/u;
-
-/**
- * The length of a dense plain array whose every element is an own enumerable
- * data property. Arrays are held to exactly the contract objects are held to:
- * an indexed getter, a hidden or symbol property, a hole or a named key is
- * refused rather than read, because an element the array can compute is not
- * JSON data and would let the value choose its own manifest. Nothing here reads
- * an element, so no accessor runs before it has been rejected.
- */
-const jsonDataElementCount = (value: readonly unknown[]): number => {
-  if (Object.getPrototypeOf(value) !== Array.prototype)
-    throw new TypeError("Unsupported JSON array prototype");
-  if (Object.getOwnPropertySymbols(value).length > 0)
-    throw new TypeError("Symbol key in JSON array");
-  let elements = 0;
-  for (const [key, descriptor] of Object.entries(
-    Object.getOwnPropertyDescriptors(value),
-  )) {
-    if (key === "length") continue;
-    if (!ARRAY_INDEX.test(key) || Number(key) >= value.length)
-      throw new TypeError("Non-index key in JSON array");
-    if (!("value" in descriptor)) throw new TypeError("Accessor in JSON array");
-    if (!descriptor.enumerable)
-      throw new TypeError("Non-enumerable key in JSON array");
-    elements += 1;
-  }
-  if (elements !== value.length) throw new TypeError("Hole in JSON array");
-  return elements;
-};
-
-/**
- * RFC 8785 JSON Canonicalization Scheme. Keys sort by UTF-16 code unit, strings
- * and numbers use the ECMAScript serializations JCS defers to, and anything
- * that is not well-formed finite JSON data throws rather than canonicalizing to
- * something an attacker could steer.
- */
-export function canonicalizeJcs(value: unknown): string {
-  if (value === null || typeof value === "boolean")
-    return JSON.stringify(value);
-  if (typeof value === "string") return canonicalString(value);
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("Non-finite JSON number");
-    return JSON.stringify(value);
-  }
-  if (typeof value !== "object") throw new TypeError("Unsupported JSON value");
-  if (Array.isArray(value)) {
-    const elements = jsonDataElementCount(value);
-    const entries: string[] = [];
-    for (let index = 0; index < elements; index += 1)
-      entries.push(canonicalizeJcs(value[index]));
-    return `[${entries.join(",")}]`;
-  }
-  const record = value as Record<string, unknown>;
-  return `{${[...jsonDataKeys(record)]
-    .sort(compareCodeUnits)
-    .map((key) => `${canonicalString(key)}:${canonicalizeJcs(record[key])}`)
-    .join(",")}}`;
-}
 
 /** The canonical identity of a plan: every field except generation and ID. */
 export function buildPlanIdentityManifest(plan: object): string {

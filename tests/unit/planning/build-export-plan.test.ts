@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { deepEquals, isWellFormedUnicode } from "../../../src/canonical";
 import type {
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
@@ -13,9 +14,7 @@ import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
 import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
 import {
   buildExportPlan,
-  deepEquals,
   isPortableRepositoryPath,
-  isWellFormedUnicode,
   MAX_PORTABLE_PATH_SEGMENT_LENGTH,
   MAX_PORTABLE_REPOSITORY_PATH_LENGTH,
   sha256OfBytes,

@@ -96,6 +96,13 @@ with a 100% statements/lines/branches/functions threshold, matching the
 against the official cyberphone/json-canonicalization vectors, vendored into
 `tests/fixtures/jcs/` so the suite stays offline and reproducible.
 
+Fixture provenance: the `input/`, `output/`, and `outhex/` files are the
+official testdata from
+https://github.com/cyberphone/json-canonicalization (snapshot 2026-07-26). See
+`tests/fixtures/jcs/PROVENANCE.md`. The 100-million-line ES6 number corpus is
+not vendored; Node's `JSON.stringify` is the ES6 number serializer JCS defers
+to.
+
 ## Consequences
 
 - `build-export-plan.ts` stops being a utility grab-bag; `sha256OfBytes`,
