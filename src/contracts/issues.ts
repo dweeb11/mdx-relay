@@ -1,3 +1,5 @@
+import { isRecord } from "../core/predicates";
+
 export const RECOVERY_ACTIONS = Object.freeze({
   selectProfile: "select-profile",
   editNote: "edit-note",
@@ -437,8 +439,6 @@ export type MdxRelayIssue<C extends IssueCode = IssueCode> = IssueForCode<C>;
 export type WarningIssue = Extract<MdxRelayIssue, { severity: "warning" }>;
 export type BlockerIssue = Extract<MdxRelayIssue, { severity: "blocker" }>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object";
 const isSafeInteger = (value: unknown): value is number =>
   typeof value === "number" &&
   Number.isFinite(value) &&

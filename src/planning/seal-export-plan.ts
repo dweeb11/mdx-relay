@@ -15,6 +15,7 @@ import {
   mdxRelayOk,
   type MdxRelayResult,
 } from "../contracts/result";
+import { isRecord } from "../core/predicates";
 import {
   deepEquals,
   isWellFormedUnicode,
@@ -185,9 +186,6 @@ export function computePlanId(identityManifest: string): PlanId {
 
 const CONTENT_ADDRESSED_PATH = /^[0-9a-f]{64}$/u;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
 
 const isIsoUtc = (value: unknown): value is string => {
   if (typeof value !== "string" || !ISO_UTC.test(value)) return false;
