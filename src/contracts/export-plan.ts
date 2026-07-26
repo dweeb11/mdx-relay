@@ -1,4 +1,10 @@
 import {
+  hasExactKeys,
+  isNonemptyString,
+  isNonnegativeInteger,
+  isRecord,
+} from "../core/predicates";
+import {
   createIssue,
   isMdxRelayIssue,
   ISSUE_CODES,
@@ -261,22 +267,6 @@ export interface ApprovalRecord {
 /** Post-seal rendered transition identity. */
 export type ApprovalTransitionIdentity = Readonly<PlanIdentity>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-const hasExactKeys = (
-  value: Record<string, unknown>,
-  keys: readonly string[],
-) => {
-  const actual = Object.keys(value).sort();
-  return (
-    actual.length === keys.length &&
-    actual.every((key, index) => key === [...keys].sort()[index])
-  );
-};
-const isNonemptyString = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0;
-const isNonnegativeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isInteger(value) && value >= 0;
 const exactObject = (
   value: unknown,
   keys: readonly string[],

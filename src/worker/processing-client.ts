@@ -12,7 +12,6 @@ import {
   mdxRelayOk,
   type MdxRelayResult,
 } from "../contracts/result";
-import { MDX_RELAY_LIMITS } from "../core/limits";
 import type {
   DecodedWorkerEvent,
   WorkerCompletion,
@@ -22,6 +21,13 @@ import type {
   WorkerRequest,
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
+import { MDX_RELAY_LIMITS } from "../core/limits";
+import {
+  hasExactKeys,
+  isNonnegativeInteger,
+  isPositiveInteger,
+  isRecord,
+} from "../core/predicates";
 
 /**
  *   process-plan.ts (worker)                 processing-client.ts (parent)
@@ -102,26 +108,8 @@ const COMPLETION_KEYS = [
 
 const isArrayBuffer = (value: unknown): value is ArrayBuffer =>
   value instanceof ArrayBuffer;
-const isNonnegativeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-const isPositiveInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
 const isDigest = (value: unknown): value is string =>
   typeof value === "string" && SHA256_DIGEST.test(value);
-
-/**
- * Exact-shape gate: the payload must carry these own keys and nothing else.
- * Unknown extras are rejected rather than ignored, so a hostile worker cannot
- * smuggle fields past the decoder and into host state or the UI.
- */
-const hasExactKeys = (
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): boolean =>
-  Object.keys(value).length === keys.length &&
-  keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 
 const brand = (event: WorkerWireEvent): DecodedWorkerEvent =>
   Object.freeze(event) as DecodedWorkerEvent;

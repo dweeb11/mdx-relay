@@ -1,22 +1,6 @@
 import { MDX_RELAY_LIMITS } from "../core/limits";
+import { hasExactKeys, isRecord } from "../core/predicates";
 import type { PortableProfileV1 } from "./profile-schema";
-
-type JsonRecord = Record<string, unknown>;
-
-const isRecord = (value: unknown): value is JsonRecord =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-const hasExactKeys = (
-  value: JsonRecord,
-  expected: readonly string[],
-): boolean => {
-  const actual = Object.keys(value).sort();
-  const sortedExpected = [...expected].sort();
-  return (
-    actual.length === sortedExpected.length &&
-    actual.every((key, index) => key === sortedExpected[index])
-  );
-};
 
 const hasValidUnicode = (value: string): boolean => {
   for (let index = 0; index < value.length; index += 1) {
