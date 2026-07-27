@@ -16,10 +16,9 @@ import {
   type MdxRelayResult,
 } from "../contracts/result";
 import { canonicalizeJcs, deepEquals, isWellFormedUnicode } from "../canonical";
+import { sha256OfBytes, sha256OfUtf8 } from "../canonical/hash";
 import { isRecord } from "../core/predicates";
 import {
-  sha256OfBytes,
-  sha256OfUtf8,
   verifySourceBytes,
   type ExportPlanDraft,
   type PlanSourceBytes,

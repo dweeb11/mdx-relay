@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import type {
   ApprovalFingerprint,
   ApprovedPriorTarget,
@@ -26,6 +24,7 @@ import {
   type MdxRelayResult,
 } from "../contracts/result";
 import { deepEquals } from "../canonical";
+import { sha256OfBytes } from "../canonical/hash";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 
@@ -203,12 +202,6 @@ export const isPortableRepositoryPath = (value: string): boolean =>
   !value.includes("\\") &&
   !/^[A-Za-z]:/u.test(value) &&
   value.split("/").every(isPortableSegment);
-
-export const sha256OfBytes = (bytes: Uint8Array): Sha256Digest =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}` as Sha256Digest;
-
-export const sha256OfUtf8 = (value: string): Sha256Digest =>
-  `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}` as Sha256Digest;
 
 /**
  * Recomputes the source-note and every source-image fingerprint from the bytes
