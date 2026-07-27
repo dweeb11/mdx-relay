@@ -5,8 +5,7 @@ import { describe, expect, it } from "vitest";
 const CODEQL_USES =
   /uses:\s+(?<spec>github\/codeql-action\/[^@\s]+@[^\s]+)(?:\s+#\s+(?<comment>[^\n]*))?/g;
 
-const PINNED_RELEASE =
-  /^github\/codeql-action\/[^@\s]+@(?<sha>[a-f0-9]{40})$/;
+const PINNED_RELEASE = /^github\/codeql-action\/[^@\s]+@(?<sha>[a-f0-9]{40})$/;
 
 const VERSION_COMMENT = /^v\d+\.\d+\.\d+$/;
 
