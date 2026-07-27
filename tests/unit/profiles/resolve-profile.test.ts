@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { sha256OfCanonical, sha256OfUtf8 } from "../../../src/canonical/hash";
 import { ISSUE_CODES } from "../../../src/contracts/issues";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 import { validateMachineBinding } from "../../../src/profiles/machine-binding";
@@ -58,6 +59,12 @@ describe("profile resolution", () => {
       "sha256:afb403f9e56985fdfa9998803ca47d5b4bfafe340d7ade752d2b1a8f9fff4501",
     );
     expect(repeated.value.fingerprint).toBe(first.value.fingerprint);
+    // Hand-written field order (profileId, repositoryRoot, repositoryUrl,
+    // schemaVersion) is already JCS code-unit order — byte-identical digest.
+    const handRolled =
+      '{"profileId":"dpw-mind-net-v1","repositoryRoot":"/Users/example/sites/dpw-mind-net","repositoryUrl":"https://example.invalid/dpw-mind-net.git","schemaVersion":1}';
+    expect(sha256OfCanonical(validBinding)).toBe(sha256OfUtf8(handRolled));
+    expect(first.value.fingerprint).toBe(sha256OfCanonical(validBinding));
 
     for (const changedBinding of [
       {

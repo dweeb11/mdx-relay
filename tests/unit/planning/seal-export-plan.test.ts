@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { canonicalizeJcs } from "../../../src/canonical";
+import { sha256OfBytes, sha256OfUtf8 } from "../../../src/canonical/hash";
 import {
   matchesApprovalContext,
   type ApprovedPriorTarget,
@@ -13,8 +14,6 @@ import {
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
 import {
   buildExportPlan,
-  sha256OfBytes,
-  sha256OfUtf8,
   type ExportPlanBuildInput,
   type ExportPlanDraft,
   type PlanSourceBytes,

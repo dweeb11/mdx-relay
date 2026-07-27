@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
-
-import { canonicalizeJcs, isPlainDataPropertyGraph } from "../canonical";
+import { isPlainDataPropertyGraph } from "../canonical";
+import { sha256OfCanonical } from "../canonical/hash";
 import type { Sha256Digest } from "../contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../contracts/issues";
 import {
@@ -146,9 +145,7 @@ export function validateMachineBinding(
     )
       return invalid("invalidProfile");
     const binding = cloneAndFreeze(value as unknown as MachineBindingV1);
-    const fingerprint = `sha256:${createHash("sha256")
-      .update(canonicalizeJcs(binding), "utf8")
-      .digest("hex")}` as Sha256Digest;
+    const fingerprint = sha256OfCanonical(binding);
     return mdxRelayOk(Object.freeze({ binding, fingerprint }));
   } catch {
     return invalid("invalidProfile");
