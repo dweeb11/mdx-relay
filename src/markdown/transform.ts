@@ -418,8 +418,9 @@ const firstUnsupported = (
       )
         candidates.push({ start: token.start.offset, end: token.end.offset });
     }
-    /* v8 ignore next 3 -- findProtectedRanges already completed the same deterministic parse. */
+    /* findProtectedRanges already completed the same deterministic parse. */
   } catch {
+    /* v8 ignore next -- defensive fallback for a parser that just succeeded. */
     return Object.freeze({ start: 0, end: Math.min(1, source.length) });
   }
 

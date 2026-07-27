@@ -930,6 +930,107 @@ describe("ExportPlan contract", () => {
     }
   });
 
+  it("fails closed for malformed nested repository fingerprint shapes", () => {
+    const transition = { generationToken, planId };
+    const now = "2026-07-20T01:00:00.000Z";
+    type MalformedRepositoryMutation = readonly [
+      string,
+      (repository: Record<string, unknown>) => void,
+    ];
+    const mutations: MalformedRepositoryMutation[] = [
+      [
+        "approvedPriorTarget",
+        (repository) => {
+          const targets = repository.targets as Record<string, unknown>[];
+          targets[0]!.approvedPriorTarget = null;
+        },
+      ],
+      [
+        "supportedForm",
+        (repository) => {
+          repository.supportedForm = {};
+        },
+      ],
+      [
+        "branch",
+        (repository) => {
+          repository.branch = {};
+        },
+      ],
+      [
+        "oids",
+        (repository) => {
+          repository.oids = {};
+        },
+      ],
+      [
+        "remotes",
+        (repository) => {
+          repository.remotes = null;
+        },
+      ],
+      [
+        "remotes.fetch",
+        (repository) => {
+          (repository.remotes as Record<string, unknown>).fetch = {};
+        },
+      ],
+      [
+        "stateHashes",
+        (repository) => {
+          repository.stateHashes = {};
+        },
+      ],
+      [
+        "git",
+        (repository) => {
+          repository.git = {};
+        },
+      ],
+      [
+        "canonicalCommitAuthor",
+        (repository) => {
+          repository.canonicalCommitAuthor = {};
+        },
+      ],
+      [
+        "targets",
+        (repository) => {
+          repository.targets = null;
+        },
+      ],
+    ];
+
+    for (const [label, mutate] of mutations) {
+      const malformed = structuredClone(completeReadyPlan()) as unknown as {
+        repositoryFingerprint: Record<string, unknown>;
+      };
+      mutate(malformed.repositoryFingerprint);
+      expect(
+        matchesApprovalContext(
+          malformed as unknown as VerifiedReadyExportPlan,
+          transition,
+          approvalFingerprint(),
+          now,
+        ),
+        label,
+      ).toBe(false);
+    }
+
+    expect(
+      matchesApprovalContext(
+        {
+          ...completeReadyPlan(),
+          profileSnapshot: "" as ValidatedPortableProfileSnapshot,
+        },
+        transition,
+        approvalFingerprint(),
+        now,
+      ),
+      "empty profile snapshot",
+    ).toBe(false);
+  });
+
   it("rejects unsafe sealed output paths before approval", () => {
     const transition = { generationToken, planId };
     const now = "2026-07-20T01:00:00.000Z";
