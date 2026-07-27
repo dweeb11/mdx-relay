@@ -782,6 +782,30 @@ describe("processPlan markdown occurrence alignment", () => {
     expect(h.transformCalls()).toBe(1);
   });
 
+  it("rejects a path-shaped source that is not an exact safe-path match", async () => {
+    const images = [image("a", "aa", "assets/photo.png")];
+    const h = withOccurrences(images, [
+      { source: "other/photo.png", destination: "img-1.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+  });
+
+  it("rejects a backslash-shaped source instead of treating it as a basename", async () => {
+    const images = [image("a", "aa", "assets/photo.png")];
+    const h = withOccurrences(images, [
+      { source: "assets\\photo.png", destination: "img-1.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+  });
+
   it("still dedupes repeated embeds that share one source path", async () => {
     const images = [
       image("a", "same", "assets/photo.png"),
