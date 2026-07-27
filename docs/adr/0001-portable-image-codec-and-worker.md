@@ -214,3 +214,9 @@ labelled arm64-recorded.
   codec operation through the started worker.
 - Cross-architecture hash parity is expected but unverified; tracked as a narrow
   follow-up for x86_64 CI.
+- Coverage (APP-601): `src/images/**` and `src/worker/**` are in the Vitest
+  coverage include list with per-surface thresholds. Two bootstrap surfaces are
+  excluded narrowly and remain proven outside unit coverage:
+  `src/worker/processing.worker.ts` (DedicatedWorkerGlobalScope + WASM module
+  wiring; exercised by `npm run test:bundle`) and `src/worker/wasm.d.ts`
+  (ambient typings for esbuild's binary WASM loader).
