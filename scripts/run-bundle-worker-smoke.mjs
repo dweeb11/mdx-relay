@@ -80,8 +80,8 @@ const request = {
   images: [
     {
       sourceId: "image-1",
-      // Must align with the note's document-order embed `![[sample-image.PNG|640]]`.
-      safePathLabel: "assets/sample-image.PNG",
+      // Exact root-level identity for the note's `![[sample-image.PNG|640]]` embed.
+      safePathLabel: "sample-image.PNG",
       contentSha256: "sha256:image",
       byteLength: pngByteLength,
       bytes: pngBytes,

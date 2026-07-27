@@ -772,14 +772,17 @@ describe("processPlan markdown occurrence alignment", () => {
     expect(h.transformCalls()).toBe(0);
   });
 
-  it("accepts basename sources that resolve to the request safe path", async () => {
-    const images = [image("a", "aa", "assets/photo.png")];
+  it("rejects a basename-only source when canonical identity cannot be proven", async () => {
+    const images = [image("a", "aa", "other-folder/photo.png")];
     const h = withOccurrences(images, [
       { source: "photo.png", destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
-    expect(terminal(h).ok).toBe(true);
-    expect(h.transformCalls()).toBe(1);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+    expect(h.transformCalls()).toBe(0);
   });
 
   it("rejects a path-shaped source that is not an exact safe-path match", async () => {
@@ -811,10 +814,7 @@ describe("processPlan markdown occurrence alignment", () => {
       image("a", "same", "assets/photo.png"),
       image("b", "same", "assets/photo.png"),
     ];
-    const h = withOccurrences(
-      images,
-      alignedOccurrences(images, () => "photo.png"),
-    );
+    const h = withOccurrences(images, alignedOccurrences(images));
     await processPlan(request(images), h.deps);
     expect(terminal(h).ok).toBe(true);
     expect(h.transformCalls()).toBe(1);

@@ -4,7 +4,6 @@ import {
   ISSUE_CODES,
   type BlockerIssue,
   type MdxRelayIssue,
-  type SafePathLabel,
   type WarningIssue,
 } from "../contracts/issues";
 import { mdxRelayErr, mdxRelayOk, type Result } from "../contracts/result";
@@ -65,25 +64,11 @@ const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
   mdxRelayErr(issues as [BlockerIssue, ...MdxRelayIssue[]]);
 
 /**
- * Obsidian embeds often use a basename while capture records a vault-relative
- * safe path. Exact equality covers full relative sources; a basename source may
- * match as the final path segment of the safe label. SafePathLabel forbids
- * backslashes, so only `/` separators are considered.
- */
-const sourceMatchesSafePath = (
-  source: string,
-  safePathLabel: SafePathLabel,
-): boolean => {
-  if (source === safePathLabel) return true;
-  if (source.includes("/") || source.includes("\\")) return false;
-  return safePathLabel.endsWith(`/${source}`);
-};
-
-/**
  * Fail closed when the transform's occurrence list disagrees with the worker
  * request: count, document-order destination identity from the profile template,
- * and source↔safePathLabel alignment where that identity is exposed. Duplicate
- * embeds remain valid when each occurrence pairs with its request entry.
+ * and exact source↔safePathLabel identity. Basename-only sources cannot prove
+ * which same-named vault attachment was captured, so they fail closed here.
+ * Duplicate embeds remain valid when each occurrence pairs with its request entry.
  */
 const occurrencesMatchRequest = (
   occurrences: readonly MarkdownImageReference[],
@@ -100,7 +85,7 @@ const occurrencesMatchRequest = (
     );
     if (
       occurrence.destination !== expectedDestination ||
-      !sourceMatchesSafePath(occurrence.source, image.safePathLabel)
+      occurrence.source !== image.safePathLabel
     ) {
       return false;
     }
