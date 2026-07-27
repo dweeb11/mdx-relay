@@ -40,8 +40,10 @@ const image = (
   sourceId: string,
   contentSha256: string,
   safePath = `assets/${sourceId}.png`,
+  embedSource = safePath,
 ): WorkerImageInput => ({
   sourceId,
+  embedSource,
   safePathLabel: label(safePath),
   contentSha256: digest(contentSha256),
   byteLength: 4,
@@ -74,11 +76,10 @@ const request = (
   ...overrides,
 });
 
-/** Occurrence list aligned with request images (document order + path identity). */
+/** Occurrence list aligned with request embed sources (document order). */
 const alignedOccurrences = (
   images: readonly WorkerImageInput[],
-  sourceFor: (image: WorkerImageInput) => string = (image) =>
-    image.safePathLabel,
+  sourceFor: (image: WorkerImageInput) => string = (image) => image.embedSource,
 ): readonly MarkdownImageReference[] =>
   images.map((image, index) =>
     Object.freeze({
@@ -714,7 +715,7 @@ describe("processPlan markdown occurrence alignment", () => {
   it("fails closed when the transform finds more images than the request", async () => {
     const images = [image("a", "aa")];
     const h = withOccurrences(images, [
-      { source: images[0]!.safePathLabel, destination: "img-1.webp" },
+      { source: images[0]!.embedSource, destination: "img-1.webp" },
       { source: "assets/missing.png", destination: "img-2.webp" },
     ]);
     await processPlan(request(images), h.deps);
@@ -729,7 +730,7 @@ describe("processPlan markdown occurrence alignment", () => {
   it("fails closed when the request lists extra images the note lacks", async () => {
     const images = [image("a", "aa"), image("b", "bb")];
     const h = withOccurrences(images, [
-      { source: images[0]!.safePathLabel, destination: "img-1.webp" },
+      { source: images[0]!.embedSource, destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
     expect(types(h.posts)).toEqual(["started", "completed"]);
@@ -741,13 +742,13 @@ describe("processPlan markdown occurrence alignment", () => {
   });
 
   it("fails closed when request images are reordered relative to occurrences", async () => {
-    const first = image("a", "aa", "assets/first.png");
-    const second = image("b", "bb", "assets/second.png");
+    const first = image("a", "aa", "assets/first.png", "first.png");
+    const second = image("b", "bb", "assets/second.png", "second.png");
     const images = [first, second];
     // Document order is second then first; request still supplies first then second.
     const h = withOccurrences(images, [
-      { source: second.safePathLabel, destination: "img-1.webp" },
-      { source: first.safePathLabel, destination: "img-2.webp" },
+      { source: second.embedSource, destination: "img-1.webp" },
+      { source: first.embedSource, destination: "img-2.webp" },
     ]);
     await processPlan(request(images), h.deps);
     expect(types(h.posts)).toEqual(["started", "completed"]);
@@ -761,8 +762,8 @@ describe("processPlan markdown occurrence alignment", () => {
   it("fails closed when destination order disagrees with the profile template", async () => {
     const images = [image("a", "aa"), image("b", "bb")];
     const h = withOccurrences(images, [
-      { source: images[0]!.safePathLabel, destination: "img-2.webp" },
-      { source: images[1]!.safePathLabel, destination: "img-1.webp" },
+      { source: images[0]!.embedSource, destination: "img-2.webp" },
+      { source: images[1]!.embedSource, destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
     expect(terminal(h)).toMatchObject({
@@ -772,12 +773,22 @@ describe("processPlan markdown occurrence alignment", () => {
     expect(h.transformCalls()).toBe(0);
   });
 
-  it("rejects a basename-only source when canonical identity cannot be proven", async () => {
-    const images = [image("a", "aa", "other-folder/photo.png")];
+  it("accepts basename embeds when capture records matching embedSource", async () => {
+    const images = [image("a", "aa", "assets/photo.png", "photo.png")];
     const h = withOccurrences(images, [
       { source: "photo.png", destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
+    expect(terminal(h).ok).toBe(true);
+    expect(h.transformCalls()).toBe(1);
+  });
+
+  it("rejects when embedSource disagrees with the transform occurrence", async () => {
+    const images = [image("a", "aa", "assets/photo.png", "photo.png")];
+    const h = withOccurrences(images, [
+      { source: "other.png", destination: "img-1.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
     expect(terminal(h)).toMatchObject({
       ok: false,
       error: [{ code: ISSUE_CODES.staleDuringPlanning }],
@@ -785,22 +796,11 @@ describe("processPlan markdown occurrence alignment", () => {
     expect(h.transformCalls()).toBe(0);
   });
 
-  it("rejects a path-shaped source that is not an exact safe-path match", async () => {
-    const images = [image("a", "aa", "assets/photo.png")];
+  it("does not treat a resolved safePathLabel as the occurrence identity", async () => {
+    // Capture resolved photo.png -> assets/photo.png, but forgot to record embedSource.
+    const images = [image("a", "aa", "assets/photo.png", "assets/photo.png")];
     const h = withOccurrences(images, [
-      { source: "other/photo.png", destination: "img-1.webp" },
-    ]);
-    await processPlan(request(images), h.deps);
-    expect(terminal(h)).toMatchObject({
-      ok: false,
-      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
-    });
-  });
-
-  it("rejects a backslash-shaped source instead of treating it as a basename", async () => {
-    const images = [image("a", "aa", "assets/photo.png")];
-    const h = withOccurrences(images, [
-      { source: "assets\\photo.png", destination: "img-1.webp" },
+      { source: "photo.png", destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
     expect(terminal(h)).toMatchObject({
@@ -811,8 +811,8 @@ describe("processPlan markdown occurrence alignment", () => {
 
   it("still dedupes repeated embeds that share one source path", async () => {
     const images = [
-      image("a", "same", "assets/photo.png"),
-      image("b", "same", "assets/photo.png"),
+      image("a", "same", "assets/photo.png", "photo.png"),
+      image("b", "same", "assets/photo.png", "photo.png"),
     ];
     const h = withOccurrences(images, alignedOccurrences(images));
     await processPlan(request(images), h.deps);

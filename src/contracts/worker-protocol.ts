@@ -24,6 +24,12 @@ export interface WorkerSourceNoteInput {
 
 export interface WorkerImageInput {
   readonly sourceId: string;
+  /**
+   * Exact Obsidian embed target as written in the note (before vault
+   * resolution). Document-order occurrences from `transformMarkdown` compare
+   * against this spelling; `safePathLabel` remains the resolved vault path.
+   */
+  readonly embedSource: string;
   readonly safePathLabel: SafePathLabel;
   readonly contentSha256: Sha256Digest;
   readonly byteLength: number;
@@ -196,6 +202,7 @@ if (import.meta.vitest) {
     images: [
       {
         sourceId: "image-1",
+        embedSource: "assets/image.png",
         safePathLabel: imageLabel,
         contentSha256: digest,
         byteLength: 1,
@@ -212,7 +219,13 @@ if (import.meta.vitest) {
         type: "process-plan",
         generationToken,
         sourceNote: { safePathLabel: noteLabel, contentSha256: digest },
-        images: [{ sourceId: "image-1", safePathLabel: imageLabel }],
+        images: [
+          {
+            sourceId: "image-1",
+            embedSource: "assets/image.png",
+            safePathLabel: imageLabel,
+          },
+        ],
       });
       expect(new Uint8Array(cloned.sourceNote.bytes)).toEqual(Uint8Array.of(1));
       expect(new Uint8Array(cloned.images[0]!.bytes)).toEqual(Uint8Array.of(2));

@@ -66,9 +66,10 @@ const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
 /**
  * Fail closed when the transform's occurrence list disagrees with the worker
  * request: count, document-order destination identity from the profile template,
- * and exact source↔safePathLabel identity. Basename-only sources cannot prove
- * which same-named vault attachment was captured, so they fail closed here.
- * Duplicate embeds remain valid when each occurrence pairs with its request entry.
+ * and exact embed-source identity from capture. `safePathLabel` is the resolved
+ * vault path and is not compared to the raw Obsidian spelling, so basename
+ * embeds remain valid when capture recorded the same embedSource. Duplicate
+ * embeds remain valid when each occurrence pairs with its request entry.
  */
 const occurrencesMatchRequest = (
   occurrences: readonly MarkdownImageReference[],
@@ -85,7 +86,7 @@ const occurrencesMatchRequest = (
     );
     if (
       occurrence.destination !== expectedDestination ||
-      occurrence.source !== image.safePathLabel
+      occurrence.source !== image.embedSource
     ) {
       return false;
     }
