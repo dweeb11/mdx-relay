@@ -81,6 +81,22 @@ describe("portable WebP codec", () => {
     expect([result.value.width, result.value.height]).toEqual([2, 6]);
   });
 
+  it("applies EXIF orientation when fill bytes precede APP1", async () => {
+    for (const name of [
+      "oriented-6-fill-one.jpg",
+      "oriented-6-fill-multi.jpg",
+    ] as const) {
+      const result = await codec.transform(await imageFixture(name), quality85);
+      expect(result.ok, name).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.decodedMime).toBe("image/jpeg");
+      expect([result.value.decodedWidth, result.value.decodedHeight]).toEqual([
+        6, 2,
+      ]);
+      expect([result.value.width, result.value.height]).toEqual([2, 6]);
+    }
+  });
+
   it("downscales without upscaling", async () => {
     const shrunk = await codec.transform(await imageFixture("wide.png"), {
       maxDimension: 24,

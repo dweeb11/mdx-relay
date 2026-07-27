@@ -21,9 +21,13 @@ Three findings from the audit that shaped the slicing:
    values — cycles were the only true gap, and `canonicalizeMachineBinding`'s
    hand-written field order is byte-identical to JCS. Consolidation is
    behaviour-preserving, so it can land before APP-620 rather than alongside it.
-2. **Nothing persists canonical bytes across versions.** Sealed plans store the
-   snapshot text and re-hash _that_; machine-binding digests are recomputed in
-   process. There is no compatibility constraint to design around.
+2. **Published sealed plans persist canonical bytes across versions.**
+   `publishSealedPlan` writes `canonicalizeJcs(envelope.plan)` as the on-disk
+   document; load-time verification re-canonicalizes with the current
+   canonicalizer and rejects the plan when `planId` no longer matches.
+   Cross-version byte-compatibility is therefore required; incompatible
+   canonicalizer changes need a separate migration decision. Machine-binding
+   digests remain recomputed in process.
 3. **The worker bundle is the binding constraint.** Node built-ins are `external`
    in `dist/processing.worker.js`, so a `node:crypto` import reachable from the
    worker survives the build and fails only at runtime. This is why hashing is a
