@@ -12,6 +12,7 @@ import {
   type ValidatedPortableProfileSnapshot,
 } from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
+import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
 import {
   buildExportPlan,
   type ExportPlanBuildInput,
@@ -230,6 +231,53 @@ const structuralCode = (
 ): string | undefined => {
   const result = verifyStoredExportPlan(plan, blobBytes, NOW);
   return result.ok ? undefined : result.error[0].code;
+};
+
+/**
+ * Expands a ready plan to `actionCount` targets that all reuse the existing
+ * image sealed output, keeping blob membership and approval mirrors coherent
+ * so only the action/target count gate can reject the candidate.
+ */
+const expandSharedImageActions = (
+  plan: Record<string, unknown>,
+  actionCount: number,
+): void => {
+  const actions = plan.actions as Record<string, unknown>[];
+  const mdxAction = actions[0]!;
+  const imageAction = actions[1]!;
+  const expanded = [mdxAction];
+  for (let index = 0; index < actionCount - 1; index += 1) {
+    expanded.push({
+      ...imageAction,
+      documentOrder: index + 1,
+      // Zero-pad so document order stays lexicographically sorted for the
+      // frozen repository-target path ordering gate.
+      targetPath: `public/posts/example/img-${String(index + 1).padStart(3, "0")}.webp`,
+      sourceOccurrence: index + 1,
+    });
+  }
+  plan.actions = expanded;
+  const targets = expanded
+    .map((action) => ({
+      normalizedPath: action.targetPath as string,
+      symlinkStatus: "not-symlink" as const,
+      approvedPriorTarget: action.approvedPriorTarget,
+    }))
+    .sort((left, right) =>
+      left.normalizedPath < right.normalizedPath
+        ? -1
+        : left.normalizedPath > right.normalizedPath
+          ? 1
+          : 0,
+    );
+  const repository = {
+    ...(plan.repositoryFingerprint as Record<string, unknown>),
+    targets,
+  };
+  plan.repositoryFingerprint = repository;
+  (
+    plan.approvalFingerprint as { repositoryFingerprint: unknown }
+  ).repositoryFingerprint = repository;
 };
 
 describe("canonicalizeJcs", () => {
@@ -513,6 +561,33 @@ describe("sealExportPlan", () => {
     if (!result.ok)
       expect(result.error[0].code).toBe(ISSUE_CODES.staleDuringPlanning);
   });
+
+  it("refuses to seal a draft whose target actions exceed the locked file budget", () => {
+    const draft = draftFor();
+    const overLimit = restored({ plan: draft.plan });
+    expandSharedImageActions(
+      overLimit,
+      MDX_RELAY_LIMITS.sealedOutputFiles + 1,
+    );
+    const result = sealExportPlan({
+      plan: overLimit as ExportPlanDraft["plan"],
+      blobBytes: draft.blobBytes,
+      sourceBytes: draft.sourceBytes,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error[0].code).toBe(ISSUE_CODES.staleDuringPlanning);
+
+    const atLimit = restored({ plan: draft.plan });
+    expandSharedImageActions(atLimit, MDX_RELAY_LIMITS.sealedOutputFiles);
+    expect(
+      sealExportPlan({
+        plan: atLimit as ExportPlanDraft["plan"],
+        blobBytes: draft.blobBytes,
+        sourceBytes: draft.sourceBytes,
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 describe("verifyStoredExportPlan", () => {
@@ -528,6 +603,27 @@ describe("verifyStoredExportPlan", () => {
       expect(result.value.planId).toBe(envelope.planId);
       expect(result.value.identityManifest).toBe(envelope.identityManifest);
     }
+  });
+
+  it("rejects a recomputed plan whose actions exceed the locked file budget", () => {
+    const envelope = sealOrThrow();
+    const overLimit = reseal(envelope, (plan) =>
+      expandSharedImageActions(
+        plan,
+        MDX_RELAY_LIMITS.sealedOutputFiles + 1,
+      ),
+    );
+    expect(tamperCode(overLimit, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(structuralCode(overLimit, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+
+    const atLimit = reseal(envelope, (plan) =>
+      expandSharedImageActions(plan, MDX_RELAY_LIMITS.sealedOutputFiles),
+    );
+    expect(tamperCode(atLimit, envelope.blobBytes)).toBeUndefined();
   });
 
   it("rejects every tampered field, blob, and identity as storage tampering", () => {

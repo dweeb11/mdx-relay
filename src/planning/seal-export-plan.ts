@@ -17,6 +17,7 @@ import {
 } from "../contracts/result";
 import { canonicalizeJcs, deepEquals, isWellFormedUnicode } from "../canonical";
 import { sha256OfBytes, sha256OfUtf8 } from "../canonical/hash";
+import { MDX_RELAY_LIMITS } from "../core/limits";
 import { isRecord } from "../core/predicates";
 import {
   verifySourceBytes,
@@ -325,6 +326,29 @@ const hasNoChangesEmptiness = (candidate: Record<string, unknown>): boolean => {
 };
 
 /**
+ * Target/action count must stay inside the locked file budget even when many
+ * actions share one content-addressed blob. The builder enforces this on
+ * derived plans; the verifier must enforce it again so a handcrafted draft or
+ * recomputed stored document cannot receive the verified brand with more
+ * writes than the limit permits.
+ */
+const withinTargetActionLimit = (
+  candidate: Record<string, unknown>,
+): boolean => {
+  if (
+    !Array.isArray(candidate.actions) ||
+    candidate.actions.length > MDX_RELAY_LIMITS.sealedOutputFiles
+  )
+    return false;
+  const repository = candidate.repositoryFingerprint;
+  return (
+    isRecord(repository) &&
+    Array.isArray(repository.targets) &&
+    repository.targets.length <= MDX_RELAY_LIMITS.sealedOutputFiles
+  );
+};
+
+/**
  * Recomputes the source-note and every source-image fingerprint from the bytes
  * a live capture supplied. Duplicated metadata proves nothing here: only the
  * bytes do.
@@ -398,7 +422,8 @@ const verifiedEnvelope = (
       sha256OfUtf8(candidate.dependencySnapshot) ||
     !hasVerifiedBlobs(candidate.blobs, blobBytes) ||
     !hasVerifiedSourceImageTransforms(candidate) ||
-    !mirrorsApprovalCapture(candidate)
+    !mirrorsApprovalCapture(candidate) ||
+    !withinTargetActionLimit(candidate)
   )
     return undefined;
 
