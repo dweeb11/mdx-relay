@@ -43,13 +43,15 @@ one branch, one PR, one commit per slice.
 
 ## Retro
 
-_Filled at milestone close (`/merged`). The metric lines are the outcome baseline._
+Closed 2026-07-27 with umbrella APP-622. Full write-up:
+`docs/retros/M2-canonical-byte-rules-retro.md`.
 
-- Review rounds: —
-- P0/P1 findings: —
-- Human interventions: —
-- Post-merge fix PRs: —
+- Review rounds: 7 M2-scoped PRs (#25–#30, #34)
+- P0/P1 findings: none mid-slice; sealed-plan persistence called out as a
+  docs follow-up (APP-631/633), not a production hash mismatch
+- Human interventions: design approval via `/grill-with-docs` before S1
+- Post-merge fix PRs: #29, #34 (ADR/milestone wording for byte compat)
 
-- Worked: —
-- Didn't: —
-- Change one thing: —
+- Worked: ADR-first cuts; behaviour-preserving extraction; 100% canonical coverage
+- Didn't: umbrella auto-closure after last slice; Linear MCP for agents
+- Change one thing: enforce Node-free layering in the same PR as the module
