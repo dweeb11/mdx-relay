@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { deepEquals, isWellFormedUnicode } from "../../../src/canonical";
+import { sha256OfBytes } from "../../../src/canonical/hash";
 import type {
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
@@ -17,7 +18,6 @@ import {
   isPortableRepositoryPath,
   MAX_PORTABLE_PATH_SEGMENT_LENGTH,
   MAX_PORTABLE_REPOSITORY_PATH_LENGTH,
-  sha256OfBytes,
   verifySourceBytes,
   type CanonicalSourceImage,
   type ExportPlanBuildInput,

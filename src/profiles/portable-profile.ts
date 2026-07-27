@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
-
 import { canonicalizeJcs, isPlainDataPropertyGraph } from "../canonical";
+import { sha256OfUtf8 } from "../canonical/hash";
 import { createIssue, ISSUE_CODES } from "../contracts/issues";
 import type {
   Sha256Digest,
@@ -111,9 +110,7 @@ export function validatePortableProfile(
     const snapshot = canonicalizeJcs(
       stableProfile,
     ) as ValidatedPortableProfileSnapshot;
-    const profileSnapshotSha256 = `sha256:${createHash("sha256")
-      .update(snapshot, "utf8")
-      .digest("hex")}` as Sha256Digest;
+    const profileSnapshotSha256 = sha256OfUtf8(snapshot);
     return mdxRelayOk(
       Object.freeze({
         profile: stableProfile,

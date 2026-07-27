@@ -6,7 +6,7 @@
 
 - [x] S1 — extract `src/core/predicates.ts`; unify `isRecord` ×6, `hasExactKeys` ×4, `isNonnegativeInteger` on `Number.isSafeInteger` (APP-628)
 - [x] S2 — `src/canonical/index.ts`: one self-guarding `canonicalizeJcs`, Node-free, at 100% coverage (APP-629)
-- [ ] S3 — `src/canonical/hash.ts`: move sha256 helpers out of the planner, add `sha256OfCanonical` (APP-630) — blocked by S2
+- [x] S3 — `src/canonical/hash.ts`: move sha256 helpers out of the planner, add `sha256OfCanonical` (APP-630) — blocked by S2
 
 Umbrella: APP-622. Sequenced before APP-620 (single owner for plan verification), which also needs the `export-plan.ts` split first.
 
@@ -22,7 +22,7 @@ Three findings from the audit that shaped the slicing:
    hand-written field order is byte-identical to JCS. Consolidation is
    behaviour-preserving, so it can land before APP-620 rather than alongside it.
 2. **Nothing persists canonical bytes across versions.** Sealed plans store the
-   snapshot text and re-hash *that*; machine-binding digests are recomputed in
+   snapshot text and re-hash _that_; machine-binding digests are recomputed in
    process. There is no compatibility constraint to design around.
 3. **The worker bundle is the binding constraint.** Node built-ins are `external`
    in `dist/processing.worker.js`, so a `node:crypto` import reachable from the
