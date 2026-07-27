@@ -71,7 +71,7 @@ describe("readExifOrientation", () => {
     expect(readExifOrientation("image/png", fixture("gradient.png"))).toBe(1);
   });
 
-  it("fails closed to 1 on malformed JPEG marker data", () => {
+  it("fails closed on malformed JPEG marker data", () => {
     // SOI followed by a non-marker byte.
     expect(
       readExifOrientation(
@@ -100,6 +100,16 @@ describe("readExifOrientation", () => {
         new Uint8Array([0xff, 0xd8, 0xff, 0xff, 0xff, 0xda, 0x00, 0x02]),
       ),
     ).toBe(1);
+    // A non-Exif APP1 segment is skipped; with no later Exif the result is 1.
+    expect(
+      readExifOrientation(
+        "image/jpeg",
+        new Uint8Array([
+          0xff, 0xd8, 0xff, 0xe1, 0x00, 0x08, 0x4e, 0x4f, 0x54, 0x45, 0x58,
+          0x00, 0xff, 0xd9,
+        ]),
+      ),
+    ).toBe(1);
   });
 
   it("reads a WebP EXIF chunk orientation and tolerates missing chunks", () => {
@@ -119,6 +129,82 @@ describe("readExifOrientation", () => {
     expect(readExifOrientation("image/webp", bytes)).toBe(8);
     // A WEBP header with no chunks stays upright.
     expect(readExifOrientation("image/webp", bytes.subarray(0, 12))).toBe(1);
+  });
+
+  it("reads little-endian TIFF orientation and fails closed on bad TIFF", () => {
+    const webpExif = (tiff: number[]): Uint8Array => {
+      const bytes = new Uint8Array(12 + 8 + tiff.length);
+      bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+      bytes.set([0x57, 0x45, 0x42, 0x50], 8);
+      bytes.set([0x45, 0x58, 0x49, 0x46], 12);
+      new DataView(bytes.buffer).setUint32(16, tiff.length, true);
+      bytes.set(tiff, 20);
+      return bytes;
+    };
+
+    // II (little-endian) orientation 3.
+    expect(
+      readExifOrientation(
+        "image/webp",
+        webpExif([
+          0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12,
+          0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00,
+        ]),
+      ),
+    ).toBe(3);
+
+    // Truncated TIFF header, unknown byte order, bad magic, truncated IFD,
+    // truncated entry, and an IFD with no orientation tag all stay upright.
+    expect(
+      readExifOrientation("image/webp", webpExif([0x49, 0x49, 0x2a])),
+    ).toBe(1);
+    expect(
+      readExifOrientation(
+        "image/webp",
+        webpExif([0x00, 0x00, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00]),
+      ),
+    ).toBe(1);
+    expect(
+      readExifOrientation(
+        "image/webp",
+        webpExif([0x49, 0x49, 0x2b, 0x00, 0x08, 0x00, 0x00, 0x00]),
+      ),
+    ).toBe(1);
+    expect(
+      readExifOrientation(
+        "image/webp",
+        webpExif([0x49, 0x49, 0x2a, 0x00, 0xff, 0x00, 0x00, 0x00]),
+      ),
+    ).toBe(1);
+    expect(
+      readExifOrientation(
+        "image/webp",
+        webpExif([
+          0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12,
+        ]),
+      ),
+    ).toBe(1);
+    expect(
+      readExifOrientation(
+        "image/webp",
+        webpExif([
+          0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+          0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00,
+        ]),
+      ),
+    ).toBe(1);
+  });
+
+  it("fails closed when a WebP EXIF chunk size overruns the file", () => {
+    const bytes = new Uint8Array(20);
+    bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+    bytes.set([0x57, 0x45, 0x42, 0x50], 8);
+    bytes.set([0x45, 0x58, 0x49, 0x46], 12);
+    // Claim a 100-byte payload that is not present.
+    new DataView(bytes.buffer).setUint32(16, 100, true);
+    expect(readExifOrientation("image/webp", bytes)).toBe(1);
   });
 });
 
@@ -286,6 +372,41 @@ describe("readImageHeader", () => {
         ),
       ),
     ).toEqual(["image/jpeg", 1_600, 1_200]);
+  });
+
+  it("skips JPEG fill and standalone markers before the frame header", () => {
+    // Header probe must use the same fill/standalone rules as EXIF walking so
+    // a padded JPEG still yields the stored decode cost before any decode.
+    expect(
+      size(
+        jpeg(
+          0xff,
+          0xff, // fill
+          0xff,
+          0x01, // TEM
+          0xff,
+          0xd0, // RST0
+          ...sof(8, 6),
+        ),
+      ),
+    ).toEqual(["image/jpeg", 8, 6]);
+  });
+
+  it("fails closed when EOI/SOS arrives with trailing bytes but no frame", () => {
+    // The walker only inspects a marker when four bytes remain; pad so EOI/SOS
+    // are examined rather than falling out of the loop unmarked.
+    expect(size(jpeg(0xff, 0xd9, 0x00, 0x00))).toBe(
+      ISSUE_CODES.imageDecodeFailed,
+    );
+    expect(size(jpeg(0xff, 0xda, 0x00, 0x00))).toBe(
+      ISSUE_CODES.imageDecodeFailed,
+    );
+  });
+
+  it("fails closed on a truncated VP8X canvas header", () => {
+    expect(size(riff(chunk("VP8X", [0, 0, 0, 0, 1, 2, 3])))).toBe(
+      ISSUE_CODES.imageDecodeFailed,
+    );
   });
 
   it("reports an unrecognized container as UNSUPPORTED_IMAGE", () => {
