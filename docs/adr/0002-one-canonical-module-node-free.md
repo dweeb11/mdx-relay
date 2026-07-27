@@ -121,8 +121,9 @@ to.
   unbuilt — get canonical bytes and the audited refusal rules for free.
 - APP-620 (single owner for plan verification) lands on top of this and of the
   `export-plan.ts` split; both are its raw material.
-- The Node-free rule for `canonical/index.ts` is not currently enforced by a
-  test. Anyone adding an import there must check the worker bundle by hand.
+- The Node-free rule for `canonical/index.ts` is enforced by
+  `tests/unit/canonical/index.test.ts` (no `node:` / `./hash` imports in
+  `index.ts`; `hash.ts` alone may import `node:crypto`).
 - Because persisted sealed-plan documents are themselves JCS output, and because
   load-time identity verification re-canonicalizes with the live module before
   comparing `planId`, later changes to `canonicalizeJcs` must remain

@@ -11,10 +11,10 @@ import {
   isWellFormedUnicode,
 } from "../../../src/canonical";
 
-const FIXTURE_ROOT = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../fixtures/jcs",
-);
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIXTURE_ROOT = join(HERE, "../../fixtures/jcs");
+const CANONICAL_INDEX_SOURCE = join(HERE, "../../../src/canonical/index.ts");
+const CANONICAL_HASH_SOURCE = join(HERE, "../../../src/canonical/hash.ts");
 
 const VECTOR_NAMES = [
   "arrays",
@@ -74,6 +74,23 @@ describe("canonicalizeJcs", () => {
     expect(canonicalizeJcs({ a: shared, b: shared })).toBe(
       '{"a":{"z":1},"b":{"z":1}}',
     );
+  });
+});
+
+describe("canonical module Node-free layering", () => {
+  it("keeps index.ts free of Node built-ins; hashing stays in hash.ts", () => {
+    const indexSource = readFileSync(CANONICAL_INDEX_SOURCE, "utf8");
+    const hashSource = readFileSync(CANONICAL_HASH_SOURCE, "utf8");
+
+    // ADR 0002 §2: the worker marks Node built-ins external. A node: edge from
+    // index.ts survives the build and fails only at runtime in a Web Worker.
+    expect(indexSource).not.toMatch(/\bfrom\s+["']node:/u);
+    expect(indexSource).not.toMatch(/\bimport\(\s*["']node:/u);
+    expect(indexSource).not.toMatch(/\brequire\(\s*["']node:/u);
+    expect(indexSource).not.toMatch(/\bfrom\s+["']\.\/hash(?:\.ts)?["']/u);
+
+    expect(hashSource).toMatch(/\bfrom\s+["']node:crypto["']/u);
+    expect(hashSource).toMatch(/\bfrom\s+["']\.\/index["']/u);
   });
 });
 
