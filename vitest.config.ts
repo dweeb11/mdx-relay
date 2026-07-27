@@ -16,6 +16,8 @@ export default defineConfig({
             "src/canonical/**/*.ts",
             "src/markdown/**/*.ts",
             "src/profiles/**/*.ts",
+            "src/images/**/*.ts",
+            "src/worker/**/*.ts",
           ],
         },
       },
@@ -55,8 +57,18 @@ export default defineConfig({
         "src/canonical/**/*.ts",
         "src/markdown/**/*.ts",
         "src/profiles/**/*.ts",
+        "src/images/**/*.ts",
+        "src/worker/**/*.ts",
       ],
-      exclude: ["src/main.ts"],
+      // Narrow bootstrap exclusions (APP-601):
+      // - processing.worker.ts wires WASM modules into DedicatedWorkerGlobalScope;
+      //   its production path is proven by `npm run test:bundle`, not unit coverage.
+      // - wasm.d.ts is ambient typings for esbuild's binary WASM loader only.
+      exclude: [
+        "src/main.ts",
+        "src/worker/processing.worker.ts",
+        "src/worker/wasm.d.ts",
+      ],
       thresholds: {
         statements: 99,
         lines: 99,
@@ -78,6 +90,19 @@ export default defineConfig({
           statements: 100,
           lines: 100,
           branches: 100,
+          functions: 100,
+        },
+        // Floors from exercised image/worker behavior (not padding tests).
+        "src/images/**": {
+          statements: 96,
+          lines: 96,
+          branches: 85,
+          functions: 100,
+        },
+        "src/worker/**": {
+          statements: 98,
+          lines: 98,
+          branches: 90,
           functions: 100,
         },
       },
