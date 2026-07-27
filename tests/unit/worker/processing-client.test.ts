@@ -1342,10 +1342,7 @@ describe("ProcessingClient wire-event validation", () => {
       },
     ],
     ["a cancelled event without generationToken", { type: "cancelled" }],
-    [
-      "a non-string generationToken",
-      { type: "cancelled", generationToken: 7 },
-    ],
+    ["a non-string generationToken", { type: "cancelled", generationToken: 7 }],
     [
       "an empty-string generationToken",
       { type: "cancelled", generationToken: "" },
@@ -1364,10 +1361,7 @@ describe("ProcessingClient wire-event validation", () => {
   ])(
     "fails closed on a tokenless %s terminal after lifecycle progress",
     async (_name, event) => {
-      await expectMalformed(event, [
-        startedEvent(token),
-        progressEvent(token),
-      ]);
+      await expectMalformed(event, [startedEvent(token), progressEvent(token)]);
     },
   );
 
@@ -1393,7 +1387,11 @@ describe("ProcessingClient wire-event validation", () => {
     const done = client.process(request(), (event) => seen.push(event));
     expect(scheduler.size).toBe(1);
     worker.emit({ type: "cancelled", generationToken: otherToken });
-    worker.emit({ type: "started", generationToken: otherToken, imageCount: 0 });
+    worker.emit({
+      type: "started",
+      generationToken: otherToken,
+      imageCount: 0,
+    });
     // The run is still live: plan timer armed, no progress delivered, no terminate.
     expect(seen).toHaveLength(0);
     expect(worker.terminateCount).toBe(0);
