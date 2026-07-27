@@ -358,6 +358,19 @@ describe("processPlan", () => {
     const images = [image("a", "aa")];
     const h = harness(images, { now: () => 700_000 });
     await processPlan(request(images), h.deps);
+    const progress = h.posts.find((post) => post.event.type === "progress")
+      ?.event as {
+      elapsedMs: number;
+      remainingPlanBudgetMs: number;
+    };
+    // Past the deadline the worker still announces the image, but clocks stay
+    // inside the sealed window so the parent can accept the progress event.
+    expect(progress).toEqual(
+      expect.objectContaining({
+        elapsedMs: 600_000,
+        remainingPlanBudgetMs: 0,
+      }),
+    );
     const result = (
       h.posts.at(-1)!.event as {
         result: { ok: boolean; error: { code: string }[] };
