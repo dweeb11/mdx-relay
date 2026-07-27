@@ -232,9 +232,10 @@ const mirrorsApprovalCapture = (plan: Record<string, unknown>): boolean => {
     }) ||
     !deepEquals(approval.repositoryFingerprint, plan.repositoryFingerprint) ||
     !Array.isArray(plan.sourceImages) ||
+    !plan.sourceImages.every(isRecord) ||
     !deepEquals(
       approval.sourceImages,
-      plan.sourceImages.map((image: Record<string, unknown>) => ({
+      plan.sourceImages.map((image) => ({
         sourceId: image.sourceId,
         byteLength: image.byteLength,
         contentSha256: image.contentSha256,
