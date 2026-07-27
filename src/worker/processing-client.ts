@@ -17,7 +17,7 @@ import type {
   WorkerCompletion,
   WorkerGeneratedMdxOutput,
   WorkerImageOutput,
-  WorkerProcessRequest,
+  AnyWorkerProcessRequest,
   WorkerRequest,
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
@@ -153,7 +153,7 @@ export class ProcessingClient {
    * completed, blocked, or cancelled event. Never rejects.
    */
   process(
-    request: WorkerProcessRequest,
+    request: AnyWorkerProcessRequest,
     onProgress?: (event: DecodedWorkerEvent) => void,
   ): Promise<DecodedWorkerEvent> {
     const { generationToken } = request;
@@ -475,7 +475,7 @@ export class ProcessingClient {
   }
 
   private malformed(
-    generationToken: WorkerProcessRequest["generationToken"],
+    generationToken: AnyWorkerProcessRequest["generationToken"],
     activeSourceId: string | undefined,
   ): DecodedWorkerEvent {
     return brand({
@@ -545,7 +545,7 @@ export class ProcessingClient {
    * fails closed.
    */
   private approvedMaxDimension(
-    snapshot: WorkerProcessRequest["profileSnapshot"],
+    snapshot: AnyWorkerProcessRequest["profileSnapshot"],
   ): number | undefined {
     try {
       const profile = parsePortableProfile(JSON.parse(snapshot) as unknown);
@@ -620,7 +620,7 @@ export class ProcessingClient {
    * 3x4 are the same twelve pixels but cannot be the same decode.
    */
   private exceedsDecodedWorkBudget(
-    request: WorkerProcessRequest,
+    request: AnyWorkerProcessRequest,
     images: readonly WorkerImageOutput[],
   ): boolean | undefined {
     const charged = new Map<Sha256Digest, readonly [number, number]>();
@@ -649,7 +649,7 @@ export class ProcessingClient {
    * channels. Returns undefined for any malformed payload.
    */
   private async decodeCompletion(
-    request: WorkerProcessRequest,
+    request: AnyWorkerProcessRequest,
     value: unknown,
   ): Promise<DecodedCompletion> {
     if (!isRecord(value)) return MALFORMED;

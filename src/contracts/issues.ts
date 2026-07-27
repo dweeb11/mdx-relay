@@ -1126,6 +1126,7 @@ if (import.meta.vitest) {
       ].sort();
       // Intentional approval gate: contract API changes update this independent list.
       expect(exportedNames).toEqual([
+        "AnyWorkerProcessRequest",
         "ApprovalFingerprint",
         "ApprovalRecord",
         "ApprovalSealedOutputFingerprint",
@@ -1189,8 +1190,10 @@ if (import.meta.vitest) {
         "WorkerCompletion",
         "WorkerGeneratedMdxOutput",
         "WorkerImageInput",
+        "WorkerImageInputV2",
         "WorkerImageOutput",
         "WorkerProcessRequest",
+        "WorkerProcessRequestV2",
         "WorkerProgressEvent",
         "WorkerRequest",
         "WorkerSourceNoteInput",
