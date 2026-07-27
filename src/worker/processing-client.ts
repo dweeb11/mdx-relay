@@ -28,6 +28,7 @@ import {
   isPositiveInteger,
   isRecord,
 } from "../core/predicates";
+import { parsePortableProfile } from "../profiles/parse-portable-profile";
 
 /**
  *   process-plan.ts (worker)                 processing-client.ts (parent)
@@ -537,27 +538,18 @@ export class ProcessingClient {
 
   /**
    * Re-derives the approved longest-edge resize bound from the request's own
-   * profile snapshot. The snapshot is branded validated before the worker
-   * boundary, but the parent still reads the bound from bytes it holds rather
-   * than trusting any worker-supplied number. Missing, non-integer, or
-   * out-of-range values yield undefined so the completion fails closed.
+   * profile snapshot via `parsePortableProfile`. The snapshot is branded
+   * validated before the worker boundary, but the parent still reads the bound
+   * from bytes it holds rather than trusting any worker-supplied number.
+   * Malformed or out-of-range snapshots yield undefined so the completion
+   * fails closed.
    */
   private approvedMaxDimension(
     snapshot: WorkerProcessRequest["profileSnapshot"],
   ): number | undefined {
     try {
-      const parsed: unknown = JSON.parse(snapshot);
-      if (!isRecord(parsed) || !isRecord(parsed.images)) return undefined;
-      const { maxDimension } = parsed.images;
-      if (
-        typeof maxDimension !== "number" ||
-        !Number.isInteger(maxDimension) ||
-        maxDimension < 1 ||
-        maxDimension >
-          Math.floor(Math.sqrt(MDX_RELAY_LIMITS.decodedImagePixels))
-      )
-        return undefined;
-      return maxDimension;
+      const profile = parsePortableProfile(JSON.parse(snapshot) as unknown);
+      return profile?.images.maxDimension;
     } catch {
       return undefined;
     }
