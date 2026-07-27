@@ -1266,12 +1266,32 @@ describe("ProcessingClient wire-event validation", () => {
     },
   );
 
+  it("fails closed on a post-started completed event with unexpected own keys", async () => {
+    // Extra keys on completed must be rejected after `started`, or the exact
+    // own-key gate at the terminal arm is never exercised.
+    await expectMalformed(
+      {
+        type: "completed",
+        generationToken: token,
+        result: { ok: true, value: okCompletion() },
+        secret: CANARY,
+      },
+      [startedEvent(token), progressEvent(token)],
+    );
+  });
+
   it.each([
     ["an unknown type", { type: "surprise", generationToken: token }],
     ["a missing type", { generationToken: token }],
     ["a non-string type", { type: 7, generationToken: token }],
   ])("fails closed on %s", async (_name, event) => {
     await expectMalformed(event);
+  });
+
+  it("fails closed on an unknown type that arrives after started", async () => {
+    await expectMalformed({ type: "surprise", generationToken: token }, [
+      startedEvent(token),
+    ]);
   });
 
   it.each([
@@ -1730,5 +1750,79 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
     expect(terminal.result.error[0].code).toBe(
       ISSUE_CODES.decodedWorkLimitExceeded,
     );
+  });
+
+  it("fails closed when the profile snapshot is not JSON", async () => {
+    // approvedMaxDimension must catch parse failures rather than trusting a
+    // worker-shaped completion against an unreadable parent snapshot.
+    const plan = request({
+      profileSnapshot: "{not-json" as ValidatedPortableProfileSnapshot,
+    });
+    const terminal = await settleWith(plan, okCompletion());
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("fails closed on error completions with an empty or warning-led channel", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit(completedEvent({ ok: false, error: [] }));
+    const empty = await done;
+    expect(empty.type).toBe("blocked");
+
+    const second = setup();
+    const doneWarning = second.client.process(request());
+    second.worker.emit(startedEvent(token));
+    second.worker.emit(
+      completedEvent({
+        ok: false,
+        error: [createIssue(ISSUE_CODES.wikilinksFlattened, { count: 1 })],
+      }),
+    );
+    const warningLed = await doneWarning;
+    expect(warningLed.type).toBe("blocked");
+  });
+
+  it("fails closed on blocked events whose issues are not blockers", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit({
+      type: "blocked",
+      generationToken: token,
+      issues: [createIssue(ISSUE_CODES.wikilinksFlattened, { count: 1 })],
+    });
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("fails closed on a cancelled event with unexpected own keys", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit({
+      type: "cancelled",
+      generationToken: token,
+      extra: true,
+    });
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("fails closed when a completion result is not a record", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    emitLifecycle(worker);
+    worker.emit(completedEvent(null));
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
   });
 });
