@@ -4,11 +4,13 @@ import {
   ISSUE_CODES,
   type BlockerIssue,
   type MdxRelayIssue,
+  type SafePathLabel,
   type WarningIssue,
 } from "../contracts/issues";
 import { mdxRelayErr, mdxRelayOk, type Result } from "../contracts/result";
 import type {
   WorkerCompletion,
+  WorkerImageInput,
   WorkerImageOutput,
   WorkerProcessRequest,
   WorkerWireEvent,
@@ -16,7 +18,10 @@ import type {
 import type { ImageCodec } from "../images/image-codec";
 import type { ImageHeader } from "../images/image-metadata";
 import { MDX_RELAY_LIMITS } from "../core/limits";
-import type { transformMarkdown } from "../markdown/transform";
+import type {
+  MarkdownImageReference,
+  transformMarkdown,
+} from "../markdown/transform";
 import { parsePortableProfile } from "../profiles/parse-portable-profile";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 
@@ -58,6 +63,52 @@ const parseProfile = (snapshot: string): PortableProfileV1 | undefined => {
 
 const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
   mdxRelayErr(issues as [BlockerIssue, ...MdxRelayIssue[]]);
+
+/**
+ * Obsidian embeds often use a basename while capture records a vault-relative
+ * safe path. Exact equality covers full relative sources; a basename source may
+ * match as the final path segment of the safe label.
+ */
+const sourceMatchesSafePath = (
+  source: string,
+  safePathLabel: SafePathLabel,
+): boolean => {
+  if (source === safePathLabel) return true;
+  if (source.includes("/") || source.includes("\\")) return false;
+  return (
+    safePathLabel.endsWith(`/${source}`) ||
+    safePathLabel.endsWith(`\\${source}`)
+  );
+};
+
+/**
+ * Fail closed when the transform's occurrence list disagrees with the worker
+ * request: count, document-order destination identity from the profile template,
+ * and source↔safePathLabel alignment where that identity is exposed. Duplicate
+ * embeds remain valid when each occurrence pairs with its request entry.
+ */
+const occurrencesMatchRequest = (
+  occurrences: readonly MarkdownImageReference[],
+  images: readonly WorkerImageInput[],
+  profile: PortableProfileV1,
+): boolean => {
+  if (occurrences.length !== images.length) return false;
+  for (let index = 0; index < occurrences.length; index += 1) {
+    const occurrence = occurrences[index]!;
+    const image = images[index]!;
+    const expectedDestination = profile.images.filenameTemplate.replaceAll(
+      "{index}",
+      String(index + 1),
+    );
+    if (
+      occurrence.destination !== expectedDestination ||
+      !sourceMatchesSafePath(occurrence.source, image.safePathLabel)
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
 
 /**
  * Runs one sealed processing plan inside the worker: generates the MDX, then
@@ -105,6 +156,17 @@ export async function processPlan(
     return;
   }
   const markdown = transformed.value;
+
+  // Capture must supply the same document-order occurrence list the transform
+  // just emitted; otherwise MDX can reference outputs the worker never builds.
+  if (!occurrencesMatchRequest(markdown.images, request.images, profile)) {
+    deps.post({
+      type: "completed",
+      generationToken,
+      result: blockerResult([createIssue(ISSUE_CODES.staleDuringPlanning)]),
+    });
+    return;
+  }
 
   const transfer = new Set<Transferable>();
   const transformedImages: WorkerImageOutput[] = [];

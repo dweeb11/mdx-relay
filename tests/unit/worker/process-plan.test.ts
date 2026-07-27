@@ -19,7 +19,10 @@ import type {
   WorkerWireEvent,
 } from "../../../src/contracts/worker-protocol";
 import type { ImageCodec } from "../../../src/images/image-codec";
-import type { MarkdownTransformResult } from "../../../src/markdown/transform";
+import type {
+  MarkdownImageReference,
+  MarkdownTransformResult,
+} from "../../../src/markdown/transform";
 import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 import {
@@ -33,9 +36,13 @@ const digest = (value: string): Sha256Digest =>
 const label = (value: string): SafePathLabel =>
   toSafePathLabel(value) as SafePathLabel;
 
-const image = (sourceId: string, contentSha256: string): WorkerImageInput => ({
+const image = (
+  sourceId: string,
+  contentSha256: string,
+  safePath = `assets/${sourceId}.png`,
+): WorkerImageInput => ({
   sourceId,
-  safePathLabel: label(`assets/${sourceId}.png`),
+  safePathLabel: label(safePath),
   contentSha256: digest(contentSha256),
   byteLength: 4,
   bytes: Uint8Array.of(1, 2, 3, 4).buffer,
@@ -67,12 +74,28 @@ const request = (
   ...overrides,
 });
 
-const markdownResult: MarkdownTransformResult = {
+/** Occurrence list aligned with request images (document order + path identity). */
+const alignedOccurrences = (
+  images: readonly WorkerImageInput[],
+  sourceFor: (image: WorkerImageInput) => string = (image) =>
+    image.safePathLabel,
+): readonly MarkdownImageReference[] =>
+  images.map((image, index) =>
+    Object.freeze({
+      source: sourceFor(image),
+      destination: `img-${String(index + 1)}.webp`,
+    }),
+  );
+
+const markdownResult = (
+  images: readonly WorkerImageInput[] = [],
+  occurrences: readonly MarkdownImageReference[] = alignedOccurrences(images),
+): MarkdownTransformResult => ({
   slug: "example",
   mdx: "# hi\n",
-  images: [],
+  images: occurrences,
   issues: [createIssue(ISSUE_CODES.summaryMissing)],
-};
+});
 
 interface Harness {
   readonly deps: ProcessPlanDeps;
@@ -88,6 +111,7 @@ const defaultHeader = () =>
   ok({ mime: "image/png" as const, width: 4, height: 4 });
 
 const harness = (
+  images: readonly WorkerImageInput[] = [],
   overrides: Partial<ProcessPlanDeps> = {},
   codecTransform?: ImageCodec["transform"],
 ): Harness => {
@@ -109,7 +133,7 @@ const harness = (
     readImageHeader: defaultHeader,
     hash: async (bytes) => digest(`h${bytes.byteLength}`),
     transformMarkdown: (async () =>
-      ok(markdownResult)) as ProcessPlanDeps["transformMarkdown"],
+      ok(markdownResult(images))) as ProcessPlanDeps["transformMarkdown"],
     post: (event, transferList) =>
       posts.push({ event, transfer: transferList }),
     now: () => 2_000,
@@ -128,8 +152,9 @@ const types = (posts: Harness["posts"]): string[] =>
 
 describe("processPlan", () => {
   it("emits started, per-image progress, and an ok completion", async () => {
-    const h = harness();
-    await processPlan(request([image("a", "aa"), image("b", "bb")]), h.deps);
+    const images = [image("a", "aa"), image("b", "bb")];
+    const h = harness(images);
+    await processPlan(request(images), h.deps);
     expect(types(h.posts)).toEqual([
       "started",
       "progress",
@@ -154,8 +179,9 @@ describe("processPlan", () => {
   });
 
   it("transfers every output buffer exactly once", async () => {
-    const h = harness();
-    await processPlan(request([image("a", "aa"), image("b", "bb")]), h.deps);
+    const images = [image("a", "aa"), image("b", "bb")];
+    const h = harness(images);
+    await processPlan(request(images), h.deps);
     const completed = h.posts.at(-1)!;
     expect(completed.transfer).toBeDefined();
     const transfer = completed.transfer!;
@@ -165,11 +191,12 @@ describe("processPlan", () => {
   });
 
   it("decodes each canonical source once and reuses it for duplicates", async () => {
-    const h = harness();
-    await processPlan(
-      request([image("a", "same"), image("b", "same")]),
-      h.deps,
-    );
+    const images = [
+      image("a", "same", "assets/photo.png"),
+      image("b", "same", "assets/photo.png"),
+    ];
+    const h = harness(images);
+    await processPlan(request(images), h.deps);
     expect(h.transformCalls()).toBe(1);
     const value = (
       h.posts.at(-1)!.event as {
@@ -182,8 +209,9 @@ describe("processPlan", () => {
   it("collapses to a blocker-first error when an image fails", async () => {
     const failing: ImageCodec["transform"] = async () =>
       err(createIssue(ISSUE_CODES.imageDecodeFailed));
-    const h = harness({}, failing);
-    await processPlan(request([image("a", "aa")]), h.deps);
+    const images = [image("a", "aa")];
+    const h = harness(images, {}, failing);
+    await processPlan(request(images), h.deps);
     const result = (
       h.posts.at(-1)!.event as {
         result: { ok: boolean; error: { code: string }[] };
@@ -194,13 +222,14 @@ describe("processPlan", () => {
   });
 
   it("collapses to a blocker when the markdown transform fails", async () => {
-    const h = harness({
+    const images = [image("a", "aa")];
+    const h = harness(images, {
       transformMarkdown: (async () =>
         err(
           createIssue(ISSUE_CODES.invalidMdx),
         )) as ProcessPlanDeps["transformMarkdown"],
     });
-    await processPlan(request([image("a", "aa")]), h.deps);
+    await processPlan(request(images), h.deps);
     // No image processing happens once the note itself is blocked.
     expect(types(h.posts)).toEqual(["started", "completed"]);
     const result = (
@@ -261,13 +290,14 @@ describe("processPlan", () => {
   ])(
     "blocks invalid profile snapshot shape (%s) as INVALID_PROFILE",
     async (_label, snapshot) => {
-      const transformMarkdown = vi.fn(async () => ok(markdownResult));
-      const h = harness({
+      const images = [image("a", "aa")];
+      const transformMarkdown = vi.fn(async () => ok(markdownResult(images)));
+      const h = harness(images, {
         transformMarkdown:
           transformMarkdown as unknown as ProcessPlanDeps["transformMarkdown"],
       });
       await processPlan(
-        request([image("a", "aa")], {
+        request(images, {
           profileSnapshot: snapshot as ValidatedPortableProfileSnapshot,
         }),
         h.deps,
@@ -287,10 +317,10 @@ describe("processPlan", () => {
 
   it("accepts a valid frozen portable profile unchanged", async () => {
     const seen: unknown[] = [];
-    const h = harness({
+    const h = harness([], {
       transformMarkdown: (async (_note, profile) => {
         seen.push(profile);
-        return ok(markdownResult);
+        return ok(markdownResult());
       }) as ProcessPlanDeps["transformMarkdown"],
     });
     await processPlan(request([]), h.deps);
@@ -302,8 +332,9 @@ describe("processPlan", () => {
   });
 
   it("fails closed with PLAN_BUDGET_EXHAUSTED when the deadline has passed", async () => {
-    const h = harness({ now: () => 700_000 });
-    await processPlan(request([image("a", "aa")]), h.deps);
+    const images = [image("a", "aa")];
+    const h = harness(images, { now: () => 700_000 });
+    await processPlan(request(images), h.deps);
     const result = (
       h.posts.at(-1)!.event as {
         result: { ok: boolean; error: { code: string }[] };
@@ -338,10 +369,11 @@ describe("processPlan image-work signalling", () => {
       });
     };
     const h = harness(
+      images,
       {
         transformMarkdown: (async () => {
           order.push("markdown");
-          return ok(markdownResult);
+          return ok(markdownResult(images));
         }) as ProcessPlanDeps["transformMarkdown"],
         post: (event) => {
           order.push(
@@ -379,7 +411,10 @@ describe("processPlan image-work signalling", () => {
 
   it("still emits progress before reusing a deduplicated source", async () => {
     expect(
-      await interleaving([image("a", "same"), image("b", "same")]),
+      await interleaving([
+        image("a", "same", "assets/photo.png"),
+        image("b", "same", "assets/photo.png"),
+      ]),
     ).toEqual([
       "started",
       "markdown",
@@ -459,12 +494,14 @@ describe("processPlan cumulative decoded-work budget", () => {
   });
 
   it("never performs 440MP of work for eleven unique 40MP images", async () => {
+    const images = unique(11);
     const codec = decoding(Array<number>(11).fill(PER_IMAGE));
     const h = harness(
+      images,
       { readImageHeader: codec.readImageHeader },
       codec.transform,
     );
-    await processPlan(request(unique(11)), h.deps);
+    await processPlan(request(images), h.deps);
 
     // The eleventh image is never decoded: the budget is already spent.
     expect(codec.calls()).toBe(10);
@@ -478,12 +515,14 @@ describe("processPlan cumulative decoded-work budget", () => {
   });
 
   it("completes ten unique 40MP images exactly at the budget", async () => {
+    const images = unique(10);
     const codec = decoding(Array<number>(10).fill(PER_IMAGE));
     const h = harness(
+      images,
       { readImageHeader: codec.readImageHeader },
       codec.transform,
     );
-    await processPlan(request(unique(10)), h.deps);
+    await processPlan(request(images), h.deps);
     expect(codec.calls()).toBe(10);
     expect(codec.performed()).toBe(CUMULATIVE);
     expect(terminalResult(h).ok).toBe(true);
@@ -492,16 +531,18 @@ describe("processPlan cumulative decoded-work budget", () => {
   it("blocks before the decode that would push a partial budget over", async () => {
     // 9 x 39MP = 351MP, then a 40MP image lands exactly on 391MP. The next
     // source costs 20MP, which would reach 411MP: it is never decoded.
+    const images = unique(11);
     const codec = decoding([
       ...Array<number>(9).fill(39 * MEGAPIXEL),
       PER_IMAGE,
       20 * MEGAPIXEL,
     ]);
     const h = harness(
+      images,
       { readImageHeader: codec.readImageHeader },
       codec.transform,
     );
-    await processPlan(request(unique(11)), h.deps);
+    await processPlan(request(images), h.deps);
     expect(codec.calls()).toBe(10);
     expect(codec.performed()).toBe(391 * MEGAPIXEL);
     // The cap is never exceeded by even one pixel of real work.
@@ -514,13 +555,14 @@ describe("processPlan cumulative decoded-work budget", () => {
 
   it("charges a canonical source once however many times it is embedded", async () => {
     const codec = decoding([PER_IMAGE]);
-    const h = harness(
-      { readImageHeader: codec.readImageHeader },
-      codec.transform,
-    );
     // Twenty embeds of one 40MP source: 40MP of work, not 800MP.
     const repeats = Array.from({ length: 20 }, (_, index) =>
-      image(`embed-${String(index)}`, "one-source"),
+      image(`embed-${String(index)}`, "one-source", "assets/photo.png"),
+    );
+    const h = harness(
+      repeats,
+      { readImageHeader: codec.readImageHeader },
+      codec.transform,
     );
     await processPlan(request(repeats), h.deps);
     expect(codec.calls()).toBe(1);
@@ -531,15 +573,17 @@ describe("processPlan cumulative decoded-work budget", () => {
   });
 
   it("reports the decoded source size on every output, including reused ones", async () => {
+    const images = [
+      image("a", "same", "assets/photo.png"),
+      image("b", "same", "assets/photo.png"),
+    ];
     const codec = decoding([PER_IMAGE]);
     const h = harness(
+      images,
       { readImageHeader: codec.readImageHeader },
       codec.transform,
     );
-    await processPlan(
-      request([image("a", "same"), image("b", "same")]),
-      h.deps,
-    );
+    await processPlan(request(images), h.deps);
     const value = (
       h.posts.at(-1)!.event as {
         result: {
@@ -577,8 +621,9 @@ describe("processPlan decoded-size preflight", () => {
   const blockedBy = async (
     overrides: Partial<ProcessPlanDeps>,
   ): Promise<{ code: string; transformCalls: number }> => {
-    const h = harness(overrides);
-    await processPlan(request([image("a", "aa")]), h.deps);
+    const images = [image("a", "aa")];
+    const h = harness(images, overrides);
+    await processPlan(request(images), h.deps);
     const result = (
       h.posts.at(-1)!.event as {
         result: { ok: boolean; error: { code: string }[] };
@@ -639,5 +684,115 @@ describe("processPlan decoded-size preflight", () => {
           ok({ mime: "image/png" as const, width: 8, height: 8 }),
       }),
     ).toEqual({ code: ISSUE_CODES.imageDecodeFailed, transformCalls: 1 });
+  });
+});
+
+/**
+ * After transformMarkdown succeeds, the worker must refuse to process when the
+ * occurrence list disagrees with request.images. Otherwise MDX can reference
+ * outputs the worker never transforms.
+ */
+describe("processPlan markdown occurrence alignment", () => {
+  const terminal = (h: Harness) =>
+    (
+      h.posts.at(-1)!.event as {
+        result: { ok: boolean; error?: { code: string }[] };
+      }
+    ).result;
+
+  const withOccurrences = (
+    images: readonly WorkerImageInput[],
+    occurrences: readonly MarkdownImageReference[],
+  ): Harness =>
+    harness(images, {
+      transformMarkdown: (async () =>
+        ok(
+          markdownResult(images, occurrences),
+        )) as ProcessPlanDeps["transformMarkdown"],
+    });
+
+  it("fails closed when the transform finds more images than the request", async () => {
+    const images = [image("a", "aa")];
+    const h = withOccurrences(images, [
+      { source: images[0]!.safePathLabel, destination: "img-1.webp" },
+      { source: "assets/missing.png", destination: "img-2.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
+    expect(types(h.posts)).toEqual(["started", "completed"]);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+    expect(h.transformCalls()).toBe(0);
+  });
+
+  it("fails closed when the request lists extra images the note lacks", async () => {
+    const images = [image("a", "aa"), image("b", "bb")];
+    const h = withOccurrences(images, [
+      { source: images[0]!.safePathLabel, destination: "img-1.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
+    expect(types(h.posts)).toEqual(["started", "completed"]);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+    expect(h.transformCalls()).toBe(0);
+  });
+
+  it("fails closed when request images are reordered relative to occurrences", async () => {
+    const first = image("a", "aa", "assets/first.png");
+    const second = image("b", "bb", "assets/second.png");
+    const images = [first, second];
+    // Document order is second then first; request still supplies first then second.
+    const h = withOccurrences(images, [
+      { source: second.safePathLabel, destination: "img-1.webp" },
+      { source: first.safePathLabel, destination: "img-2.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
+    expect(types(h.posts)).toEqual(["started", "completed"]);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+    expect(h.transformCalls()).toBe(0);
+  });
+
+  it("fails closed when destination order disagrees with the profile template", async () => {
+    const images = [image("a", "aa"), image("b", "bb")];
+    const h = withOccurrences(images, [
+      { source: images[0]!.safePathLabel, destination: "img-2.webp" },
+      { source: images[1]!.safePathLabel, destination: "img-1.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+    expect(h.transformCalls()).toBe(0);
+  });
+
+  it("accepts basename sources that resolve to the request safe path", async () => {
+    const images = [image("a", "aa", "assets/photo.png")];
+    const h = withOccurrences(images, [
+      { source: "photo.png", destination: "img-1.webp" },
+    ]);
+    await processPlan(request(images), h.deps);
+    expect(terminal(h).ok).toBe(true);
+    expect(h.transformCalls()).toBe(1);
+  });
+
+  it("still dedupes repeated embeds that share one source path", async () => {
+    const images = [
+      image("a", "same", "assets/photo.png"),
+      image("b", "same", "assets/photo.png"),
+    ];
+    const h = withOccurrences(
+      images,
+      alignedOccurrences(images, () => "photo.png"),
+    );
+    await processPlan(request(images), h.deps);
+    expect(terminal(h).ok).toBe(true);
+    expect(h.transformCalls()).toBe(1);
   });
 });
