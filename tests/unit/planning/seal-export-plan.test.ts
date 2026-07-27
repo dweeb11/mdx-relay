@@ -960,6 +960,85 @@ describe("verifyStoredExportPlan", () => {
     }
   });
 
+  it("rejects malformed source-image entries as storage tampering without throwing", () => {
+    const envelope = sealOrThrow();
+    const { blobBytes } = envelope;
+    const original = (
+      restored(envelope).sourceImages as Record<string, unknown>[]
+    )[0]!;
+
+    const malformedEntries: readonly unknown[] = [
+      null,
+      undefined,
+      "image",
+      1,
+      true,
+      [],
+      [original],
+    ];
+
+    for (const entry of malformedEntries) {
+      const plan = restored(envelope);
+      plan.sourceImages = [entry];
+      expect(
+        () => verifyStoredExportPlan(plan, blobBytes, NOW, sourceBytes()),
+        String(entry),
+      ).not.toThrow();
+      expect(tamperCode(plan, blobBytes), String(entry)).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+      expect(structuralCode(plan, blobBytes), String(entry)).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+    }
+
+    // Non-record values that can cross the JSON.parse storage boundary.
+    const fromJson = JSON.parse(
+      JSON.stringify({ sourceImages: [null, true, 0, "x", []] }),
+    ) as { sourceImages: unknown[] };
+    for (const entry of fromJson.sourceImages) {
+      const plan = restored(envelope);
+      plan.sourceImages = [entry];
+      expect(
+        () => verifyStoredExportPlan(plan, blobBytes, NOW),
+        `json:${String(entry)}`,
+      ).not.toThrow();
+      expect(structuralCode(plan, blobBytes), `json:${String(entry)}`).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+    }
+
+    // Record-shaped but incomplete / wrong-typed fields must also fail closed.
+    const incompleteRecords: readonly Record<string, unknown>[] = [
+      {},
+      { ...original, transformedOutputSha256: null },
+      { ...original, transformedOutputSha256: 1 },
+      { ...original, sourceId: null },
+      { ...original, byteLength: "1" },
+    ];
+    for (const entry of incompleteRecords) {
+      const plan = restored(envelope);
+      plan.sourceImages = [entry];
+      (
+        plan.approvalFingerprint as { sourceImages: Record<string, unknown>[] }
+      ).sourceImages = [
+        {
+          sourceId: entry.sourceId,
+          byteLength: entry.byteLength,
+          contentSha256: entry.contentSha256,
+          transformedOutputSha256: entry.transformedOutputSha256,
+        },
+      ];
+      expect(
+        () => verifyStoredExportPlan(plan, blobBytes, NOW, sourceBytes()),
+        JSON.stringify(entry),
+      ).not.toThrow();
+      expect(tamperCode(plan, blobBytes), JSON.stringify(entry)).toBe(
+        ISSUE_CODES.storageTampered,
+      );
+    }
+  });
+
   it("applies the whole frozen structural gate to no-changes plans", () => {
     const targets = unchangedTargets();
     const envelope = sealOrThrow({
