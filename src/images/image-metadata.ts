@@ -72,11 +72,22 @@ const readTiffOrientation = (view: DataView, tiffStart: number): number => {
 
 const readJpegOrientation = (bytes: Uint8Array, view: DataView): number => {
   // Walk marker segments after the SOI looking for the APP1/Exif block.
+  // Fill and standalone markers use the same rules as readJpegSize.
   let offset = 2;
   while (offset + 4 <= bytes.length) {
     if (bytes[offset] !== 0xff) return 1;
     const marker = bytes[offset + 1]!;
-    // Standalone markers (SOI/EOI/RSTn) carry no length; stop at scan data.
+    // Fill bytes are legal padding between segments.
+    if (marker === 0xff) {
+      offset += 1;
+      continue;
+    }
+    // Standalone markers carry no length payload.
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      offset += 2;
+      continue;
+    }
+    // Scan data or the end of image without an Exif block: upright.
     if (marker === 0xd9 || marker === 0xda) return 1;
     const length = view.getUint16(offset + 2, false);
     if (length < 2 || offset + 2 + length > bytes.length) return 1;
