@@ -433,6 +433,8 @@ describe("ProcessingClient terminal cleanup", () => {
     } else if (name === "malformed") {
       emitLifecycle(worker);
       worker.emit(completedEvent({ ok: true, value: { nonsense: true } }));
+    } else if (name === "tokenless") {
+      worker.emit({});
     } else if (name === "crash") {
       worker.emitError();
     } else if (name === "cancel") {
@@ -455,6 +457,7 @@ describe("ProcessingClient terminal cleanup", () => {
     "worker-blocked",
     "worker-cancelled",
     "malformed",
+    "tokenless",
     "crash",
     "cancel",
     "plan-timeout",
@@ -1309,6 +1312,65 @@ describe("ProcessingClient wire-event validation", () => {
     expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
   });
 
+  it.each([
+    ["an empty object", {}],
+    [
+      "a started event without generationToken",
+      { type: "started", imageCount: 1 },
+    ],
+    [
+      "a progress event without generationToken",
+      {
+        type: "progress",
+        sourceId: "a",
+        imageIndex: 0,
+        completedImages: 0,
+        totalImages: 1,
+        elapsedMs: 0,
+        remainingPlanBudgetMs: 600_000,
+      },
+    ],
+    [
+      "a completed event without generationToken",
+      { type: "completed", result: { ok: true, value: okCompletion() } },
+    ],
+    [
+      "a blocked event without generationToken",
+      {
+        type: "blocked",
+        issues: [createIssue(ISSUE_CODES.imageDecodeFailed)],
+      },
+    ],
+    ["a cancelled event without generationToken", { type: "cancelled" }],
+    [
+      "a non-string generationToken",
+      { type: "cancelled", generationToken: 7 },
+    ],
+    [
+      "an empty-string generationToken",
+      { type: "cancelled", generationToken: "" },
+    ],
+  ])("fails closed immediately on %s", async (_name, event) => {
+    await expectMalformed(event);
+  });
+
+  it.each([
+    ["blocked", { type: "blocked", issues: [] }],
+    ["cancelled", { type: "cancelled" }],
+    [
+      "completed",
+      { type: "completed", result: { ok: true, value: okCompletion() } },
+    ],
+  ])(
+    "fails closed on a tokenless %s terminal after lifecycle progress",
+    async (_name, event) => {
+      await expectMalformed(event, [
+        startedEvent(token),
+        progressEvent(token),
+      ]);
+    },
+  );
+
   it("still silently discards a stale generation instead of failing closed", async () => {
     const { worker, client } = setup();
     const seen: unknown[] = [];
@@ -1323,6 +1385,47 @@ describe("ProcessingClient wire-event validation", () => {
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     expect((await done).type).toBe("completed");
     expect(seen).toHaveLength(2);
+  });
+
+  it("silently discards a mismatched token without settling the run", async () => {
+    const { worker, client, scheduler } = setup();
+    const seen: unknown[] = [];
+    const done = client.process(request(), (event) => seen.push(event));
+    expect(scheduler.size).toBe(1);
+    worker.emit({ type: "cancelled", generationToken: otherToken });
+    worker.emit({ type: "started", generationToken: otherToken, imageCount: 0 });
+    // The run is still live: plan timer armed, no progress delivered, no terminate.
+    expect(seen).toHaveLength(0);
+    expect(worker.terminateCount).toBe(0);
+    expect(scheduler.size).toBe(1);
+    expect(worker.onmessage).not.toBeNull();
+    emitLifecycle(worker);
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    expect((await done).type).toBe("completed");
+    expect(seen).toHaveLength(2);
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+  });
+
+  it("clears timers and terminates exactly once on a tokenless object", async () => {
+    const { worker, client, scheduler } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit(progressEvent(token));
+    expect(scheduler.size).toBe(2);
+    worker.emit({});
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+    expect(worker.onmessage).toBeNull();
+    expect(worker.onerror).toBeNull();
+    expect(worker.onmessageerror).toBeNull();
+    // A second tokenless message after settle must not terminate again.
+    worker.emit({});
+    expect(worker.terminateCount).toBe(1);
   });
 
   it("delivers only the contract fields of a valid progress event", async () => {
