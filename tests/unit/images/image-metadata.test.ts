@@ -45,6 +45,26 @@ describe("readExifOrientation", () => {
     );
   });
 
+  it("tolerates one and multiple fill bytes before APP1/Exif", () => {
+    // Legal JPEG padding: FF D8 FF FF E1 ... and FF D8 FF FF FF FF E1 ...
+    expect(
+      readExifOrientation("image/jpeg", fixture("oriented-6-fill-one.jpg")),
+    ).toBe(6);
+    expect(
+      readExifOrientation("image/jpeg", fixture("oriented-6-fill-multi.jpg")),
+    ).toBe(6);
+  });
+
+  it("tolerates standalone markers before APP1/Exif", () => {
+    const oriented = fixture("oriented-6.jpg");
+    // Insert TEM (0x01) and RST0 (0xd0) between SOI and APP1.
+    const withStandalone = new Uint8Array(oriented.length + 4);
+    withStandalone.set(oriented.subarray(0, 2), 0);
+    withStandalone.set([0xff, 0x01, 0xff, 0xd0], 2);
+    withStandalone.set(oriented.subarray(2), 6);
+    expect(readExifOrientation("image/jpeg", withStandalone)).toBe(6);
+  });
+
   it("defaults to upright when no EXIF orientation is present", () => {
     expect(readExifOrientation("image/jpeg", fixture("gradient.jpg"))).toBe(1);
     expect(readExifOrientation("image/webp", fixture("gradient.webp"))).toBe(1);
@@ -64,6 +84,20 @@ describe("readExifOrientation", () => {
       readExifOrientation(
         "image/jpeg",
         new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00]),
+      ),
+    ).toBe(1);
+    // Fill bytes then a truncated APP1 length still fail closed.
+    expect(
+      readExifOrientation(
+        "image/jpeg",
+        new Uint8Array([0xff, 0xd8, 0xff, 0xff, 0xff, 0xe1, 0x00]),
+      ),
+    ).toBe(1);
+    // Scan starts before any Exif block.
+    expect(
+      readExifOrientation(
+        "image/jpeg",
+        new Uint8Array([0xff, 0xd8, 0xff, 0xff, 0xff, 0xda, 0x00, 0x02]),
       ),
     ).toBe(1);
   });
@@ -214,6 +248,16 @@ describe("readImageHeader", () => {
   it("reports the pre-orientation size of an EXIF-rotated source", () => {
     // orientation 6 presents 2x6, but the decoder still pays for the stored 6x2.
     expect(size(fixture("oriented-6.jpg"))).toEqual(["image/jpeg", 6, 2]);
+    expect(size(fixture("oriented-6-fill-one.jpg"))).toEqual([
+      "image/jpeg",
+      6,
+      2,
+    ]);
+    expect(size(fixture("oriented-6-fill-multi.jpg"))).toEqual([
+      "image/jpeg",
+      6,
+      2,
+    ]);
   });
 
   it("reads all three WebP bitstream headers", () => {
