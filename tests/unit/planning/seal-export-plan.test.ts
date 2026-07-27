@@ -565,12 +565,9 @@ describe("sealExportPlan", () => {
   it("refuses to seal a draft whose target actions exceed the locked file budget", () => {
     const draft = draftFor();
     const overLimit = restored({ plan: draft.plan });
-    expandSharedImageActions(
-      overLimit,
-      MDX_RELAY_LIMITS.sealedOutputFiles + 1,
-    );
+    expandSharedImageActions(overLimit, MDX_RELAY_LIMITS.sealedOutputFiles + 1);
     const result = sealExportPlan({
-      plan: overLimit as ExportPlanDraft["plan"],
+      plan: overLimit as unknown as ExportPlanDraft["plan"],
       blobBytes: draft.blobBytes,
       sourceBytes: draft.sourceBytes,
     });
@@ -582,7 +579,7 @@ describe("sealExportPlan", () => {
     expandSharedImageActions(atLimit, MDX_RELAY_LIMITS.sealedOutputFiles);
     expect(
       sealExportPlan({
-        plan: atLimit as ExportPlanDraft["plan"],
+        plan: atLimit as unknown as ExportPlanDraft["plan"],
         blobBytes: draft.blobBytes,
         sourceBytes: draft.sourceBytes,
       }).ok,
@@ -608,10 +605,7 @@ describe("verifyStoredExportPlan", () => {
   it("rejects a recomputed plan whose actions exceed the locked file budget", () => {
     const envelope = sealOrThrow();
     const overLimit = reseal(envelope, (plan) =>
-      expandSharedImageActions(
-        plan,
-        MDX_RELAY_LIMITS.sealedOutputFiles + 1,
-      ),
+      expandSharedImageActions(plan, MDX_RELAY_LIMITS.sealedOutputFiles + 1),
     );
     expect(tamperCode(overLimit, envelope.blobBytes)).toBe(
       ISSUE_CODES.storageTampered,
