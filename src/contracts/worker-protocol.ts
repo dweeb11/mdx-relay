@@ -56,7 +56,10 @@ interface WorkerProcessRequestFields {
   readonly dependencySnapshotSha256: Sha256Digest;
 }
 
-/** Frozen V1 request shape retained for compatibility with existing producers. */
+/**
+ * Frozen V1 shape retained for wire compatibility. Image-bearing V1 requests
+ * fail closed because they cannot bind resolved paths to exact occurrences.
+ */
 export interface WorkerProcessRequest extends WorkerProcessRequestFields {
   readonly type: "process-plan";
   readonly images: readonly WorkerImageInput[];

@@ -78,6 +78,9 @@ const occurrencesMatchRequest = (
 ): boolean => {
   const { images } = request;
   if (occurrences.length !== images.length) return false;
+  // V1 has no occurrence identity. Preserve its frozen wire shape, but never
+  // process image bytes that cannot be bound to exact source-note occurrences.
+  if (request.type === "process-plan" && images.length > 0) return false;
   for (let index = 0; index < occurrences.length; index += 1) {
     const occurrence = occurrences[index]!;
     const image = images[index]!;

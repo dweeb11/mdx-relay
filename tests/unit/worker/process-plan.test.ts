@@ -734,12 +734,22 @@ describe("processPlan markdown occurrence alignment", () => {
         )) as ProcessPlanDeps["transformMarkdown"],
     });
 
-  it("continues accepting the frozen V1 image request shape", async () => {
+  it("continues accepting image-free V1 requests", async () => {
+    const h = withOccurrences([], []);
+    await processPlan(legacyRequest([]), h.deps);
+    expect(terminal(h).ok).toBe(true);
+    expect(h.transformCalls()).toBe(0);
+  });
+
+  it("rejects image-bearing V1 requests that cannot bind occurrences", async () => {
     const images = [image("a", "aa", "assets/photo.png", "photo.png")];
     const h = withOccurrences(images, alignedOccurrences(images));
     await processPlan(legacyRequest(images), h.deps);
-    expect(terminal(h).ok).toBe(true);
-    expect(h.transformCalls()).toBe(1);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+    expect(h.transformCalls()).toBe(0);
   });
 
   it("fails closed when the transform finds more images than the request", async () => {
