@@ -93,8 +93,16 @@ describe("transformMarkdown", () => {
       '<PostImage src="/posts/synthetic-note/img-2.webp" alt="" />',
     );
     expect(result.value.images).toEqual([
-      { source: "first.PNG", destination: "img-1.webp" },
-      { source: "second.jpg", destination: "img-2.webp" },
+      {
+        source: "first.PNG",
+        sourceStartOffset: 244,
+        destination: "img-1.webp",
+      },
+      {
+        source: "second.jpg",
+        sourceStartOffset: 263,
+        destination: "img-2.webp",
+      },
     ]);
     expect(
       issueCount(result.value.issues, ISSUE_CODES.wikilinksFlattened),
@@ -128,7 +136,11 @@ describe("transformMarkdown", () => {
       '<Article.Image src="/assets/synthetic-note/photo-1.webp" alt="" />',
     );
     expect(result.value.images).toEqual([
-      { source: "photo.webp", destination: "photo-1.webp" },
+      {
+        source: "photo.webp",
+        sourceStartOffset: 136,
+        destination: "photo-1.webp",
+      },
     ]);
   });
 

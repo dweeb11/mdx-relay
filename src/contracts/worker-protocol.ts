@@ -24,21 +24,25 @@ export interface WorkerSourceNoteInput {
 
 export interface WorkerImageInput {
   readonly sourceId: string;
-  /**
-   * Exact Obsidian embed target as written in the note (before vault
-   * resolution). Document-order occurrences from `transformMarkdown` compare
-   * against this spelling; `safePathLabel` remains the resolved vault path.
-   */
-  readonly embedSource: string;
   readonly safePathLabel: SafePathLabel;
   readonly contentSha256: Sha256Digest;
   readonly byteLength: number;
   readonly bytes: ArrayBuffer;
 }
 
-/** Pre-seal requests have no planId; generationToken is their sole identity. */
-export interface WorkerProcessRequest {
-  readonly type: "process-plan";
+/** V2 binds each resolved image to an exact occurrence in the source note. */
+export interface WorkerImageInputV2 extends WorkerImageInput {
+  /**
+   * Exact Obsidian embed target as written in the note (before vault
+   * resolution), plus its UTF-16 offset at the opening `![[`. Together they
+   * bind the resolved `safePathLabel` to one exact source-note occurrence,
+   * including when multiple same-name embeds resolve to different vault paths.
+   */
+  readonly embedSource: string;
+  readonly embedSourceStartOffset: number;
+}
+
+interface WorkerProcessRequestFields {
   readonly generationToken: GenerationToken;
   readonly planStartedAtMs: number;
   readonly planDeadlineMs: number;
@@ -50,16 +54,31 @@ export interface WorkerProcessRequest {
   /** RFC 8785 canonical JSON from one coherent dependency capture. */
   readonly dependencySnapshot: CanonicalDependencySnapshot;
   readonly dependencySnapshotSha256: Sha256Digest;
-  /** Canonical source images only; duplicate occurrences remain in the snapshot. */
+}
+
+/** Frozen V1 request shape retained for compatibility with existing producers. */
+export interface WorkerProcessRequest extends WorkerProcessRequestFields {
+  readonly type: "process-plan";
   readonly images: readonly WorkerImageInput[];
 }
+
+/** Versioned request that binds resolved images to source-note occurrences. */
+export interface WorkerProcessRequestV2 extends WorkerProcessRequestFields {
+  readonly type: "process-plan-v2";
+  /** Canonical source images; duplicates retain distinct occurrence offsets. */
+  readonly images: readonly WorkerImageInputV2[];
+}
+
+export type AnyWorkerProcessRequest =
+  | WorkerProcessRequest
+  | WorkerProcessRequestV2;
 
 export interface WorkerCancelRequest {
   readonly type: "cancel-generation";
   readonly generationToken: GenerationToken;
 }
 
-export type WorkerRequest = WorkerProcessRequest | WorkerCancelRequest;
+export type WorkerRequest = AnyWorkerProcessRequest | WorkerCancelRequest;
 
 interface GenerationBoundEvent {
   readonly generationToken: GenerationToken;
@@ -202,7 +221,6 @@ if (import.meta.vitest) {
     images: [
       {
         sourceId: "image-1",
-        embedSource: "assets/image.png",
         safePathLabel: imageLabel,
         contentSha256: digest,
         byteLength: 1,
@@ -211,18 +229,42 @@ if (import.meta.vitest) {
     ],
   });
 
+  const processRequestV2 = (): WorkerProcessRequestV2 => {
+    const v1 = processRequest();
+    return {
+      ...v1,
+      type: "process-plan-v2",
+      images: v1.images.map((image) => ({
+        ...image,
+        embedSource: "assets/image.png",
+        embedSourceStartOffset: 10,
+      })),
+    };
+  };
+
   describe("worker protocol", () => {
-    it("structured-clones all pure transformation input", () => {
-      const request = processRequest();
-      const cloned = structuredClone(request) as WorkerProcessRequest;
+    it("preserves the frozen V1 image request shape", () => {
+      expect(processRequest().images[0]).toEqual({
+        sourceId: "image-1",
+        safePathLabel: imageLabel,
+        contentSha256: digest,
+        byteLength: 1,
+        bytes: Uint8Array.of(2).buffer,
+      });
+    });
+
+    it("structured-clones all V2 pure transformation input", () => {
+      const request = processRequestV2();
+      const cloned = structuredClone(request) as WorkerProcessRequestV2;
       expect(cloned).toMatchObject({
-        type: "process-plan",
+        type: "process-plan-v2",
         generationToken,
         sourceNote: { safePathLabel: noteLabel, contentSha256: digest },
         images: [
           {
             sourceId: "image-1",
             embedSource: "assets/image.png",
+            embedSourceStartOffset: 10,
             safePathLabel: imageLabel,
           },
         ],

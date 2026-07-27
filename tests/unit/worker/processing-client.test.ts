@@ -112,7 +112,6 @@ class Scheduler {
 
 const image = (sourceId: string): WorkerImageInput => ({
   sourceId,
-  embedSource: `assets/${sourceId}.png`,
   safePathLabel: label(`assets/${sourceId}.png`),
   contentSha256: digest(sourceId),
   byteLength: 4,
@@ -1496,7 +1495,6 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
     request({
       images: contentKeys.map((key, index) => ({
         sourceId: `img-${String(index)}`,
-        embedSource: `assets/img-${String(index)}.png`,
         safePathLabel: label(`assets/img-${String(index)}.png`),
         contentSha256: digest(key),
         byteLength: 4,

@@ -61,7 +61,7 @@ const pngBytes = toArrayBuffer(readFileSync(pngPath));
 const pngByteLength = pngBytes.byteLength;
 
 const request = {
-  type: "process-plan",
+  type: "process-plan-v2",
   generationToken: "smoke-generation",
   planStartedAtMs: Date.now(),
   planDeadlineMs: Date.now() + 600_000,
@@ -82,6 +82,7 @@ const request = {
       sourceId: "image-1",
       // Raw note embed `![[sample-image.PNG|640]]`; safePathLabel may differ after resolution.
       embedSource: "sample-image.PNG",
+      embedSourceStartOffset: 503,
       safePathLabel: "assets/sample-image.PNG",
       contentSha256: "sha256:image",
       byteLength: pngByteLength,

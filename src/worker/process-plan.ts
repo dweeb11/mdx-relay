@@ -8,10 +8,10 @@ import {
 } from "../contracts/issues";
 import { mdxRelayErr, mdxRelayOk, type Result } from "../contracts/result";
 import type {
+  AnyWorkerProcessRequest,
   WorkerCompletion,
-  WorkerImageInput,
+  WorkerImageInputV2,
   WorkerImageOutput,
-  WorkerProcessRequest,
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
 import type { ImageCodec } from "../images/image-codec";
@@ -66,16 +66,17 @@ const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
 /**
  * Fail closed when the transform's occurrence list disagrees with the worker
  * request: count, document-order destination identity from the profile template,
- * and exact embed-source identity from capture. `safePathLabel` is the resolved
- * vault path and is not compared to the raw Obsidian spelling, so basename
- * embeds remain valid when capture recorded the same embedSource. Duplicate
- * embeds remain valid when each occurrence pairs with its request entry.
+ * and exact embed occurrence identity from capture. The raw spelling plus its
+ * source-note offset binds each resolved `safePathLabel` to one occurrence, so
+ * same-name embeds cannot be silently reordered. Duplicate embeds remain valid
+ * when each occurrence pairs with its request entry.
  */
 const occurrencesMatchRequest = (
   occurrences: readonly MarkdownImageReference[],
-  images: readonly WorkerImageInput[],
+  request: AnyWorkerProcessRequest,
   profile: PortableProfileV1,
 ): boolean => {
+  const { images } = request;
   if (occurrences.length !== images.length) return false;
   for (let index = 0; index < occurrences.length; index += 1) {
     const occurrence = occurrences[index]!;
@@ -84,11 +85,14 @@ const occurrencesMatchRequest = (
       "{index}",
       String(index + 1),
     );
-    if (
-      occurrence.destination !== expectedDestination ||
-      occurrence.source !== image.embedSource
-    ) {
-      return false;
+    if (occurrence.destination !== expectedDestination) return false;
+    if (request.type === "process-plan-v2") {
+      const v2Image = image as WorkerImageInputV2;
+      if (
+        occurrence.source !== v2Image.embedSource ||
+        occurrence.sourceStartOffset !== v2Image.embedSourceStartOffset
+      )
+        return false;
     }
   }
   return true;
@@ -112,7 +116,7 @@ const occurrencesMatchRequest = (
  * accounting.
  */
 export async function processPlan(
-  request: WorkerProcessRequest,
+  request: AnyWorkerProcessRequest,
   deps: ProcessPlanDeps,
 ): Promise<void> {
   const { generationToken } = request;
@@ -143,7 +147,7 @@ export async function processPlan(
 
   // Capture must supply the same document-order occurrence list the transform
   // just emitted; otherwise MDX can reference outputs the worker never builds.
-  if (!occurrencesMatchRequest(markdown.images, request.images, profile)) {
+  if (!occurrencesMatchRequest(markdown.images, request, profile)) {
     deps.post({
       type: "completed",
       generationToken,

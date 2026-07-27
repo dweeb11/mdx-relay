@@ -16,6 +16,8 @@ import { validateMdx } from "./validate-mdx";
 
 export interface MarkdownImageReference {
   readonly source: string;
+  /** UTF-16 offset from the source-note start to this occurrence's opening `![[`. */
+  readonly sourceStartOffset: number;
   readonly destination: string;
 }
 
@@ -556,7 +558,13 @@ export async function transformMarkdown(
         parsed.value.bodyOffset + edit.start,
         parsed.value.bodyOffset + edit.end,
       );
-    images.push(Object.freeze({ source: imageSource, destination }));
+    images.push(
+      Object.freeze({
+        source: imageSource,
+        sourceStartOffset: parsed.value.bodyOffset + match.index,
+        destination,
+      }),
+    );
   }
 
   for (const match of proseMatches(

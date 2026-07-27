@@ -15,7 +15,9 @@ import {
 import { err, ok } from "../../../src/contracts/result";
 import type {
   WorkerImageInput,
+  WorkerImageInputV2,
   WorkerProcessRequest,
+  WorkerProcessRequestV2,
   WorkerWireEvent,
 } from "../../../src/contracts/worker-protocol";
 import type { ImageCodec } from "../../../src/images/image-codec";
@@ -41,9 +43,11 @@ const image = (
   contentSha256: string,
   safePath = `assets/${sourceId}.png`,
   embedSource = safePath,
-): WorkerImageInput => ({
+  embedSourceStartOffset = 0,
+): WorkerImageInputV2 => ({
   sourceId,
   embedSource,
+  embedSourceStartOffset,
   safePathLabel: label(safePath),
   contentSha256: digest(contentSha256),
   byteLength: 4,
@@ -51,10 +55,10 @@ const image = (
 });
 
 const request = (
-  images: readonly WorkerImageInput[],
-  overrides: Partial<WorkerProcessRequest> = {},
-): WorkerProcessRequest => ({
-  type: "process-plan",
+  images: readonly WorkerImageInputV2[],
+  overrides: Partial<WorkerProcessRequestV2> = {},
+): WorkerProcessRequestV2 => ({
+  type: "process-plan-v2",
   generationToken: token,
   planStartedAtMs: 1_000,
   planDeadlineMs: 601_000,
@@ -76,20 +80,38 @@ const request = (
   ...overrides,
 });
 
+const legacyRequest = (
+  images: readonly WorkerImageInputV2[],
+): WorkerProcessRequest => ({
+  ...request(images),
+  type: "process-plan",
+  images: images.map(
+    (image): WorkerImageInput => ({
+      sourceId: image.sourceId,
+      safePathLabel: image.safePathLabel,
+      contentSha256: image.contentSha256,
+      byteLength: image.byteLength,
+      bytes: image.bytes,
+    }),
+  ),
+});
+
 /** Occurrence list aligned with request embed sources (document order). */
 const alignedOccurrences = (
-  images: readonly WorkerImageInput[],
-  sourceFor: (image: WorkerImageInput) => string = (image) => image.embedSource,
+  images: readonly WorkerImageInputV2[],
+  sourceFor: (image: WorkerImageInputV2) => string = (image) =>
+    image.embedSource,
 ): readonly MarkdownImageReference[] =>
   images.map((image, index) =>
     Object.freeze({
       source: sourceFor(image),
+      sourceStartOffset: image.embedSourceStartOffset,
       destination: `img-${String(index + 1)}.webp`,
     }),
   );
 
 const markdownResult = (
-  images: readonly WorkerImageInput[] = [],
+  images: readonly WorkerImageInputV2[] = [],
   occurrences: readonly MarkdownImageReference[] = alignedOccurrences(images),
 ): MarkdownTransformResult => ({
   slug: "example",
@@ -112,7 +134,7 @@ const defaultHeader = () =>
   ok({ mime: "image/png" as const, width: 4, height: 4 });
 
 const harness = (
-  images: readonly WorkerImageInput[] = [],
+  images: readonly WorkerImageInputV2[] = [],
   overrides: Partial<ProcessPlanDeps> = {},
   codecTransform?: ImageCodec["transform"],
 ): Harness => {
@@ -355,7 +377,7 @@ describe("processPlan", () => {
  */
 describe("processPlan image-work signalling", () => {
   const interleaving = async (
-    images: readonly WorkerImageInput[],
+    images: readonly WorkerImageInputV2[],
   ): Promise<string[]> => {
     const order: string[] = [];
     const transform: ImageCodec["transform"] = async () => {
@@ -476,7 +498,7 @@ describe("processPlan cumulative decoded-work budget", () => {
     };
   };
 
-  const unique = (count: number): WorkerImageInput[] =>
+  const unique = (count: number): WorkerImageInputV2[] =>
     Array.from({ length: count }, (_, index) =>
       image(`img-${String(index)}`, `sha-${String(index)}`),
     );
@@ -702,7 +724,7 @@ describe("processPlan markdown occurrence alignment", () => {
     ).result;
 
   const withOccurrences = (
-    images: readonly WorkerImageInput[],
+    images: readonly WorkerImageInputV2[],
     occurrences: readonly MarkdownImageReference[],
   ): Harness =>
     harness(images, {
@@ -712,11 +734,27 @@ describe("processPlan markdown occurrence alignment", () => {
         )) as ProcessPlanDeps["transformMarkdown"],
     });
 
+  it("continues accepting the frozen V1 image request shape", async () => {
+    const images = [image("a", "aa", "assets/photo.png", "photo.png")];
+    const h = withOccurrences(images, alignedOccurrences(images));
+    await processPlan(legacyRequest(images), h.deps);
+    expect(terminal(h).ok).toBe(true);
+    expect(h.transformCalls()).toBe(1);
+  });
+
   it("fails closed when the transform finds more images than the request", async () => {
     const images = [image("a", "aa")];
     const h = withOccurrences(images, [
-      { source: images[0]!.embedSource, destination: "img-1.webp" },
-      { source: "assets/missing.png", destination: "img-2.webp" },
+      {
+        source: images[0]!.embedSource,
+        sourceStartOffset: images[0]!.embedSourceStartOffset,
+        destination: "img-1.webp",
+      },
+      {
+        source: "assets/missing.png",
+        sourceStartOffset: 0,
+        destination: "img-2.webp",
+      },
     ]);
     await processPlan(request(images), h.deps);
     expect(types(h.posts)).toEqual(["started", "completed"]);
@@ -730,7 +768,11 @@ describe("processPlan markdown occurrence alignment", () => {
   it("fails closed when the request lists extra images the note lacks", async () => {
     const images = [image("a", "aa"), image("b", "bb")];
     const h = withOccurrences(images, [
-      { source: images[0]!.embedSource, destination: "img-1.webp" },
+      {
+        source: images[0]!.embedSource,
+        sourceStartOffset: images[0]!.embedSourceStartOffset,
+        destination: "img-1.webp",
+      },
     ]);
     await processPlan(request(images), h.deps);
     expect(types(h.posts)).toEqual(["started", "completed"]);
@@ -747,8 +789,16 @@ describe("processPlan markdown occurrence alignment", () => {
     const images = [first, second];
     // Document order is second then first; request still supplies first then second.
     const h = withOccurrences(images, [
-      { source: second.embedSource, destination: "img-1.webp" },
-      { source: first.embedSource, destination: "img-2.webp" },
+      {
+        source: second.embedSource,
+        sourceStartOffset: second.embedSourceStartOffset,
+        destination: "img-1.webp",
+      },
+      {
+        source: first.embedSource,
+        sourceStartOffset: first.embedSourceStartOffset,
+        destination: "img-2.webp",
+      },
     ]);
     await processPlan(request(images), h.deps);
     expect(types(h.posts)).toEqual(["started", "completed"]);
@@ -762,8 +812,16 @@ describe("processPlan markdown occurrence alignment", () => {
   it("fails closed when destination order disagrees with the profile template", async () => {
     const images = [image("a", "aa"), image("b", "bb")];
     const h = withOccurrences(images, [
-      { source: images[0]!.embedSource, destination: "img-2.webp" },
-      { source: images[1]!.embedSource, destination: "img-1.webp" },
+      {
+        source: images[0]!.embedSource,
+        sourceStartOffset: images[0]!.embedSourceStartOffset,
+        destination: "img-2.webp",
+      },
+      {
+        source: images[1]!.embedSource,
+        sourceStartOffset: images[1]!.embedSourceStartOffset,
+        destination: "img-1.webp",
+      },
     ]);
     await processPlan(request(images), h.deps);
     expect(terminal(h)).toMatchObject({
@@ -776,7 +834,7 @@ describe("processPlan markdown occurrence alignment", () => {
   it("accepts basename embeds when capture records matching embedSource", async () => {
     const images = [image("a", "aa", "assets/photo.png", "photo.png")];
     const h = withOccurrences(images, [
-      { source: "photo.png", destination: "img-1.webp" },
+      { source: "photo.png", sourceStartOffset: 0, destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
     expect(terminal(h).ok).toBe(true);
@@ -786,7 +844,7 @@ describe("processPlan markdown occurrence alignment", () => {
   it("rejects when embedSource disagrees with the transform occurrence", async () => {
     const images = [image("a", "aa", "assets/photo.png", "photo.png")];
     const h = withOccurrences(images, [
-      { source: "other.png", destination: "img-1.webp" },
+      { source: "other.png", sourceStartOffset: 0, destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
     expect(terminal(h)).toMatchObject({
@@ -800,7 +858,7 @@ describe("processPlan markdown occurrence alignment", () => {
     // Capture resolved photo.png -> assets/photo.png, but forgot to record embedSource.
     const images = [image("a", "aa", "assets/photo.png", "assets/photo.png")];
     const h = withOccurrences(images, [
-      { source: "photo.png", destination: "img-1.webp" },
+      { source: "photo.png", sourceStartOffset: 0, destination: "img-1.webp" },
     ]);
     await processPlan(request(images), h.deps);
     expect(terminal(h)).toMatchObject({
@@ -809,10 +867,23 @@ describe("processPlan markdown occurrence alignment", () => {
     });
   });
 
+  it("rejects reordered same-name embeds resolved to different paths", async () => {
+    const first = image("a", "aa", "folder-a/photo.png", "photo.png", 10);
+    const second = image("b", "bb", "folder-b/photo.png", "photo.png", 30);
+    const captured = [first, second];
+    const h = withOccurrences([second, first], alignedOccurrences(captured));
+    await processPlan(request([second, first]), h.deps);
+    expect(terminal(h)).toMatchObject({
+      ok: false,
+      error: [{ code: ISSUE_CODES.staleDuringPlanning }],
+    });
+    expect(h.transformCalls()).toBe(0);
+  });
+
   it("still dedupes repeated embeds that share one source path", async () => {
     const images = [
-      image("a", "same", "assets/photo.png", "photo.png"),
-      image("b", "same", "assets/photo.png", "photo.png"),
+      image("a", "same", "assets/photo.png", "photo.png", 10),
+      image("b", "same", "assets/photo.png", "photo.png", 30),
     ];
     const h = withOccurrences(images, alignedOccurrences(images));
     await processPlan(request(images), h.deps);
