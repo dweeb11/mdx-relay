@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const CODEQL_USES =
-  /uses:\s+(?<spec>github\/codeql-action\/[^@\s]+@[^\s]+)(?:\s+#\s+(?<comment>[^\n]*))?/g;
+  /uses:\s+(?<quote>["']?)(?<spec>github\/codeql-action\/[^@\s"']+@[^"'#\s]+)\k<quote>(?:\s+#\s+(?<comment>[^\n]*))?/g;
 
 const PINNED_RELEASE = /^github\/codeql-action\/[^@\s]+@(?<sha>[a-f0-9]{40})$/;
 
@@ -51,6 +51,11 @@ describe("CodeQL workflow", () => {
         "uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3",
         "uses: github/codeql-action/analyze@v4.37.3",
       ].join("\n"),
+      [
+        "uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3",
+        "uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3",
+        'uses: "github/codeql-action/upload-sarif@v4.37.3"',
+      ].join("\n"),
     ];
 
     for (const workflow of cases) {
@@ -66,5 +71,16 @@ describe("CodeQL workflow", () => {
 
     const pins = collectCodeqlPins(workflow);
     expect(new Set(pins).size).toBeGreaterThan(1);
+  });
+
+  it("includes quoted CodeQL action specs in the pin scan", () => {
+    const workflow = [
+      'uses: "github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81" # v4.37.3',
+      "uses: 'github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81' # v4.37.3",
+    ].join("\n");
+
+    const pins = collectCodeqlPins(workflow);
+    expect(pins).toHaveLength(2);
+    expect(new Set(pins).size).toBe(1);
   });
 });
