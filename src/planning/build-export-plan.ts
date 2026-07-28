@@ -582,6 +582,13 @@ export function buildExportPlan(
     targets: planTargets,
   });
 
+  // Count every planned target before content-addressed collapse. Repeated
+  // embeds of one image each produce a distinct action/target while sharing
+  // one blob; the file-count boundary must trip on that action count, not on
+  // the smaller deduped blob set.
+  if (planned.length > MDX_RELAY_LIMITS.sealedOutputFiles)
+    return blocked(ISSUE_CODES.outputFileLimitExceeded);
+
   // A ready plan seals exactly its action outputs plus the commit message; a
   // no-changes plan still seals every reviewable output for the preview.
   const blobs: Record<string, SealedOutput> = {};
