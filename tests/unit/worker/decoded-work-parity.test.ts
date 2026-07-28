@@ -14,11 +14,14 @@ import {
 } from "../../../src/contracts/issues";
 import { ok } from "../../../src/contracts/result";
 import type {
-  WorkerImageInput,
-  WorkerProcessRequest,
+  WorkerImageInputV2,
+  WorkerProcessRequestV2,
   WorkerWireEvent,
 } from "../../../src/contracts/worker-protocol";
-import type { MarkdownTransformResult } from "../../../src/markdown/transform";
+import type {
+  MarkdownImageReference,
+  MarkdownTransformResult,
+} from "../../../src/markdown/transform";
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 import {
   processPlan,
@@ -37,46 +40,68 @@ const digest = (value: string): Sha256Digest =>
 const label = (value: string): SafePathLabel =>
   toSafePathLabel(value) as SafePathLabel;
 
-const markdownResult: MarkdownTransformResult = {
-  slug: "example",
-  mdx: "# hi\n",
-  images: [],
-  issues: [createIssue(ISSUE_CODES.summaryMissing)],
+const inputFor = (embed: ParityEmbed, index: number): WorkerImageInputV2 => {
+  const safePath = `assets/img-${String(index)}.png`;
+  return {
+    sourceId: `img-${String(index)}`,
+    embedSource: safePath,
+    embedSourceStartOffset: index,
+    safePathLabel: label(safePath),
+    contentSha256: digest(embed.key),
+    byteLength: 4,
+    bytes: Uint8Array.of(1, 2, 3, 4).buffer,
+  };
 };
 
-const inputFor = (embed: ParityEmbed, index: number): WorkerImageInput => ({
-  sourceId: `img-${String(index)}`,
-  safePathLabel: label(`assets/img-${String(index)}.png`),
-  contentSha256: digest(embed.key),
-  byteLength: 4,
-  bytes: Uint8Array.of(1, 2, 3, 4).buffer,
+/** Occurrence list aligned with request embed sources (document order). */
+const alignedOccurrences = (
+  images: readonly WorkerImageInputV2[],
+): readonly MarkdownImageReference[] =>
+  images.map((image, index) =>
+    Object.freeze({
+      source: image.embedSource,
+      sourceStartOffset: image.embedSourceStartOffset,
+      destination: `img-${String(index + 1)}.webp`,
+    }),
+  );
+
+const markdownResult = (
+  images: readonly WorkerImageInputV2[],
+): MarkdownTransformResult => ({
+  slug: "example",
+  mdx: "# hi\n",
+  images: alignedOccurrences(images),
+  issues: [createIssue(ISSUE_CODES.summaryMissing)],
 });
 
 const requestFor = (
   embeds: readonly ParityEmbed[],
-  overrides: Partial<WorkerProcessRequest> = {},
-): WorkerProcessRequest => ({
-  type: "process-plan",
-  generationToken: token,
-  planStartedAtMs: 1_000,
-  planDeadlineMs: 601_000,
-  imageTimeoutMs: 60_000,
-  sourceNote: {
-    vaultRelativePath: "notes/example.md",
-    safePathLabel: label("notes/example.md"),
-    byteLength: 5,
-    contentSha256: digest("note"),
-    bytes: new TextEncoder().encode("# hi\n").buffer,
-  },
-  profileSnapshot: JSON.stringify(
-    DPW_MIND_NET_V1,
-  ) as ValidatedPortableProfileSnapshot,
-  profileSnapshotSha256: digest("profile"),
-  dependencySnapshot: "{}" as CanonicalDependencySnapshot,
-  dependencySnapshotSha256: digest("deps"),
-  images: embeds.map(inputFor),
-  ...overrides,
-});
+  overrides: Partial<WorkerProcessRequestV2> = {},
+): WorkerProcessRequestV2 => {
+  const images = embeds.map(inputFor);
+  return {
+    type: "process-plan-v2",
+    generationToken: token,
+    planStartedAtMs: 1_000,
+    planDeadlineMs: 601_000,
+    imageTimeoutMs: 60_000,
+    sourceNote: {
+      vaultRelativePath: "notes/example.md",
+      safePathLabel: label("notes/example.md"),
+      byteLength: 5,
+      contentSha256: digest("note"),
+      bytes: new TextEncoder().encode("# hi\n").buffer,
+    },
+    profileSnapshot: JSON.stringify(
+      DPW_MIND_NET_V1,
+    ) as ValidatedPortableProfileSnapshot,
+    profileSnapshotSha256: digest("profile"),
+    dependencySnapshot: "{}" as CanonicalDependencySnapshot,
+    dependencySnapshotSha256: digest("deps"),
+    images,
+    ...overrides,
+  };
+};
 
 /**
  * Drives `processPlan` over a case.
@@ -85,9 +110,13 @@ const requestFor = (
  * the header probe and the fake codec both walk that same sequence. The codec
  * must echo the header's dimensions or the worker fails the plan closed on the
  * charge-disagreement check, which would mask the budget verdict under test.
+ *
+ * Requests are V2 with occurrence-aligned markdown so APP-605's binder does not
+ * fail closed before the cumulative budget path under test.
  */
 const runWorker = async (embeds: readonly ParityEmbed[]) => {
   const sequence = uniqueSources(embeds);
+  const images = embeds.map(inputFor);
   let probes = 0;
   let decodes = 0;
   const posts: WorkerWireEvent[] = [];
@@ -116,7 +145,7 @@ const runWorker = async (embeds: readonly ParityEmbed[]) => {
     },
     hash: async (bytes) => digest(`h${String(bytes.byteLength)}`),
     transformMarkdown: (async () =>
-      ok(markdownResult)) as ProcessPlanDeps["transformMarkdown"],
+      ok(markdownResult(images))) as ProcessPlanDeps["transformMarkdown"],
     post: (event) => posts.push(event),
     now: () => 2_000,
   };
