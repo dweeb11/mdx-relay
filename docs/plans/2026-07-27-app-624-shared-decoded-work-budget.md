@@ -2,12 +2,11 @@
 
 **Date:** 2026-07-27
 
-**Branch:** `dweeb1123/app-624-arch-shared-pure-chargedecodedwork-for-worker-client-budget`
+**Branch:** `refactor/app-624-shared-decoded-work-budget`
 
 **Root issue:** APP-624
 
-**Status:** Decisions locked; canonical contract and parity-test design below satisfy the
-Hermes calibrated-decision gate. Ready for implementation review.
+**Status:** Implemented and verified. See "Outcome" at the end for divergences from plan.
 
 **Scope mode:** Cumulative-only. Does not alter ADR-0001.
 
@@ -76,9 +75,12 @@ touched here. Recorded so the next reader does not think this plan missed them.
 
 APP-624 says "~86 combined client/worker tests re-prove overlapping halves of the same
 math." Measured: the budget-specific regions are ~12 tests each side (~24 total), inside
-files of 21 (`process-plan.test.ts`) and 142 (`processing-client.test.ts`). The duplication
+files of 31 (`process-plan.test.ts`) and 109 (`processing-client.test.ts`). The duplication
 is real; the 86 figure counts the whole worker-boundary surface, most of which is not
 budget math.
+
+(First draft of this plan said 21 and 142. Those came from `grep -c "it("`, which counts
+lines rather than tests and misses `it.each` expansion. Corrected against real run output.)
 
 ### The benefit the issue did not claim
 
@@ -139,7 +141,7 @@ comparison. The dedupe and coherence rules are shared code exercised by one call
 
 This is honest and acceptable at this scope. The alternative (worker probes every embed,
 gaining a hash-vs-header disagreement check it cannot make today, at one extra bounded
-header read per repeat) is a real behavior change and is filed separately as APP-625.
+header read per repeat) is a real behavior change and is filed separately as APP-643.
 
 ## Proposed change
 
@@ -298,7 +300,7 @@ The per-image ceiling at `:165-176` is untouched. The `width`/`height` destructu
 
 **Verification:**
 Run: `npm run test:unit -- process-plan`
-Expected: all 21 tests pass, zero changed assertions.
+Expected: all 31 tests pass, zero changed assertions.
 
 **Acceptance Criteria:**
 - [ ] No `decodedPixels` identifier remains in `process-plan.ts`.
@@ -344,7 +346,7 @@ inline loop. Add `chargeDecodedWork` to the `../core/` import at `:24`.
 
 **Verification:**
 Run: `npm run test:unit -- processing-client`
-Expected: all 142 tests pass, zero changed assertions.
+Expected: all 109 tests pass, zero changed assertions.
 
 **Acceptance Criteria:**
 - [ ] `exceedsDecodedWorkBudget` still returns `true` / `false` / `undefined` with unchanged
@@ -360,7 +362,7 @@ region must pass with **zero edits**, for the same reason as Task 2.
 ### Task 4: Exhaustive helper suite
 
 **Files:**
-- Create: `tests/unit/core/decoded-work-budget.test.ts`
+- Modify: `src/core/decoded-work-budget.ts` (in-source `import.meta.vitest` block)
 
 **Implementation:**
 
@@ -412,7 +414,9 @@ The directory gate is 99/99/95/100; this file should clear it outright.
 ### Task 5: Parity tests
 
 **Files:**
-- Create: `tests/unit/worker/decoded-work-parity.test.ts`
+- Create: `tests/unit/worker/decoded-work-cases.ts` (shared table, not a `.test.ts`)
+- Create: `tests/unit/worker/decoded-work-parity.test.ts` (worker driver)
+- Modify: `tests/unit/worker/processing-client.test.ts` (client driver, appended)
 
 **Implementation:**
 
@@ -538,7 +542,7 @@ Expected: exit 0.
 
 **Automated Tests:** This task is the tests.
 
-### Task 7: File APP-625
+### Task 7: File APP-643
 
 **Files:** none.
 
@@ -557,15 +561,15 @@ with this conversation.
 - Link as related to APP-624.
 
 Use the Linear MCP tools. If Linear is unreachable, do **not** block the PR: post the exact
-issue body as a comment on APP-624 and note in the PR description that APP-625 is unfiled.
+issue body as a comment on APP-624 and note in the PR description that APP-643 is unfiled.
 The rule is that the tradeoff survives somewhere durable, not that a particular tool works.
 
 **Verification:**
 Run: none (tracker operation).
-Expected: APP-625 URL, or a fallback comment URL on APP-624.
+Expected: APP-643 URL, or a fallback comment URL on APP-624.
 
 **Acceptance Criteria:**
-- [ ] APP-625 exists and is linked to APP-624, or the fallback comment exists and the PR
+- [ ] APP-643 exists and is linked to APP-624, or the fallback comment exists and the PR
       description says so.
 
 **Automated Tests:** None — this is a tracker operation with no code surface.
@@ -624,7 +628,7 @@ migrated.
 | Task 4 exhaustive suite | 60 min | 8 min |
 | Task 5 parity tests | 90 min | 12 min |
 | Task 6 precondition pins | 30 min | 5 min |
-| Task 7 file APP-625 | 10 min | 2 min |
+| Task 7 file APP-643 | 10 min | 2 min |
 | Task 8 verify + evidence | 15 min | 5 min |
 | **Total** | **~4.5h** | **~40 min** |
 
@@ -641,8 +645,9 @@ breaking the code three times and confirming red.
 | `src/worker/process-plan.ts:18` | Add `core/decoded-work-budget` import |
 | `src/worker/processing-client.ts:630-652` | Replace loop body; keep signature and tri-state |
 | `src/worker/processing-client.ts:24` | Add `chargeDecodedWork` to the `core/` import |
-| `tests/unit/core/decoded-work-budget.test.ts` | Create. 14 exhaustive cases. |
-| `tests/unit/worker/decoded-work-parity.test.ts` | Create. P1-P3 input equivalence. |
+| `src/core/decoded-work-budget.ts` | In-source test block. 14 exhaustive cases. |
+| `tests/unit/worker/decoded-work-cases.ts` | Create. Shared parity case table. |
+| `tests/unit/worker/decoded-work-parity.test.ts` | Create. Worker-side driver, P1-P3. |
 | `tests/unit/worker/process-plan.test.ts` | Add precondition-ordering test |
 | `tests/unit/worker/processing-client.test.ts` | Add precondition-ordering test |
 
@@ -650,7 +655,7 @@ breaking the code three times and confirming red.
 
 - The 40 MP per-image ceiling on either side (D1).
 - `src/images/portable-webp-codec.ts:121` and `src/profiles/parse-portable-profile.ts:194`.
-- Worker probing repeat embeds to gain a hash-vs-header disagreement check (APP-625).
+- Worker probing repeat embeds to gain a hash-vs-header disagreement check (APP-643).
 - Any change to ADR-0001 §7, §8, or §9.
 - Unifying the divergent per-image edge-bound formulations.
 
@@ -665,7 +670,34 @@ breaking the code three times and confirming red.
    src/` returns exactly two lines: the declaration in `core/limits.ts` and the single
    comparison in `core/decoded-work-budget.ts`. No occurrence under `src/worker/`.
 6. `src/core/decoded-work-budget.ts` imports exactly one module.
-7. Task 7 complete: APP-625 filed and linked, or the documented fallback applied.
+7. Task 7 complete: APP-643 filed and linked, or the documented fallback applied.
+
+## Outcome
+
+Implemented 2026-07-27 on `refactor/app-624-shared-decoded-work-budget`. `npm run verify`
+exits 0: 545 unit (from 516) plus 26 integration, `src/core` at 100/100/100/100, bundle
+probe confirms no Node built-in reached `dist/processing.worker.js`.
+
+Where implementation diverged from this plan, and why:
+
+| Planned | Actual | Reason |
+|---------|--------|--------|
+| Tests at `tests/unit/core/decoded-work-budget.test.ts` | In-source `import.meta.vitest` block | `tests/unit/core/` does not exist; both existing `src/core/` files use in-source tests, and `vitest.config.ts` lists `src/core/**` under `includeSource`. Followed the directory's convention. |
+| One parity file | `decoded-work-cases.ts` (shared table) + `decoded-work-parity.test.ts` (worker driver) + appended client driver | The client harness (`FakeWorker`, `setup`, `okCompletion`) is module-local and unexported. Replicating ~200 lines was worse than one shared table with two independent drivers, which is stronger parity anyway. |
+| Branch `dweeb1123/app-624-...` | `refactor/app-624-shared-decoded-work-budget` | The planned name was Linear's auto-generated one. `GIT_CONVENTIONS.md:12-16` requires a `refactor/` prefix and says it applies to all tools. |
+| Follow-up filed as APP-625 | APP-643 | Linear assigned the next free number. |
+| P2 needs a new client test | Already covered | Mutation C (client charges output dims) turned three *existing* budget tests red, so the property was already pinned. No new test added. |
+
+Mutation verification, each confirmed red then reverted:
+
+| Mutation | Tests turned red |
+|----------|------------------|
+| Worker prefix slice short by one | 3 parity |
+| Worker charges resized output dims | 3 parity |
+| Client charges output dims | 3 existing budget |
+| Client dedupes on reported output hash | 1 new parity + 2 existing |
+| Worker per-image ceiling removed | 2 existing preflight |
+| Client per-image ceiling removed | 1 new precondition + 1 existing |
 
 ## Related
 
@@ -673,4 +705,4 @@ breaking the code three times and confirming red.
   bounds its own verification and redacts).
 - ADR-0002 §2 (Node-free rule), §3 (shared predicates go to `src/core/`).
 - APP-622 — M2 canonical byte rules, the consolidation precedent this follows.
-- APP-625 — worker probes every embed (filed from this plan).
+- APP-643 — worker probes every embed (filed from this plan).
