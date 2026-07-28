@@ -61,3 +61,125 @@ export function chargeDecodedWork<K>(
   }
   return { ok: true, total };
 }
+
+if (import.meta.vitest) {
+  const { describe, expect, it } = import.meta.vitest;
+
+  const sha = (n: number | string) => `sha256:${n}`;
+  const source = (n: number | string, width: number, height: number) => ({
+    contentSha256: sha(n),
+    width,
+    height,
+  });
+
+  // 40 MP, the per-image ceiling. No single source may exceed this, so the
+  // smallest cumulative overrun takes 11 of them.
+  const MAX = { width: 10_000, height: 4_000 } as const;
+  const maxSource = (n: number | string) => source(n, MAX.width, MAX.height);
+  const distinct = (count: number) =>
+    Array.from({ length: count }, (_, i) => maxSource(i));
+
+  describe("chargeDecodedWork", () => {
+    it("charges nothing for an empty plan", () => {
+      expect(chargeDecodedWork([])).toEqual({ ok: true, total: 0 });
+    });
+
+    it("charges a single source its exact area", () => {
+      expect(chargeDecodedWork([source("a", 3, 4)])).toEqual({
+        ok: true,
+        total: 12,
+      });
+    });
+
+    it("sums distinct sources", () => {
+      expect(
+        chargeDecodedWork([source("a", 3, 4), source("b", 10, 10)]),
+      ).toEqual({ ok: true, total: 112 });
+    });
+
+    it("charges a repeated source once", () => {
+      expect(chargeDecodedWork([source("a", 3, 4), source("a", 3, 4)])).toEqual(
+        { ok: true, total: 12 },
+      );
+    });
+
+    it("charges three embeds of one source once", () => {
+      expect(
+        chargeDecodedWork([
+          source("a", 3, 4),
+          source("a", 3, 4),
+          source("a", 3, 4),
+        ]),
+      ).toEqual({ ok: true, total: 12 });
+    });
+
+    it("rejects a repeat whose edges are transposed", () => {
+      expect(chargeDecodedWork([source("a", 2, 6), source("a", 6, 2)])).toEqual(
+        { ok: false, reason: "incoherent" },
+      );
+    });
+
+    it("rejects a repeat with the same area but different edges", () => {
+      expect(chargeDecodedWork([source("a", 2, 6), source("a", 3, 4)])).toEqual(
+        { ok: false, reason: "incoherent" },
+      );
+    });
+
+    it("allows a plan totalling exactly the cumulative cap", () => {
+      expect(chargeDecodedWork(distinct(10))).toEqual({
+        ok: true,
+        total: MDX_RELAY_LIMITS.cumulativeDecodedPixels,
+      });
+    });
+
+    it("refuses a plan one pixel over the cap", () => {
+      expect(chargeDecodedWork([...distinct(10), source("x", 1, 1)])).toEqual({
+        ok: false,
+        reason: "exceeded",
+      });
+    });
+
+    it("refuses at the eleventh maximum-size source", () => {
+      expect(chargeDecodedWork(distinct(11))).toEqual({
+        ok: false,
+        reason: "exceeded",
+      });
+    });
+
+    it("reports exceeded when the cap is hit before an incoherent repeat", () => {
+      // The overrun lands at index 10; the incoherent entry never gets read.
+      expect(chargeDecodedWork([...distinct(11), source(0, 1, 1)])).toEqual({
+        ok: false,
+        reason: "exceeded",
+      });
+    });
+
+    it("keeps a plan inside the cap that would exceed it if repeats were double-charged", () => {
+      expect(
+        chargeDecodedWork(Array.from({ length: 20 }, () => maxSource("a"))),
+      ).toEqual({ ok: true, total: MAX.width * MAX.height });
+    });
+
+    it("totals fifty distinct sources at the sealed-output-file bound", () => {
+      const sources = Array.from(
+        { length: MDX_RELAY_LIMITS.sealedOutputFiles },
+        (_, i) => source(i, 2_000, 4_000),
+      );
+      expect(chargeDecodedWork(sources)).toEqual({
+        ok: true,
+        total: MDX_RELAY_LIMITS.cumulativeDecodedPixels,
+      });
+    });
+
+    it("keys on the hash value, not the enclosing object identity", () => {
+      // Two separately constructed literals carrying one hash string.
+      const first = { contentSha256: sha("a"), width: 3, height: 4 };
+      const second = { contentSha256: sha("a"), width: 3, height: 4 };
+      expect(first).not.toBe(second);
+      expect(chargeDecodedWork([first, second])).toEqual({
+        ok: true,
+        total: 12,
+      });
+    });
+  });
+}
