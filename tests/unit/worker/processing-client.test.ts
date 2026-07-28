@@ -1837,3 +1837,54 @@ describe("decoded-work parity: client side of the shared case table", () => {
     expect(terminal.type).toBe("completed");
   });
 });
+
+/**
+ * `chargeDecodedWork` documents a caller precondition: every product handed to
+ * it is already bounded by the per-image ceiling, which is what keeps the
+ * running total inside the safe-integer range. That ordering used to be
+ * incidental. It is now load-bearing, so it is pinned here.
+ */
+describe("ProcessingClient per-image ceiling precedes the cumulative charge", () => {
+  it("reports a malformed response, not a budget overrun, for an oversized decode", async () => {
+    // Eleven images at 40_010_000px each: over the per-image ceiling AND over
+    // the cumulative cap. The two checks name different channels, so the code
+    // that comes back says which one ran first.
+    const plan = request({
+      images: Array.from({ length: 11 }, (_, index) => ({
+        sourceId: `img-${String(index)}`,
+        safePathLabel: label(`assets/img-${String(index)}.png`),
+        contentSha256: digest(`source-${String(index)}`),
+        byteLength: 4,
+        bytes: Uint8Array.of(1, 2, 3, 4).buffer,
+      })),
+    });
+    const base = okCompletion();
+    const { worker, client } = setup();
+    const done = client.process(plan);
+    emitLifecycle(worker, plan);
+    worker.emit(
+      completedEvent({
+        ok: true,
+        value: {
+          ...base,
+          transformedImages: plan.images.map((input) => ({
+            ...base.transformedImages[0]!,
+            sourceId: input.sourceId,
+            decodedWidth: 10_000,
+            decodedHeight: 4_001,
+          })),
+        },
+      }),
+    );
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    // decodeImage runs first and redacts. Reaching the budget channel here
+    // would mean the cumulative charge saw an unbounded product.
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    expect(10_000 * 4_001).toBeGreaterThan(MDX_RELAY_LIMITS.decodedImagePixels);
+    expect(11 * 10_000 * 4_001).toBeGreaterThan(
+      MDX_RELAY_LIMITS.cumulativeDecodedPixels,
+    );
+  });
+});
