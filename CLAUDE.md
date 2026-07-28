@@ -62,6 +62,14 @@ Canonical five-role vocabulary, used as-is (`needs-info`, `ready-for-agent`, `re
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+## Skill routing
+
+When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+
+The routing table lives in `AGENTS.md` under "Skill routing" — single source, not duplicated here.
+
+Repo-specific override: skills that default to filing GitHub issues (`/spec`) must file to **Linear** instead, per the issue-tracker rule above.
+
 ## Documentation
 
 - `PITCH.md` — human-owned product vision
