@@ -15,6 +15,10 @@ import type {
 } from "../contracts/worker-protocol";
 import type { ImageCodec } from "../images/image-codec";
 import type { ImageHeader } from "../images/image-metadata";
+import {
+  chargeDecodedWork,
+  type DecodedWorkSource,
+} from "../core/decoded-work-budget";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import type { transformMarkdown } from "../markdown/transform";
 import { parsePortableProfile } from "../profiles/parse-portable-profile";
@@ -110,8 +114,11 @@ export async function processPlan(
   const transformedImages: WorkerImageOutput[] = [];
   // Decode/transform each unique source once; reuse the output for repeats.
   const bySource = new Map<Sha256Digest, WorkerImageOutput>();
-  // Cumulative decoded work for the plan, counted once per canonical source.
-  let decodedPixels = 0;
+  // Every unique source probed so far, in charge order. The cumulative budget
+  // is recharged over this whole prefix before each decode, because the cap
+  // must be enforced *before* the work is performed (ADR 0001 §8), and one
+  // shared function owns that arithmetic for both sides.
+  const probed: DecodedWorkSource<Sha256Digest>[] = [];
 
   for (let index = 0; index < totalImages; index += 1) {
     const image = request.images[index]!;
@@ -176,10 +183,12 @@ export async function processPlan(
     }
     // The hard cap: a source that would push the plan past the cumulative limit
     // is refused before its decode begins, so the work is never performed.
-    if (
-      decodedPixels + width * height >
-      MDX_RELAY_LIMITS.cumulativeDecodedPixels
-    ) {
+    probed.push({ contentSha256: image.contentSha256, width, height });
+    const charge = chargeDecodedWork(probed);
+    if (!charge.ok) {
+      // `incoherent` is unreachable here: repeats are skipped at the bySource
+      // cache above, before any probe, so `probed` holds one entry per unique
+      // source. Both reasons fail closed on the same channel regardless.
       deps.post({
         type: "completed",
         generationToken,
@@ -189,7 +198,6 @@ export async function processPlan(
       });
       return;
     }
-    decodedPixels += width * height;
 
     const result = await deps.codec.transform(image.bytes, {
       maxDimension: profile.images.maxDimension,
