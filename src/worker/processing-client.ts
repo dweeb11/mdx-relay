@@ -24,6 +24,7 @@ import type {
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import {
   hasExactKeys,
+  isNonemptyString,
   isNonnegativeInteger,
   isPositiveInteger,
   isRecord,
@@ -47,10 +48,11 @@ import { parsePortableProfile } from "../profiles/parse-portable-profile";
  * expected image progress event, because `progress` is what arms the per-image
  * clock. Timeout, cancellation, a crash, or an unverifiable digest yields a
  * parent-synthesized blocked event; the plan deadline stays armed through
- * completion verification so a stalled digest cannot hang the run. Events whose
- * generation token does not match the active request are discarded. Because
- * each run owns a worker carrying an embedded WASM bundle, every terminal path
- * releases it exactly once through the single `settle` funnel.
+ * completion verification so a stalled digest cannot hang the run. A tokenless
+ * or non-string generation token fails closed as malformed; only a valid but
+ * different token is silently stale-discarded. Because each run owns a worker
+ * carrying an embedded WASM bundle, every terminal path releases it exactly
+ * once through the single `settle` funnel.
  *
  * The never-throw boundary spans the whole surface, not just the message path:
  * a worker that cannot even be constructed is itself the redacted worker-crash
@@ -280,6 +282,9 @@ export class ProcessingClient {
         // Wire data that is not even an object cannot be matched to a
         // generation, so it is malformed rather than merely stale.
         if (!isRecord(data)) return failClosed();
+        // A tokenless or non-string token cannot be matched either, so it fails
+        // closed immediately. Only a valid but different token is stale.
+        if (!isNonemptyString(data.generationToken)) return failClosed();
         // Stale generation and late events are silently discarded.
         if (data.generationToken !== generationToken) return;
         // A terminal event was accepted; verification may still be running, but
