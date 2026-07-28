@@ -29,6 +29,8 @@ import {
   type WorkerLike,
 } from "../../../src/worker/processing-client";
 
+import { PARITY_CASES } from "./decoded-work-cases";
+
 const token = "generation-1" as GenerationToken;
 const otherToken = "generation-stale" as GenerationToken;
 const digest = (value: string): Sha256Digest =>
@@ -1730,5 +1732,108 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
     expect(terminal.result.error[0].code).toBe(
       ISSUE_CODES.decodedWorkLimitExceeded,
     );
+  });
+});
+
+/**
+ * The parent half of the shared parity table. The worker half lives in
+ * `decoded-work-parity.test.ts` and drives the same cases through `processPlan`.
+ *
+ * The two sides feed the shared helper differently on purpose: the worker
+ * charges unique sources probed from headers, the parent charges every embed
+ * and lets the helper dedupe. Identical verdicts on every case are what prove
+ * the two input shapes are equivalent, which is the risk the shared function
+ * cannot remove on its own.
+ */
+describe("decoded-work parity: client side of the shared case table", () => {
+  const planOfEmbeds = (
+    embeds: readonly { key: string }[],
+  ): WorkerProcessRequest =>
+    request({
+      images: embeds.map((embed, index) => ({
+        sourceId: `img-${String(index)}`,
+        safePathLabel: label(`assets/img-${String(index)}.png`),
+        contentSha256: digest(embed.key),
+        byteLength: 4,
+        bytes: Uint8Array.of(1, 2, 3, 4).buffer,
+      })),
+    });
+
+  const completionOf = (
+    plan: WorkerProcessRequest,
+    embeds: readonly { width: number; height: number }[],
+  ) => {
+    const base = okCompletion();
+    return {
+      ...base,
+      transformedImages: plan.images.map((input, index) => ({
+        ...base.transformedImages[0]!,
+        sourceId: input.sourceId,
+        decodedWidth: embeds[index]!.width,
+        decodedHeight: embeds[index]!.height,
+      })),
+    };
+  };
+
+  for (const parityCase of PARITY_CASES) {
+    it(`${parityCase.refused ? "refuses" : "accepts"} ${parityCase.name}`, async () => {
+      const plan = planOfEmbeds(parityCase.embeds);
+      const { worker, client } = setup();
+      const done = client.process(plan);
+      emitLifecycle(worker, plan);
+      worker.emit(
+        completedEvent({
+          ok: true,
+          value: completionOf(plan, parityCase.embeds),
+        }),
+      );
+      const terminal = await done;
+      if (parityCase.refused) {
+        expect(terminal.type).toBe("blocked");
+        if (terminal.type !== "blocked") return;
+        expect(terminal.issues[0].code).toBe(
+          ISSUE_CODES.decodedWorkLimitExceeded,
+        );
+        return;
+      }
+      expect(terminal.type).toBe("completed");
+    });
+  }
+
+  /**
+   * P1 -- the parent dedupes on its OWN request hash, never on the hash the
+   * worker reported for the output. Two embeds share one request hash while
+   * carrying different output hashes; charging them separately would double the
+   * plan past the cap.
+   */
+  it("dedupes on the request hash, not the reported output hash", async () => {
+    const plan = planOfEmbeds(Array<{ key: string }>(11).fill({ key: "one" }));
+    const base = okCompletion();
+    const distinctOutputs = plan.images.map((input, index) => {
+      const bytes = Uint8Array.of(index, index, index).buffer;
+      return {
+        ...base.transformedImages[0]!,
+        sourceId: input.sourceId,
+        // Every embed reports a DIFFERENT output hash for the SAME source.
+        contentSha256: sha(bytes),
+        byteLength: bytes.byteLength,
+        bytes,
+        decodedWidth: 10_000,
+        decodedHeight: 4_000,
+      };
+    });
+    const { worker, client } = setup();
+    const done = client.process(plan);
+    emitLifecycle(worker, plan);
+    worker.emit(
+      completedEvent({
+        ok: true,
+        value: { ...base, transformedImages: distinctOutputs },
+      }),
+    );
+    const terminal = await done;
+    // Eleven embeds of one 40MP source cost 40MP, not 440MP. Keying on the
+    // output hash would charge all eleven and refuse this plan.
+    expect(terminal.type).toBe("completed");
   });
 });
