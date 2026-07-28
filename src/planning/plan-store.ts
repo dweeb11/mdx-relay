@@ -20,7 +20,8 @@ import {
 } from "../contracts/result";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import { canonicalizeJcs } from "../canonical";
-import { sha256OfBytes, type PlanSourceBytes } from "./build-export-plan";
+import { sha256OfBytes } from "../canonical/hash";
+import type { PlanSourceBytes } from "./build-export-plan";
 import {
   ACTIVE_PLAN_FILENAME,
   APPROVALS_DIRECTORY,

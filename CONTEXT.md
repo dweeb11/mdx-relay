@@ -16,12 +16,24 @@ always produce equal bytes. MDX Relay uses RFC 8785 (JCS) and nothing else.
 _Avoid_: serialization, stringification, normalization
 
 **Canonical bytes**:
-The output of canonicalization. The only thing this project ever hashes to
-establish identity.
+The output of canonicalization. Hashed to establish identity of structured JSON
+values — identity manifests, stored snapshot text, and other plain-data graphs.
+Not used for raw note, image, or sealed-blob content.
+
+**Content bytes**:
+Raw note, image, and sealed-blob octets as captured or sealed. Never
+canonicalized; hashed directly as they stand.
+
+**Content-byte digest**:
+A digest of content bytes (`contentSha256`). Stale-source checks rehash live
+note and image bytes against the plan's recorded digests and lengths; sealed-blob
+verification rehashes each blob's bytes against its record key, digest, length,
+and content-addressed path.
 
 **Digest**:
 The `sha256:<lowercase-hex>` form of a SHA-256 hash. Always carries the
-`sha256:` prefix; a bare hex string is not a digest.
+`sha256:` prefix; a bare hex string is not a digest. Applies to both digests of
+canonical bytes and content-byte digests.
 _Avoid_: hash, checksum, sum
 
 **Snapshot**:
@@ -66,13 +78,15 @@ What sealing and verification return: the sealed plan plus its plan ID, identity
 manifest, blob bytes, and whether source bytes were verified.
 
 **Blob**:
-A sealed output's bytes, keyed by its own digest. Blob paths are the hex of that
-digest, so a verified plan can only ever name content-addressed files.
+A sealed output's content bytes, keyed by their content-byte digest. Blob paths
+are the hex of that digest, so a verified plan can only ever name
+content-addressed files.
 
 **Source bytes**:
-The live note and image bytes a capture actually read. Never stored. A plan
-restored from storage carries structural proof only until a live capture
-supplies them again.
+The live note and image content bytes a capture actually read. Never stored. A
+plan restored from storage carries structural proof only until a live capture
+supplies them again; stale-source checks then rehash those bytes against the
+plan's recorded content-byte digests.
 
 **Stale**:
 Any state in which a fingerprint no longer matches what was approved. Staleness

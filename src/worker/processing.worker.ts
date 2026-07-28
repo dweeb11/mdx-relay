@@ -46,7 +46,8 @@ scope.addEventListener("message", (event: MessageEvent) => {
   const request = event.data as WorkerRequest;
   // Cancellation is enforced by the parent terminating this worker; a
   // cancel-generation message here needs no in-band handling.
-  if (request.type !== "process-plan") return;
+  if (request.type !== "process-plan" && request.type !== "process-plan-v2")
+    return;
   void processPlan(request, {
     codec,
     readImageHeader,

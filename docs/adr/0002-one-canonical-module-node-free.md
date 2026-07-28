@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-07-25
 **Issue:** APP-622 (M2 — canonical byte rules)
+**Amended:** 2026-07-27 (APP-631 — persisted plan / cross-version compatibility)
 **Supersedes:** nothing. Does not touch ADR-0001.
 
 ## Context
@@ -17,10 +18,18 @@ between those implementations would be invisible until a hash mismatched in
 production.
 
 Auditing them first established that all three accept and reject the same
-values — the only true gap was cycle detection — and that nothing persists
-canonical bytes across versions, because sealed plans store the snapshot text
-and re-hash *that* rather than re-canonicalizing the original value. So
-consolidation was a behaviour-preserving move, not a risky rewrite.
+values — the only true gap was cycle detection. Consolidation was therefore a
+behaviour-preserving move only if the shared canonicalizer keeps producing the
+same bytes for every value already hashed into a durable identity. That
+constraint is not theoretical: sealed plans *do* persist canonical bytes across
+versions. `publishSealedPlan` writes `canonicalizeJcs(envelope.plan)` as the
+on-disk document; load-time verification (`verifyStoredExportPlan` →
+`verifiedEnvelope`) parses that document, rebuilds the identity manifest with
+the *current* `buildPlanIdentityManifest` / `canonicalizeJcs`, and rejects the
+plan when `computePlanId` no longer matches the stored `planId`. Any
+byte-level change in the canonicalizer can therefore invalidate otherwise sound
+stored plans, so cross-version canonicalization compatibility is an explicit
+requirement of this consolidation — not a non-issue.
 
 ## Decisions
 
@@ -114,3 +123,9 @@ to.
   `export-plan.ts` split; both are its raw material.
 - The Node-free rule for `canonical/index.ts` is not currently enforced by a
   test. Anyone adding an import there must check the worker bundle by hand.
+- Because persisted sealed-plan documents are themselves JCS output, and because
+  load-time identity verification re-canonicalizes with the live module before
+  comparing `planId`, later changes to `canonicalizeJcs` must remain
+  byte-compatible with every previously published plan unless a separate
+  migration or implementation decision explicitly accepts invalidating stored
+  manifests.

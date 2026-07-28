@@ -16,6 +16,8 @@ import { validateMdx } from "./validate-mdx";
 
 export interface MarkdownImageReference {
   readonly source: string;
+  /** UTF-16 offset from the source-note start to this occurrence's opening `![[`. */
+  readonly sourceStartOffset: number;
   readonly destination: string;
 }
 
@@ -418,8 +420,9 @@ const firstUnsupported = (
       )
         candidates.push({ start: token.start.offset, end: token.end.offset });
     }
-    /* v8 ignore next 3 -- findProtectedRanges already completed the same deterministic parse. */
+    /* findProtectedRanges already completed the same deterministic parse. */
   } catch {
+    /* v8 ignore next -- defensive fallback for a parser that just succeeded. */
     return Object.freeze({ start: 0, end: Math.min(1, source.length) });
   }
 
@@ -555,7 +558,13 @@ export async function transformMarkdown(
         parsed.value.bodyOffset + edit.start,
         parsed.value.bodyOffset + edit.end,
       );
-    images.push(Object.freeze({ source: imageSource, destination }));
+    images.push(
+      Object.freeze({
+        source: imageSource,
+        sourceStartOffset: parsed.value.bodyOffset + match.index,
+        destination,
+      }),
+    );
   }
 
   for (const match of proseMatches(

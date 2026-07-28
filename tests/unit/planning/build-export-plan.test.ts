@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { deepEquals, isWellFormedUnicode } from "../../../src/canonical";
+import { sha256OfBytes } from "../../../src/canonical/hash";
 import type {
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
@@ -17,7 +18,6 @@ import {
   isPortableRepositoryPath,
   MAX_PORTABLE_PATH_SEGMENT_LENGTH,
   MAX_PORTABLE_REPOSITORY_PATH_LENGTH,
-  sha256OfBytes,
   verifySourceBytes,
   type CanonicalSourceImage,
   type ExportPlanBuildInput,
@@ -751,6 +751,72 @@ describe("buildExportPlan", () => {
     expect(
       blockerCode(withImageCount(2, MDX_RELAY_LIMITS.sealedOutputBytes)),
     ).toBeUndefined();
+  });
+
+  it("rejects over-limit target actions even when repeated embeds share one blob", () => {
+    const withRepeatedEmbeds = (embedCount: number): ExportPlanBuildInput => {
+      const images = [
+        {
+          sourceId: "image-a",
+          vaultRelativePath: "assets/a.png",
+          realPath: "/vault/assets/a.png",
+          decodedMime: "image/png" as const,
+          byteLength: SOURCE_A_BYTES.byteLength,
+          contentSha256: sha256OfBytes(SOURCE_A_BYTES),
+        },
+      ];
+      const targets = [
+        {
+          normalizedPath: "content/posts/example.mdx",
+          symlinkStatus: "not-symlink" as const,
+          approvedPriorTarget: absent,
+        },
+        ...Array.from({ length: embedCount }, (_, index) => ({
+          normalizedPath: `public/posts/example/img-${index + 1}.webp`,
+          symlinkStatus: "not-symlink" as const,
+          approvedPriorTarget: absent,
+        })),
+      ];
+      const repository = repositoryState();
+      return {
+        ...buildInput({ repository, priorTargets: targets }),
+        sourceImages: images,
+        sourceBytes: {
+          note: NOTE_BYTES,
+          images: new Map([["image-a", SOURCE_A_BYTES]]),
+        },
+        transformedImages: [{ sourceId: "image-a", bytes: IMAGE_ONE_BYTES }],
+        imageEmbeds: Array.from({ length: embedCount }, (_, index) => ({
+          sourceId: "image-a",
+          assetFileName: `img-${index + 1}.webp`,
+        })),
+        finalCapture: {
+          ...barrierFor({ repository, targets }),
+          sourceImages: images.map(
+            ({ sourceId, byteLength, contentSha256 }) => ({
+              sourceId,
+              byteLength,
+              contentSha256,
+            }),
+          ),
+        },
+      };
+    };
+
+    // MDX + N repeated embeds of one image: planned targets = N + 1, but
+    // content-addressed blobs collapse to MDX + one image + commit message.
+    const atLimit = MDX_RELAY_LIMITS.sealedOutputFiles - 1;
+    const overLimit = MDX_RELAY_LIMITS.sealedOutputFiles;
+    expect(blockerCode(withRepeatedEmbeds(atLimit))).toBeUndefined();
+    expect(blockerCode(withRepeatedEmbeds(overLimit))).toBe(
+      ISSUE_CODES.outputFileLimitExceeded,
+    );
+
+    const accepted = buildOrThrow(withRepeatedEmbeds(atLimit));
+    expect(accepted.plan.actions).toHaveLength(
+      MDX_RELAY_LIMITS.sealedOutputFiles,
+    );
+    expect(Object.keys(accepted.plan.blobs)).toHaveLength(3);
   });
 });
 

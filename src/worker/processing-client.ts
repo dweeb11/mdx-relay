@@ -17,7 +17,7 @@ import type {
   WorkerCompletion,
   WorkerGeneratedMdxOutput,
   WorkerImageOutput,
-  WorkerProcessRequest,
+  AnyWorkerProcessRequest,
   WorkerRequest,
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
@@ -25,10 +25,12 @@ import { chargeDecodedWork } from "../core/decoded-work-budget";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import {
   hasExactKeys,
+  isNonemptyString,
   isNonnegativeInteger,
   isPositiveInteger,
   isRecord,
 } from "../core/predicates";
+import { parsePortableProfile } from "../profiles/parse-portable-profile";
 
 /**
  *   process-plan.ts (worker)                 processing-client.ts (parent)
@@ -47,10 +49,11 @@ import {
  * expected image progress event, because `progress` is what arms the per-image
  * clock. Timeout, cancellation, a crash, or an unverifiable digest yields a
  * parent-synthesized blocked event; the plan deadline stays armed through
- * completion verification so a stalled digest cannot hang the run. Events whose
- * generation token does not match the active request are discarded. Because
- * each run owns a worker carrying an embedded WASM bundle, every terminal path
- * releases it exactly once through the single `settle` funnel.
+ * completion verification so a stalled digest cannot hang the run. A tokenless
+ * or non-string generation token fails closed as malformed; only a valid but
+ * different token is silently stale-discarded. Because each run owns a worker
+ * carrying an embedded WASM bundle, every terminal path releases it exactly
+ * once through the single `settle` funnel.
  *
  * The never-throw boundary spans the whole surface, not just the message path:
  * a worker that cannot even be constructed is itself the redacted worker-crash
@@ -153,7 +156,7 @@ export class ProcessingClient {
    * completed, blocked, or cancelled event. Never rejects.
    */
   process(
-    request: WorkerProcessRequest,
+    request: AnyWorkerProcessRequest,
     onProgress?: (event: DecodedWorkerEvent) => void,
   ): Promise<DecodedWorkerEvent> {
     const { generationToken } = request;
@@ -280,6 +283,9 @@ export class ProcessingClient {
         // Wire data that is not even an object cannot be matched to a
         // generation, so it is malformed rather than merely stale.
         if (!isRecord(data)) return failClosed();
+        // A tokenless or non-string token cannot be matched either, so it fails
+        // closed immediately. Only a valid but different token is stale.
+        if (!isNonemptyString(data.generationToken)) return failClosed();
         // Stale generation and late events are silently discarded.
         if (data.generationToken !== generationToken) return;
         // A terminal event was accepted; verification may still be running, but
@@ -315,6 +321,10 @@ export class ProcessingClient {
         if (!startedSeen) return failClosed();
 
         if (data.type === "progress") {
+          // Both clocks are sealed by the request timestamps. Elapsed and
+          // remaining must each fit the window and sum to it exactly — an
+          // over-window elapsed or a pair that claims more (or less) time than
+          // the plan owns is incoherent telemetry across the trust boundary.
           const planWindowMs = Math.max(
             0,
             request.planDeadlineMs - request.planStartedAtMs,
@@ -329,7 +339,9 @@ export class ProcessingClient {
             data.sourceId !== expected.sourceId ||
             !isNonnegativeInteger(data.elapsedMs) ||
             !isNonnegativeInteger(data.remainingPlanBudgetMs) ||
-            data.remainingPlanBudgetMs > planWindowMs
+            data.elapsedMs > planWindowMs ||
+            data.remainingPlanBudgetMs > planWindowMs ||
+            data.elapsedMs + data.remainingPlanBudgetMs !== planWindowMs
           )
             return failClosed();
           const { elapsedMs, remainingPlanBudgetMs } = data;
@@ -475,7 +487,7 @@ export class ProcessingClient {
   }
 
   private malformed(
-    generationToken: WorkerProcessRequest["generationToken"],
+    generationToken: AnyWorkerProcessRequest["generationToken"],
     activeSourceId: string | undefined,
   ): DecodedWorkerEvent {
     return brand({
@@ -538,27 +550,18 @@ export class ProcessingClient {
 
   /**
    * Re-derives the approved longest-edge resize bound from the request's own
-   * profile snapshot. The snapshot is branded validated before the worker
-   * boundary, but the parent still reads the bound from bytes it holds rather
-   * than trusting any worker-supplied number. Missing, non-integer, or
-   * out-of-range values yield undefined so the completion fails closed.
+   * profile snapshot via `parsePortableProfile`. The snapshot is branded
+   * validated before the worker boundary, but the parent still reads the bound
+   * from bytes it holds rather than trusting any worker-supplied number.
+   * Malformed or out-of-range snapshots yield undefined so the completion
+   * fails closed.
    */
   private approvedMaxDimension(
-    snapshot: WorkerProcessRequest["profileSnapshot"],
+    snapshot: AnyWorkerProcessRequest["profileSnapshot"],
   ): number | undefined {
     try {
-      const parsed: unknown = JSON.parse(snapshot);
-      if (!isRecord(parsed) || !isRecord(parsed.images)) return undefined;
-      const { maxDimension } = parsed.images;
-      if (
-        typeof maxDimension !== "number" ||
-        !Number.isInteger(maxDimension) ||
-        maxDimension < 1 ||
-        maxDimension >
-          Math.floor(Math.sqrt(MDX_RELAY_LIMITS.decodedImagePixels))
-      )
-        return undefined;
-      return maxDimension;
+      const profile = parsePortableProfile(JSON.parse(snapshot) as unknown);
+      return profile?.images.maxDimension;
     } catch {
       return undefined;
     }
@@ -636,7 +639,7 @@ export class ProcessingClient {
    * 3x4 are the same twelve pixels but cannot be the same decode.
    */
   private exceedsDecodedWorkBudget(
-    request: WorkerProcessRequest,
+    request: AnyWorkerProcessRequest,
     images: readonly WorkerImageOutput[],
   ): boolean | undefined {
     const charge = chargeDecodedWork(
@@ -658,7 +661,7 @@ export class ProcessingClient {
    * channels. Returns undefined for any malformed payload.
    */
   private async decodeCompletion(
-    request: WorkerProcessRequest,
+    request: AnyWorkerProcessRequest,
     value: unknown,
   ): Promise<DecodedCompletion> {
     if (!isRecord(value)) return MALFORMED;

@@ -15,6 +15,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { canonicalizeJcs } from "../../../src/canonical";
+import { sha256OfBytes, sha256OfUtf8 } from "../../../src/canonical/hash";
 import type {
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
@@ -29,8 +30,6 @@ import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
 import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
 import {
   buildExportPlan,
-  sha256OfBytes,
-  sha256OfUtf8,
   type ExportPlanBuildInput,
   type PlanSourceBytes,
 } from "../../../src/planning/build-export-plan";

@@ -179,7 +179,7 @@ const progressEvent = (generationToken: GenerationToken): WorkerWireEvent => ({
   completedImages: 0,
   totalImages: 1,
   elapsedMs: 10,
-  remainingPlanBudgetMs: 599_000,
+  remainingPlanBudgetMs: 599_990,
 });
 
 /**
@@ -205,7 +205,7 @@ const emitLifecycle = (
       completedImages: imageIndex,
       totalImages: plan.images.length,
       elapsedMs: 10,
-      remainingPlanBudgetMs: 599_000,
+      remainingPlanBudgetMs: 599_990,
     });
   });
 };
@@ -435,6 +435,8 @@ describe("ProcessingClient terminal cleanup", () => {
     } else if (name === "malformed") {
       emitLifecycle(worker);
       worker.emit(completedEvent({ ok: true, value: { nonsense: true } }));
+    } else if (name === "tokenless") {
+      worker.emit({});
     } else if (name === "crash") {
       worker.emitError();
     } else if (name === "cancel") {
@@ -457,6 +459,7 @@ describe("ProcessingClient terminal cleanup", () => {
     "worker-blocked",
     "worker-cancelled",
     "malformed",
+    "tokenless",
     "crash",
     "cancel",
     "plan-timeout",
@@ -891,7 +894,7 @@ describe("ProcessingClient completion lifecycle", () => {
         completedImages: 0,
         totalImages: 2,
         elapsedMs: 10,
-        remainingPlanBudgetMs: 599_000,
+        remainingPlanBudgetMs: 599_990,
       });
       worker.emit(completedEvent({ ok: true, value: okFor(plan) }));
     });
@@ -969,7 +972,7 @@ describe("ProcessingClient completion lifecycle", () => {
       completedImages: 0,
       totalImages: 2,
       elapsedMs: 10,
-      remainingPlanBudgetMs: 599_000,
+      remainingPlanBudgetMs: 599_990,
     });
     worker.emit(
       completedEvent({
@@ -1228,15 +1231,78 @@ describe("ProcessingClient wire-event validation", () => {
       },
     ],
     [
+      "an elapsed time beyond the plan window",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: 600_001,
+        remainingPlanBudgetMs: 0,
+      },
+    ],
+    [
+      "a negative elapsed time",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: -1,
+        remainingPlanBudgetMs: 600_001,
+      },
+    ],
+    [
+      "a fractional elapsed time",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: 10.5,
+        remainingPlanBudgetMs: 599_989.5,
+      },
+    ],
+    [
       "an infinite elapsed time",
       {
         ...(progressEvent(token) as object),
         elapsedMs: Number.POSITIVE_INFINITY,
       },
     ],
+    [
+      "elapsed and remaining that do not sum to the plan window",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: 100_000,
+        remainingPlanBudgetMs: 100_000,
+      },
+    ],
   ])("fails closed on a progress event with %s", async (_name, event) => {
     await expectMalformed(event, [startedEvent(token)]);
   });
+
+  it.each([
+    [
+      "elapsed at the plan-window boundary with zero remaining",
+      { elapsedMs: 600_000, remainingPlanBudgetMs: 0 },
+    ],
+    [
+      "zero elapsed with the full remaining budget",
+      { elapsedMs: 0, remainingPlanBudgetMs: 600_000 },
+    ],
+  ])(
+    "accepts a progress event with %s",
+    async (
+      _name,
+      clocks: { elapsedMs: number; remainingPlanBudgetMs: number },
+    ) => {
+      const { worker, client } = setup();
+      const seen: unknown[] = [];
+      const done = client.process(request(), (progress) => seen.push(progress));
+      worker.emit(startedEvent(token));
+      worker.emit({ ...(progressEvent(token) as object), ...clocks });
+      worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+      const terminal = await done;
+      expect(terminal.type).toBe("completed");
+      expect(seen.map((event) => (event as { type: string }).type)).toEqual([
+        "started",
+        "progress",
+      ]);
+      expect(seen[1]).toMatchObject(clocks);
+    },
+  );
 
   it.each([
     [
@@ -1268,12 +1334,32 @@ describe("ProcessingClient wire-event validation", () => {
     },
   );
 
+  it("fails closed on a post-started completed event with unexpected own keys", async () => {
+    // Extra keys on completed must be rejected after `started`, or the exact
+    // own-key gate at the terminal arm is never exercised.
+    await expectMalformed(
+      {
+        type: "completed",
+        generationToken: token,
+        result: { ok: true, value: okCompletion() },
+        secret: CANARY,
+      },
+      [startedEvent(token), progressEvent(token)],
+    );
+  });
+
   it.each([
     ["an unknown type", { type: "surprise", generationToken: token }],
     ["a missing type", { generationToken: token }],
     ["a non-string type", { type: 7, generationToken: token }],
   ])("fails closed on %s", async (_name, event) => {
     await expectMalformed(event);
+  });
+
+  it("fails closed on an unknown type that arrives after started", async () => {
+    await expectMalformed({ type: "surprise", generationToken: token }, [
+      startedEvent(token),
+    ]);
   });
 
   it.each([
@@ -1291,6 +1377,59 @@ describe("ProcessingClient wire-event validation", () => {
     expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
   });
 
+  it.each([
+    ["an empty object", {}],
+    [
+      "a started event without generationToken",
+      { type: "started", imageCount: 1 },
+    ],
+    [
+      "a progress event without generationToken",
+      {
+        type: "progress",
+        sourceId: "a",
+        imageIndex: 0,
+        completedImages: 0,
+        totalImages: 1,
+        elapsedMs: 0,
+        remainingPlanBudgetMs: 600_000,
+      },
+    ],
+    [
+      "a completed event without generationToken",
+      { type: "completed", result: { ok: true, value: okCompletion() } },
+    ],
+    [
+      "a blocked event without generationToken",
+      {
+        type: "blocked",
+        issues: [createIssue(ISSUE_CODES.imageDecodeFailed)],
+      },
+    ],
+    ["a cancelled event without generationToken", { type: "cancelled" }],
+    ["a non-string generationToken", { type: "cancelled", generationToken: 7 }],
+    [
+      "an empty-string generationToken",
+      { type: "cancelled", generationToken: "" },
+    ],
+  ])("fails closed immediately on %s", async (_name, event) => {
+    await expectMalformed(event);
+  });
+
+  it.each([
+    ["blocked", { type: "blocked", issues: [] }],
+    ["cancelled", { type: "cancelled" }],
+    [
+      "completed",
+      { type: "completed", result: { ok: true, value: okCompletion() } },
+    ],
+  ])(
+    "fails closed on a tokenless %s terminal after lifecycle progress",
+    async (_name, event) => {
+      await expectMalformed(event, [startedEvent(token), progressEvent(token)]);
+    },
+  );
+
   it("still silently discards a stale generation instead of failing closed", async () => {
     const { worker, client } = setup();
     const seen: unknown[] = [];
@@ -1305,6 +1444,51 @@ describe("ProcessingClient wire-event validation", () => {
     worker.emit(completedEvent({ ok: true, value: okCompletion() }));
     expect((await done).type).toBe("completed");
     expect(seen).toHaveLength(2);
+  });
+
+  it("silently discards a mismatched token without settling the run", async () => {
+    const { worker, client, scheduler } = setup();
+    const seen: unknown[] = [];
+    const done = client.process(request(), (event) => seen.push(event));
+    expect(scheduler.size).toBe(1);
+    worker.emit({ type: "cancelled", generationToken: otherToken });
+    worker.emit({
+      type: "started",
+      generationToken: otherToken,
+      imageCount: 0,
+    });
+    // The run is still live: plan timer armed, no progress delivered, no terminate.
+    expect(seen).toHaveLength(0);
+    expect(worker.terminateCount).toBe(0);
+    expect(scheduler.size).toBe(1);
+    expect(worker.onmessage).not.toBeNull();
+    emitLifecycle(worker);
+    worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+    expect((await done).type).toBe("completed");
+    expect(seen).toHaveLength(2);
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+  });
+
+  it("clears timers and terminates exactly once on a tokenless object", async () => {
+    const { worker, client, scheduler } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit(progressEvent(token));
+    expect(scheduler.size).toBe(2);
+    worker.emit({});
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+    expect(worker.terminateCount).toBe(1);
+    expect(scheduler.size).toBe(0);
+    expect(worker.onmessage).toBeNull();
+    expect(worker.onerror).toBeNull();
+    expect(worker.onmessageerror).toBeNull();
+    // A second tokenless message after settle must not terminate again.
+    worker.emit({});
+    expect(worker.terminateCount).toBe(1);
   });
 
   it("delivers only the contract fields of a valid progress event", async () => {
@@ -1732,6 +1916,80 @@ describe("ProcessingClient cumulative decoded-work budget", () => {
     expect(terminal.result.error[0].code).toBe(
       ISSUE_CODES.decodedWorkLimitExceeded,
     );
+  });
+
+  it("fails closed when the profile snapshot is not JSON", async () => {
+    // approvedMaxDimension must catch parse failures rather than trusting a
+    // worker-shaped completion against an unreadable parent snapshot.
+    const plan = request({
+      profileSnapshot: "{not-json" as ValidatedPortableProfileSnapshot,
+    });
+    const terminal = await settleWith(plan, okCompletion());
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("fails closed on error completions with an empty or warning-led channel", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit(completedEvent({ ok: false, error: [] }));
+    const empty = await done;
+    expect(empty.type).toBe("blocked");
+
+    const second = setup();
+    const doneWarning = second.client.process(request());
+    second.worker.emit(startedEvent(token));
+    second.worker.emit(
+      completedEvent({
+        ok: false,
+        error: [createIssue(ISSUE_CODES.wikilinksFlattened, { count: 1 })],
+      }),
+    );
+    const warningLed = await doneWarning;
+    expect(warningLed.type).toBe("blocked");
+  });
+
+  it("fails closed on blocked events whose issues are not blockers", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit({
+      type: "blocked",
+      generationToken: token,
+      issues: [createIssue(ISSUE_CODES.wikilinksFlattened, { count: 1 })],
+    });
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("fails closed on a cancelled event with unexpected own keys", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    worker.emit(startedEvent(token));
+    worker.emit({
+      type: "cancelled",
+      generationToken: token,
+      extra: true,
+    });
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
+  });
+
+  it("fails closed when a completion result is not a record", async () => {
+    const { worker, client } = setup();
+    const done = client.process(request());
+    emitLifecycle(worker);
+    worker.emit(completedEvent(null));
+    const terminal = await done;
+    expect(terminal.type).toBe("blocked");
+    if (terminal.type !== "blocked") return;
+    expect(terminal.issues[0].code).toBe(ISSUE_CODES.malformedWorkerResponse);
   });
 });
 

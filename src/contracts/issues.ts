@@ -614,9 +614,9 @@ if (import.meta.vitest) {
 
   describe("issue registry and construction", () => {
     it("locks every code, policy, summary, and approved snapshot", async () => {
-      const { createHash } = await import("node:crypto");
+      const { sha256OfUtf8 } = await import("../canonical/hash");
       const snapshotHash = (value: unknown): string =>
-        createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        sha256OfUtf8(JSON.stringify(value)).slice("sha256:".length);
       const codes = Object.values(ISSUE_CODES);
       expect(new Set(codes).size).toBe(codes.length);
       expect(Object.keys(ISSUE_REGISTRY).sort()).toEqual([...codes].sort());
@@ -1126,6 +1126,7 @@ if (import.meta.vitest) {
       ].sort();
       // Intentional approval gate: contract API changes update this independent list.
       expect(exportedNames).toEqual([
+        "AnyWorkerProcessRequest",
         "ApprovalFingerprint",
         "ApprovalRecord",
         "ApprovalSealedOutputFingerprint",
@@ -1189,8 +1190,10 @@ if (import.meta.vitest) {
         "WorkerCompletion",
         "WorkerGeneratedMdxOutput",
         "WorkerImageInput",
+        "WorkerImageInputV2",
         "WorkerImageOutput",
         "WorkerProcessRequest",
+        "WorkerProcessRequestV2",
         "WorkerProgressEvent",
         "WorkerRequest",
         "WorkerSourceNoteInput",

@@ -8,9 +8,10 @@ import {
 } from "../contracts/issues";
 import { mdxRelayErr, mdxRelayOk, type Result } from "../contracts/result";
 import type {
+  AnyWorkerProcessRequest,
   WorkerCompletion,
+  WorkerImageInputV2,
   WorkerImageOutput,
-  WorkerProcessRequest,
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
 import type { ImageCodec } from "../images/image-codec";
@@ -20,7 +21,10 @@ import {
   type DecodedWorkSource,
 } from "../core/decoded-work-budget";
 import { MDX_RELAY_LIMITS } from "../core/limits";
-import type { transformMarkdown } from "../markdown/transform";
+import type {
+  MarkdownImageReference,
+  transformMarkdown,
+} from "../markdown/transform";
 import { parsePortableProfile } from "../profiles/parse-portable-profile";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 
@@ -64,6 +68,44 @@ const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
   mdxRelayErr(issues as [BlockerIssue, ...MdxRelayIssue[]]);
 
 /**
+ * Fail closed when the transform's occurrence list disagrees with the worker
+ * request: count, document-order destination identity from the profile template,
+ * and exact embed occurrence identity from capture. The raw spelling plus its
+ * source-note offset binds each resolved `safePathLabel` to one occurrence, so
+ * same-name embeds cannot be silently reordered. Duplicate embeds remain valid
+ * when each occurrence pairs with its request entry.
+ */
+const occurrencesMatchRequest = (
+  occurrences: readonly MarkdownImageReference[],
+  request: AnyWorkerProcessRequest,
+  profile: PortableProfileV1,
+): boolean => {
+  const { images } = request;
+  if (occurrences.length !== images.length) return false;
+  // V1 has no occurrence identity. Preserve its frozen wire shape, but never
+  // process image bytes that cannot be bound to exact source-note occurrences.
+  if (request.type === "process-plan" && images.length > 0) return false;
+  for (let index = 0; index < occurrences.length; index += 1) {
+    const occurrence = occurrences[index]!;
+    const image = images[index]!;
+    const expectedDestination = profile.images.filenameTemplate.replaceAll(
+      "{index}",
+      String(index + 1),
+    );
+    if (occurrence.destination !== expectedDestination) return false;
+    if (request.type === "process-plan-v2") {
+      const v2Image = image as WorkerImageInputV2;
+      if (
+        occurrence.source !== v2Image.embedSource ||
+        occurrence.sourceStartOffset !== v2Image.embedSourceStartOffset
+      )
+        return false;
+    }
+  }
+  return true;
+};
+
+/**
  * Runs one sealed processing plan inside the worker: generates the MDX, then
  * transforms each canonical image sequentially with per-source dedupe, emitting
  * started/progress/completed wire events. Every blocker collapses the plan to a
@@ -81,7 +123,7 @@ const blockerResult = (issues: readonly [BlockerIssue, ...MdxRelayIssue[]]) =>
  * accounting.
  */
 export async function processPlan(
-  request: WorkerProcessRequest,
+  request: AnyWorkerProcessRequest,
   deps: ProcessPlanDeps,
 ): Promise<void> {
   const { generationToken } = request;
@@ -110,6 +152,17 @@ export async function processPlan(
   }
   const markdown = transformed.value;
 
+  // Capture must supply the same document-order occurrence list the transform
+  // just emitted; otherwise MDX can reference outputs the worker never builds.
+  if (!occurrencesMatchRequest(markdown.images, request, profile)) {
+    deps.post({
+      type: "completed",
+      generationToken,
+      result: blockerResult([createIssue(ISSUE_CODES.staleDuringPlanning)]),
+    });
+    return;
+  }
+
   const transfer = new Set<Transferable>();
   const transformedImages: WorkerImageOutput[] = [];
   // Decode/transform each unique source once; reuse the output for repeats.
@@ -122,11 +175,19 @@ export async function processPlan(
 
   for (let index = 0; index < totalImages; index += 1) {
     const image = request.images[index]!;
-    const elapsedMs = deps.now() - request.planStartedAtMs;
+    // Bound both fields to the sealed plan window so progress stays coherent
+    // even when `now` is already past the deadline (remaining clamps to 0 and
+    // elapsed reports the full window rather than an overshoot the parent
+    // must reject).
+    const planWindowMs = Math.max(
+      0,
+      request.planDeadlineMs - request.planStartedAtMs,
+    );
     const remainingPlanBudgetMs = Math.max(
       0,
-      request.planDeadlineMs - deps.now(),
+      Math.min(planWindowMs, request.planDeadlineMs - deps.now()),
     );
+    const elapsedMs = planWindowMs - remainingPlanBudgetMs;
     deps.post({
       type: "progress",
       generationToken,
