@@ -168,11 +168,19 @@ export async function processPlan(
 
   for (let index = 0; index < totalImages; index += 1) {
     const image = request.images[index]!;
-    const elapsedMs = deps.now() - request.planStartedAtMs;
+    // Bound both fields to the sealed plan window so progress stays coherent
+    // even when `now` is already past the deadline (remaining clamps to 0 and
+    // elapsed reports the full window rather than an overshoot the parent
+    // must reject).
+    const planWindowMs = Math.max(
+      0,
+      request.planDeadlineMs - request.planStartedAtMs,
+    );
     const remainingPlanBudgetMs = Math.max(
       0,
-      request.planDeadlineMs - deps.now(),
+      Math.min(planWindowMs, request.planDeadlineMs - deps.now()),
     );
+    const elapsedMs = planWindowMs - remainingPlanBudgetMs;
     deps.post({
       type: "progress",
       generationToken,

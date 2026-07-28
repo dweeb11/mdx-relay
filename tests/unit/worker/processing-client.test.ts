@@ -177,7 +177,7 @@ const progressEvent = (generationToken: GenerationToken): WorkerWireEvent => ({
   completedImages: 0,
   totalImages: 1,
   elapsedMs: 10,
-  remainingPlanBudgetMs: 599_000,
+  remainingPlanBudgetMs: 599_990,
 });
 
 /**
@@ -203,7 +203,7 @@ const emitLifecycle = (
       completedImages: imageIndex,
       totalImages: plan.images.length,
       elapsedMs: 10,
-      remainingPlanBudgetMs: 599_000,
+      remainingPlanBudgetMs: 599_990,
     });
   });
 };
@@ -892,7 +892,7 @@ describe("ProcessingClient completion lifecycle", () => {
         completedImages: 0,
         totalImages: 2,
         elapsedMs: 10,
-        remainingPlanBudgetMs: 599_000,
+        remainingPlanBudgetMs: 599_990,
       });
       worker.emit(completedEvent({ ok: true, value: okFor(plan) }));
     });
@@ -970,7 +970,7 @@ describe("ProcessingClient completion lifecycle", () => {
       completedImages: 0,
       totalImages: 2,
       elapsedMs: 10,
-      remainingPlanBudgetMs: 599_000,
+      remainingPlanBudgetMs: 599_990,
     });
     worker.emit(
       completedEvent({
@@ -1229,15 +1229,78 @@ describe("ProcessingClient wire-event validation", () => {
       },
     ],
     [
+      "an elapsed time beyond the plan window",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: 600_001,
+        remainingPlanBudgetMs: 0,
+      },
+    ],
+    [
+      "a negative elapsed time",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: -1,
+        remainingPlanBudgetMs: 600_001,
+      },
+    ],
+    [
+      "a fractional elapsed time",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: 10.5,
+        remainingPlanBudgetMs: 599_989.5,
+      },
+    ],
+    [
       "an infinite elapsed time",
       {
         ...(progressEvent(token) as object),
         elapsedMs: Number.POSITIVE_INFINITY,
       },
     ],
+    [
+      "elapsed and remaining that do not sum to the plan window",
+      {
+        ...(progressEvent(token) as object),
+        elapsedMs: 100_000,
+        remainingPlanBudgetMs: 100_000,
+      },
+    ],
   ])("fails closed on a progress event with %s", async (_name, event) => {
     await expectMalformed(event, [startedEvent(token)]);
   });
+
+  it.each([
+    [
+      "elapsed at the plan-window boundary with zero remaining",
+      { elapsedMs: 600_000, remainingPlanBudgetMs: 0 },
+    ],
+    [
+      "zero elapsed with the full remaining budget",
+      { elapsedMs: 0, remainingPlanBudgetMs: 600_000 },
+    ],
+  ])(
+    "accepts a progress event with %s",
+    async (
+      _name,
+      clocks: { elapsedMs: number; remainingPlanBudgetMs: number },
+    ) => {
+      const { worker, client } = setup();
+      const seen: unknown[] = [];
+      const done = client.process(request(), (progress) => seen.push(progress));
+      worker.emit(startedEvent(token));
+      worker.emit({ ...(progressEvent(token) as object), ...clocks });
+      worker.emit(completedEvent({ ok: true, value: okCompletion() }));
+      const terminal = await done;
+      expect(terminal.type).toBe("completed");
+      expect(seen.map((event) => (event as { type: string }).type)).toEqual([
+        "started",
+        "progress",
+      ]);
+      expect(seen[1]).toMatchObject(clocks);
+    },
+  );
 
   it.each([
     [

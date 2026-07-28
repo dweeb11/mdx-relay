@@ -320,6 +320,10 @@ export class ProcessingClient {
         if (!startedSeen) return failClosed();
 
         if (data.type === "progress") {
+          // Both clocks are sealed by the request timestamps. Elapsed and
+          // remaining must each fit the window and sum to it exactly — an
+          // over-window elapsed or a pair that claims more (or less) time than
+          // the plan owns is incoherent telemetry across the trust boundary.
           const planWindowMs = Math.max(
             0,
             request.planDeadlineMs - request.planStartedAtMs,
@@ -334,7 +338,9 @@ export class ProcessingClient {
             data.sourceId !== expected.sourceId ||
             !isNonnegativeInteger(data.elapsedMs) ||
             !isNonnegativeInteger(data.remainingPlanBudgetMs) ||
-            data.remainingPlanBudgetMs > planWindowMs
+            data.elapsedMs > planWindowMs ||
+            data.remainingPlanBudgetMs > planWindowMs ||
+            data.elapsedMs + data.remainingPlanBudgetMs !== planWindowMs
           )
             return failClosed();
           const { elapsedMs, remainingPlanBudgetMs } = data;
