@@ -21,6 +21,7 @@ import type {
   WorkerRequest,
   WorkerWireEvent,
 } from "../contracts/worker-protocol";
+import { chargeDecodedWork } from "../core/decoded-work-budget";
 import { MDX_RELAY_LIMITS } from "../core/limits";
 import {
   hasExactKeys,
@@ -620,9 +621,16 @@ export class ProcessingClient {
    * so the worker's accounting is never taken on trust. Repeat embeds of one
    * source must agree on their decoded size, or the report is incoherent.
    *
-   * Each product is already bounded by the per-image decoded-pixel limit and
-   * the sum short-circuits at the cumulative limit, so the running total stays
-   * far inside the safe-integer range.
+   * The arithmetic itself lives in `core/decoded-work-budget`, which the worker
+   * also calls. Sharing the function does not weaken the trust boundary: the
+   * two sides run it over inputs they hold independently, and this side keys
+   * the dedupe on the request's own hashes rather than anything the worker
+   * reported.
+   *
+   * Each product is already bounded by the per-image decoded-pixel limit in
+   * `decodeImage`, which runs before this, so the running total stays far
+   * inside the safe-integer range -- that ordering is the helper's documented
+   * caller precondition.
    *
    * Repeats are compared on their exact decoded edges, not their area: 2x6 and
    * 3x4 are the same twelve pixels but cannot be the same decode.
@@ -631,24 +639,17 @@ export class ProcessingClient {
     request: WorkerProcessRequest,
     images: readonly WorkerImageOutput[],
   ): boolean | undefined {
-    const charged = new Map<Sha256Digest, readonly [number, number]>();
-    let decodedPixels = 0;
-    for (const [index, image] of images.entries()) {
-      const { contentSha256 } = request.images[index]!;
-      const previous = charged.get(contentSha256);
-      if (previous !== undefined) {
-        if (
-          previous[0] !== image.decodedWidth ||
-          previous[1] !== image.decodedHeight
-        )
-          return undefined;
-        continue;
-      }
-      charged.set(contentSha256, [image.decodedWidth, image.decodedHeight]);
-      decodedPixels += image.decodedWidth * image.decodedHeight;
-      if (decodedPixels > MDX_RELAY_LIMITS.cumulativeDecodedPixels) return true;
-    }
-    return false;
+    const charge = chargeDecodedWork(
+      images.map((image, index) => ({
+        contentSha256: request.images[index]!.contentSha256,
+        width: image.decodedWidth,
+        height: image.decodedHeight,
+      })),
+    );
+    if (charge.ok) return false;
+    // Incoherent repeats are a malformed report, not a budget overrun, and stay
+    // on the redacted MALFORMED channel (ADR 0001 §9).
+    return charge.reason === "exceeded" ? true : undefined;
   }
 
   /**
