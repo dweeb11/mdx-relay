@@ -43,7 +43,7 @@ import {
 import {
   verifyStoredExportPlan,
   type SealedExportPlanEnvelope,
-} from "./seal-export-plan";
+} from "./plan-verification";
 
 /**
  * Owner-only private storage for sealed plans.
