@@ -33,6 +33,8 @@ const containsCredentialUrl = (value: unknown): boolean => {
   });
 };
 
+const maximumProfileIdLength = 64;
+
 const windowsReservedSegment =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
@@ -139,6 +141,7 @@ export function validateMachineBinding(
       ]) ||
       value.schemaVersion !== 1 ||
       typeof value.profileId !== "string" ||
+      value.profileId.length > maximumProfileIdLength ||
       !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(value.profileId) ||
       !isSafeAbsoluteRepositoryRoot(value.repositoryRoot) ||
       !isCredentialFreeRepositoryUrl(value.repositoryUrl)
