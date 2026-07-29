@@ -97,6 +97,27 @@ describe("profile resolution", () => {
     );
   });
 
+  it("bounds machine-binding profile ids at 64 characters", () => {
+    const accepted = validateMachineBinding({
+      ...validBinding,
+      profileId: "a".repeat(64),
+    });
+    expect(accepted.ok).toBe(true);
+
+    for (const length of [65, 100_000]) {
+      const profileId = "a".repeat(length);
+      const rejected = validateMachineBinding({ ...validBinding, profileId });
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) continue;
+      expect(rejected.error).toHaveLength(1);
+      expect(rejected.error[0]).toMatchObject({
+        code: ISSUE_CODES.invalidProfile,
+        severity: "blocker",
+      });
+      expect(JSON.stringify(rejected.error)).not.toContain("aaaa");
+    }
+  });
+
   it.each([
     "relative/repository",
     "/Users/example/sites/../secrets",
