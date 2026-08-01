@@ -224,15 +224,36 @@ const approvalFile = (deps: PlanStoreDeps, planId: PlanId): string =>
 const activePlanFile = (deps: PlanStoreDeps): string =>
   join(storeRoot(deps), ACTIVE_PLAN_FILENAME);
 
+type PermissionBitsLookup =
+  | { readonly status: "found"; readonly bits: number }
+  | { readonly status: "missing" }
+  | { readonly status: "unreadable" };
+
+const lookupPermissionBits = async (
+  deps: PlanStoreDeps,
+  entryPath: string,
+): Promise<PermissionBitsLookup> => {
+  try {
+    return {
+      status: "found",
+      bits: await deps.fileSystem.readPermissionBits(entryPath),
+    };
+  } catch (error) {
+    return typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+      ? { status: "missing" }
+      : { status: "unreadable" };
+  }
+};
+
 const permissionBits = async (
   deps: PlanStoreDeps,
   entryPath: string,
 ): Promise<number | undefined> => {
-  try {
-    return await deps.fileSystem.readPermissionBits(entryPath);
-  } catch {
-    return undefined;
-  }
+  const lookup = await lookupPermissionBits(deps, entryPath);
+  return lookup.status === "found" ? lookup.bits : undefined;
 };
 
 const hasOwnerOnlyMode = async (
@@ -399,7 +420,9 @@ export async function loadSealedPlan(
 ): Promise<MdxRelayResult<SealedExportPlanEnvelope>> {
   if (!PLAN_ID_PATTERN.test(planId)) return notFound();
   const directory = planDirectory(deps, planId);
-  if ((await permissionBits(deps, directory)) === undefined) return notFound();
+  const directoryLookup = await lookupPermissionBits(deps, directory);
+  if (directoryLookup.status === "missing") return notFound();
+  if (directoryLookup.status === "unreadable") return tampered();
 
   try {
     const blobDirectory = join(directory, PLAN_BLOB_DIRECTORY);
