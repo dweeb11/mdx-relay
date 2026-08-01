@@ -689,7 +689,9 @@ const publishNewPlan = async (
  * Publishes a sealed plan atomically and pins it as the active plan. Returns a
  * write failure -- never a plan ID -- if any step of the sequence fails, and
  * leaves nothing newly loadable at that ID when it does. Only a plan whose
- * source bytes were recomputed and matched is publishable at all.
+ * source bytes were recomputed and matched is publishable at all. A stored
+ * identity that fails verification (tampering or expiry) is refused rather than
+ * overwritten, so the failure remains inspectable.
  */
 export async function publishSealedPlan(
   deps: PlanStoreDeps,
@@ -712,14 +714,17 @@ export async function publishSealedPlan(
       return writeFailed();
     }
     const existing = await loadSealedPlan(deps, planId);
-    return existing.ok
-      ? repinPublishedPlan(
-          deps,
-          envelope,
-          existing.value.plan.generationToken,
-          documentBytes,
-        )
-      : publishNewPlan(deps, envelope, documentBytes);
+    if (existing.ok)
+      return repinPublishedPlan(
+        deps,
+        envelope,
+        existing.value.plan.generationToken,
+        documentBytes,
+      );
+    // A directory that fails verification is evidence, not an empty slot. Only
+    // a true absence may stage new bytes; tampering and expiry stay visible.
+    if (existing.error[0].code !== ISSUE_CODES.planNotFound) return existing;
+    return publishNewPlan(deps, envelope, documentBytes);
   });
 }
 

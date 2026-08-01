@@ -743,6 +743,54 @@ describe("private plan storage", () => {
     }
   });
 
+  it("refuses to republish or pin over a tampered plan identity", async () => {
+    const first = sealedPlan({
+      generationToken: "generation-1" as GenerationToken,
+    });
+    await publishSealedPlan(deps, first);
+    const other = sealedPlan({ documentTitle: "Other" });
+    await publishSealedPlan(deps, other);
+
+    const blobName = [...first.blobBytes.keys()].sort()[0]!;
+    const blobPath = join(blobDirectoryOf(first.planId), blobName);
+    const original = new Uint8Array(await readFile(blobPath));
+    await writeFile(
+      blobPath,
+      Uint8Array.from(original, (byte) => byte ^ 0xff),
+      { mode: 0o600 },
+    );
+    expect(await failureCode(loadSealedPlan(deps, first.planId))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+
+    const second = sealedPlan({
+      generationToken: "generation-2" as GenerationToken,
+    });
+    expect(second.planId).toBe(first.planId);
+    expect(await failureCode(publishSealedPlan(deps, second))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+
+    // Tamper evidence stays on disk, and the active pin is unchanged.
+    expect(await failureCode(loadSealedPlan(deps, first.planId))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(new Uint8Array(await readFile(blobPath))).toEqual(
+      Uint8Array.from(original, (byte) => byte ^ 0xff),
+    );
+    expect((await readdir(join(root, "plans", first.planId))).sort()).toEqual([
+      "blobs",
+      "plan.json",
+    ]);
+    const active = await loadActivePlan(deps);
+    expect(active.ok && active.value.planId).toBe(other.planId);
+    expect(
+      (await readdir(join(root, "plans"))).filter((name) =>
+        name.startsWith(".staging-"),
+      ),
+    ).toEqual([]);
+  });
+
   it("rejects a tampered or forged active-plan pointer without loading a plan", async () => {
     const envelope = sealedPlan();
     await publishSealedPlan(deps, envelope);
