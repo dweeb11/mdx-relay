@@ -282,7 +282,10 @@ const injectFault = (
       close: () => handle.close(),
     };
   },
-  readPermissionBits: (entryPath) => base.readPermissionBits(entryPath),
+  readPermissionBits: (entryPath) => {
+    fail("readPermissionBits", entryPath);
+    return base.readPermissionBits(entryPath);
+  },
   byteLength: (entryPath) => base.byteLength(entryPath),
   listDirectory: (directoryPath) => base.listDirectory(directoryPath),
   removeRecursively: (entryPath) => base.removeRecursively(entryPath),
@@ -741,6 +744,93 @@ describe("private plan storage", () => {
         ISSUE_CODES.storageTampered,
       );
     }
+  });
+
+  it("refuses to republish or pin over a tampered plan identity", async () => {
+    const first = sealedPlan({
+      generationToken: "generation-1" as GenerationToken,
+    });
+    await publishSealedPlan(deps, first);
+    const other = sealedPlan({ documentTitle: "Other" });
+    await publishSealedPlan(deps, other);
+
+    const blobName = [...first.blobBytes.keys()].sort()[0]!;
+    const blobPath = join(blobDirectoryOf(first.planId), blobName);
+    const original = new Uint8Array(await readFile(blobPath));
+    await writeFile(
+      blobPath,
+      Uint8Array.from(original, (byte) => byte ^ 0xff),
+      { mode: 0o600 },
+    );
+    expect(await failureCode(loadSealedPlan(deps, first.planId))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+
+    const second = sealedPlan({
+      generationToken: "generation-2" as GenerationToken,
+    });
+    expect(second.planId).toBe(first.planId);
+    expect(await failureCode(publishSealedPlan(deps, second))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+
+    // Tamper evidence stays on disk, and the active pin is unchanged.
+    expect(await failureCode(loadSealedPlan(deps, first.planId))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(new Uint8Array(await readFile(blobPath))).toEqual(
+      Uint8Array.from(original, (byte) => byte ^ 0xff),
+    );
+    expect((await readdir(join(root, "plans", first.planId))).sort()).toEqual([
+      "blobs",
+      "plan.json",
+    ]);
+    const active = await loadActivePlan(deps);
+    expect(active.ok && active.value.planId).toBe(other.planId);
+    expect(
+      (await readdir(join(root, "plans"))).filter((name) =>
+        name.startsWith(".staging-"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("refuses to republish when the stored identity lookup is ambiguous", async () => {
+    const first = sealedPlan({
+      generationToken: "generation-1" as GenerationToken,
+    });
+    expect((await publishSealedPlan(deps, first)).ok).toBe(true);
+    const other = sealedPlan({ documentTitle: "Other" });
+    expect((await publishSealedPlan(deps, other)).ok).toBe(true);
+    const documentPath = planDocumentOf(first.planId);
+    const original = new Uint8Array(await readFile(documentPath));
+    const second = sealedPlan({
+      generationToken: "generation-2" as GenerationToken,
+    });
+    const faulted = withDeps({
+      fileSystem: injectFault(deps.fileSystem, (operation, entryPath) => {
+        if (
+          operation === "readPermissionBits" &&
+          entryPath === join(root, "plans", first.planId)
+        )
+          throw new Error("transient plan directory lookup failure");
+      }),
+    });
+
+    expect(await failureCode(publishSealedPlan(faulted, second))).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(new Uint8Array(await readFile(documentPath))).toEqual(original);
+    expect((await readdir(join(root, "plans", first.planId))).sort()).toEqual([
+      "blobs",
+      "plan.json",
+    ]);
+    const active = await loadActivePlan(deps);
+    expect(active.ok && active.value.planId).toBe(other.planId);
+    expect(
+      (await readdir(join(root, "plans"))).filter((name) =>
+        name.startsWith(".staging-"),
+      ),
+    ).toEqual([]);
   });
 
   it("rejects a tampered or forged active-plan pointer without loading a plan", async () => {
