@@ -77,6 +77,65 @@ describe("containsCredentialBearingOutput", () => {
     }
   });
 
+  it("rejects a scheme-less query or fragment remote carrying no userinfo", () => {
+    // The canonical rule's `host:path?query` form makes userinfo optional, so a
+    // gate that only anchors scheme-less candidates on `@` never shows it these
+    // at all. The URL-shaped start is the dotted host label before the path
+    // colon, wherever in the run it sits.
+    for (const output of [
+      "example.test:repo.git?token=secret",
+      "example.test:repo.git#token",
+      "example.test:owner/repo.git?token=secret",
+      // Glued to prose and MDX punctuation, including a colon of its own.
+      "Mirror:example.test:repo.git?token=secret",
+      "Mirrors;example.test:repo.git?token=secret",
+      "Ends here.example.test:repo.git#token",
+      "x,example.test:repo.git?token=secret",
+      "[mirror](example.test:repo.git?token=secret)",
+      "<img src=example.test:logo.png?token=secret alt=logo />",
+      // And after a slash, which no host label may cross.
+      "/example.test:repo.git?token=secret",
+      "see/example.test:repo.git?token=secret",
+      "a/b/c/example.test:repo.git#token",
+      // Fail-closed still measures from the candidate's own start.
+      `see/example.test:${"a".repeat(3000)}?token=secret`,
+    ]) {
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
+    }
+  });
+
+  it("agrees with the canonical rule about the userinfo-free candidate", () => {
+    // Again the verdict is the canonical rule's: this module contributes the
+    // offset the candidate begins at, not a second grammar for credentials.
+    for (const [prefix, url] of [
+      ["see/", "example.test:repo.git?token=secret"],
+      ["Mirror:", "example.test:repo.git#token"],
+    ] as const) {
+      expect(isCredentialBearingUrl(url), `canonical: ${url}`).toBe(true);
+      expect(
+        containsCredentialBearingOutput(utf8(prefix + url)),
+        `${prefix}${url}`,
+      ).toBe(true);
+    }
+  });
+
+  it("keeps colon-bearing prose without a URL-shaped host acceptable", () => {
+    // The dotted host label is what separates a scheme-less remote from
+    // arbitrary colon prose, so ordinary text that merely pairs a colon with a
+    // later `?` or `#` stays writable.
+    for (const output of [
+      "Note:something? is not a URL.",
+      "Question:answer#1 stays prose.",
+      "See heading:overview#section for details.",
+      "TODO:review? later",
+      "Clone git@example.test:owner/repo.git to start.",
+      "see/git@example.test:owner/repo.git",
+      "Ask alice@example.test about it?",
+    ]) {
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(false);
+    }
+  });
+
   it("does not let an earlier harmless address hide a later credential", () => {
     // The first `@` in the run belongs to something the canonical rule clears,
     // so anchoring on it alone would clear the whole run. Each `@` gets its own

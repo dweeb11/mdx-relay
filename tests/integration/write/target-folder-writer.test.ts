@@ -1453,6 +1453,22 @@ describe("approved target-folder writes", () => {
       "Contact alice@example.test, mirror x@y:pw@example.test/repo.git",
     ],
     [
+      "a scheme-less query remote that carries no userinfo",
+      "Mirror: example.test:repo.git?token=secret",
+    ],
+    [
+      "the same shape with a fragment instead of a query",
+      "Mirror: example.test:repo.git#token",
+    ],
+    [
+      "a userinfo-free scheme-less remote glued to prose punctuation",
+      "Mirrors;example.test:repo.git?token=secret",
+    ],
+    [
+      "a userinfo-free scheme-less remote introduced by a slash",
+      "See the mirror at see/example.test:repo.git?token=secret today.",
+    ],
+    [
       "a malformed supported-scheme URL written with backslashes",
       String.raw`Mirror: https:\\writer:token@example.invalid\site.git`,
     ],
@@ -1500,6 +1516,10 @@ describe("approved target-folder writes", () => {
         "Ends here.https://example.test/repo.git, and see(https://example.test/a)too.\n" +
         String.raw`Open C:\Users\alice\notes.md` +
         "\n" +
+        // Colon prose with a later `?` or `#` is not a scheme-less remote: the
+        // dotted host label is what makes one URL-shaped.
+        "Note:something? and Question:answer#1 stay prose.\n" +
+        "Clone git@example.test:owner/repo.git to start.\n" +
         `https://example.test/${"a".repeat(5000)}/index.html\n`,
     );
     const envelope = sealedPlan(targetRoot, { generatedMdxBytes: linked });

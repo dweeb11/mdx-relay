@@ -118,7 +118,18 @@ const isSupportedSchemeAt = (text: string, offset: number): boolean => {
  * Work stays linear in the run and bounded per candidate: candidate starts only
  * ever increase and each is judged at most once, discovery costs one character
  * each, the marker cursor only moves forward across the run, and the canonical
- * rule sees at most one candidate per supported scheme and one per `@`.
+ * rule sees at most one candidate per supported scheme, one per `@`, and one
+ * per URL-shaped host label.
+ *
+ * One scheme-less form needs no `@` at all: the canonical rule reads
+ * `host:path?query` and `host:path#fragment` as credential bearing whether or
+ * not userinfo precedes the host. Those have neither a scheme nor an `@` to
+ * anchor on, so they are anchored on a host label that carries a `.` before the
+ * path colon -- narrow on purpose, because the alternative is reading every
+ * colon in prose as a remote. `example.test:repo.git?token=secret` is a
+ * candidate; `Note:something?` is not, and no wider colon grammar is spelled
+ * here. What the anchor decides is where a candidate starts, never whether it
+ * bears a credential -- that stays the canonical rule's answer.
  */
 const scanRun = (
   text: string,
@@ -160,6 +171,8 @@ const scanRun = (
   let lastSchemeLessStart = -1;
   let lastBoundary = runStart - 1;
   let colonSinceBoundary = -1;
+  let labelStart = runStart;
+  let labelHasDot = false;
 
   /**
    * One scheme-less candidate, judged at most once. Every scheme-less form
@@ -222,10 +235,29 @@ const scanRun = (
         if (verdict === null) return false;
       }
     }
-    if (character === ":") colonSinceBoundary = index;
+    if (character === ".") labelHasDot = true;
+    if (character === ":") {
+      colonSinceBoundary = index;
+      // A dotted label immediately ahead of this colon, with a query or a
+      // fragment somewhere past it, is the URL-shaped start of a scheme-less
+      // remote that carries no userinfo. `labelStart` is one past the nearest
+      // preceding `/`, `@`, or `:` -- the three characters the canonical host
+      // class excludes -- so it is exactly where such a host begins.
+      if (
+        labelHasDot &&
+        index > labelStart &&
+        lastQueryOrFragment > index &&
+        judgeSchemeLess(labelStart) === true
+      )
+        return true;
+      labelStart = index + 1;
+      labelHasDot = false;
+    }
     if (isAuthorityBoundary(character)) {
       lastBoundary = index;
       colonSinceBoundary = -1;
+      labelStart = index + 1;
+      labelHasDot = false;
     }
   }
   return false;
