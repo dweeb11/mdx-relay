@@ -28,10 +28,12 @@ import type {
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
   GenerationToken,
+  PlanId,
   TargetSnapshotEntry,
   ValidatedPortableProfileSnapshot,
 } from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
+import { mdxRelayErr, mdxRelayOk } from "../../../src/contracts/result";
 import {
   buildExportPlan,
   type ExportPlanBuildInput,
@@ -154,6 +156,8 @@ const sealedPlan = (
   return sealed.value;
 };
 
+const NOW = "2026-07-22T00:00:00.000Z";
+
 /** Only envelopes the writer will accept: verified ready, or no-changes. */
 type WritableEnvelope = Extract<
   SealedExportPlanEnvelope,
@@ -172,6 +176,14 @@ const writeInput = (
   plan: envelope.plan,
   blobBytes: envelope.blobBytes,
   configuredTargetRoot,
+  approval: { planId: envelope.plan.planId },
+  approvalTransition: {
+    generationToken: envelope.plan.generationToken,
+    planId: envelope.plan.planId,
+  },
+  currentApprovalFingerprint: structuredClone(
+    envelope.plan.approvalFingerprint,
+  ),
   ...overrides,
 });
 
@@ -258,6 +270,8 @@ describe("approved target-folder writes", () => {
       fileSystem: createNodeTargetFolderFileSystem(),
       hash: sha256OfBytes,
       caseSensitivity: CASE_SENSITIVITY,
+      readApproval: (planId) => Promise.resolve(mdxRelayOk(planId)),
+      now: () => NOW,
     };
   });
 
@@ -383,7 +397,7 @@ describe("approved target-folder writes", () => {
     expect(new Uint8Array(await readFile(mdxPath))).toEqual(MDX_BYTES);
   });
 
-  it("rejects traversal before any write", async () => {
+  it("rejects a traversal-tampered action before any write", async () => {
     const envelope = sealedPlan(targetRoot);
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
       throw new Error("expected verified ready plan");
@@ -399,7 +413,11 @@ describe("approved target-folder writes", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.report.completed).toEqual([]);
-    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.unsafeTarget);
+    // A retargeted action no longer matches the approved context, so it is
+    // refused at the mutation boundary before containment is even consulted.
+    expect(result.report.failed[0]!.issue.code).toBe(
+      ISSUE_CODES.approvalMismatch,
+    );
     expect(result.report.unattempted).toContain(
       "public/posts/example/img-1.webp",
     );
@@ -807,6 +825,76 @@ describe("approved target-folder writes", () => {
     expect((await readdir(posts)).sort()).toEqual(
       ["example.mdx", `example.mdx${TARGET_WRITE_TEMPORARY_SUFFIX}`].sort(),
     );
+  });
+
+  it("refuses to mutate anything without durable approval authority", async () => {
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      readApproval: () =>
+        Promise.resolve(mdxRelayErr([createIssue(ISSUE_CODES.planNotFound)])),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.planNotFound);
+    expect(result.report.unattempted).toEqual([
+      "content/posts/example.mdx",
+      "public/posts/example/img-1.webp",
+    ]);
+    await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("refuses an approval record that names a different plan", async () => {
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot, {
+        approval: { planId: "0".repeat(64) as PlanId },
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.failed[0]!.issue.code).toBe(
+      ISSUE_CODES.approvalMismatch,
+    );
+    await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("refuses a recaptured approval context that no longer matches", async () => {
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+    const drifted = structuredClone(envelope.plan.approvalFingerprint);
+    (drifted.sourceNote as { byteLength: number }).byteLength += 1;
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot, {
+        currentApprovalFingerprint: drifted,
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.failed[0]!.issue.code).toBe(
+      ISSUE_CODES.approvalMismatch,
+    );
+    await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("refuses to overwrite a target that appears while staging a create", async () => {

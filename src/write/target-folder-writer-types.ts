@@ -1,11 +1,16 @@
 import type {
+  ApprovalFingerprint,
+  ApprovalRecord,
+  ApprovalTransitionIdentity,
   ExportAction,
   NoChangesExportPlan,
+  PlanId,
   Sha256Digest,
   TargetFolderSnapshot,
   VerifiedReadyExportPlan,
 } from "../contracts/export-plan";
 import type { BlockerIssue } from "../contracts/issues";
+import type { MdxRelayResult } from "../contracts/result";
 
 /**
  * Narrow filesystem boundary for approved target-folder writes.
@@ -123,6 +128,13 @@ export interface TargetFolderWriterDeps {
    * `targetFolderSnapshot.caseSensitivity` or approval is stale.
    */
   readonly caseSensitivity: TargetFolderSnapshot["caseSensitivity"];
+  /**
+   * Reads the durable approval authority for an exact plan ID. Nothing is
+   * mutated unless this resolves to that same plan ID.
+   */
+  readonly readApproval: (planId: PlanId) => Promise<MdxRelayResult<PlanId>>;
+  /** Current time as an ISO UTC instant with milliseconds. */
+  readonly now: () => string;
 }
 
 export type WritableExportPlan = VerifiedReadyExportPlan | NoChangesExportPlan;
@@ -133,6 +145,16 @@ export interface ApplyApprovedWritesInput {
   readonly blobBytes: ReadonlyMap<string, Uint8Array>;
   /** Machine-binding target root that must resolve to the sealed real path. */
   readonly configuredTargetRoot: string;
+  /**
+   * Durable approval authority. Plan verification alone is not authority to
+   * mutate: this record must name the exact plan being written and must still
+   * be readable from the store at the mutation boundary.
+   */
+  readonly approval: ApprovalRecord;
+  /** Post-seal rendered transition identity shown at approval. */
+  readonly approvalTransition: ApprovalTransitionIdentity;
+  /** Independently recaptured approval context for the final approval gate. */
+  readonly currentApprovalFingerprint: ApprovalFingerprint;
 }
 
 export interface CompletedTargetWrite {

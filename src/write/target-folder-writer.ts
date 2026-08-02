@@ -1,9 +1,11 @@
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
-import type {
-  ExportAction,
-  Sha256Digest,
-  TargetPriorState,
+import {
+  matchesApprovalContext,
+  matchesPlanIdentity,
+  type ExportAction,
+  type Sha256Digest,
+  type TargetPriorState,
 } from "../contracts/export-plan";
 import {
   createIssue,
@@ -20,6 +22,7 @@ import type {
   TargetEntryKind,
   TargetFolderWriterDeps,
   TargetFolderWriteReport,
+  WritableExportPlan,
 } from "./target-folder-writer-types";
 
 const freezeReport = (
@@ -476,6 +479,47 @@ const writeOneTarget = async (
   );
 };
 
+/**
+ * Mutation authority gate. A verified plan is a plan whose bytes are trustworthy,
+ * not permission to write it: the durable approval record for this exact plan ID
+ * must still be readable, and a ready plan must still match the independently
+ * recaptured approval context at the moment of the write.
+ */
+const gateApprovalAuthority = async (
+  deps: TargetFolderWriterDeps,
+  input: ApplyApprovedWritesInput,
+  plan: WritableExportPlan,
+): Promise<BlockerIssue | undefined> => {
+  const mismatch = createIssue(ISSUE_CODES.approvalMismatch) as BlockerIssue;
+  if (input.approval.planId !== plan.planId) return mismatch;
+  if (!matchesPlanIdentity(input.approvalTransition, plan)) return mismatch;
+  let recorded;
+  try {
+    recorded = await deps.readApproval(plan.planId);
+  } catch {
+    return mismatch;
+  }
+  if (!recorded.ok) return recorded.error[0];
+  if (recorded.value !== plan.planId) return mismatch;
+  if (plan.state === "no-changes") {
+    // Nothing is mutated, so the recaptured fingerprint has nothing to guard.
+    const now = Date.parse(deps.now());
+    return Number.isNaN(now) ||
+      now < Date.parse(plan.createdAtUtc) ||
+      now >= Date.parse(plan.expiresAtUtc)
+      ? mismatch
+      : undefined;
+  }
+  return matchesApprovalContext(
+    plan,
+    input.approvalTransition,
+    input.currentApprovalFingerprint,
+    deps.now(),
+  )
+    ? undefined
+    : mismatch;
+};
+
 const applyOneAction = async (
   deps: TargetFolderWriterDeps,
   action: ExportAction,
@@ -526,6 +570,14 @@ export async function applyApprovedWrites(
 ): Promise<ApplyApprovedWritesResult> {
   const { plan, blobBytes, configuredTargetRoot } = input;
   const snapshot = plan.targetFolderSnapshot;
+
+  const authorityIssue = await gateApprovalAuthority(deps, input, plan);
+  if (authorityIssue !== undefined)
+    return failure(
+      [],
+      [{ targetPath: "", issue: authorityIssue }],
+      plan.actions.map((entry) => entry.targetPath),
+    );
 
   if (deps.caseSensitivity !== snapshot.caseSensitivity) {
     const issue = createIssue(ISSUE_CODES.staleApproval) as BlockerIssue;
