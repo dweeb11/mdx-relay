@@ -729,6 +729,67 @@ describe("approved target-folder writes", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("reports failure when owned-temporary cleanup fails after a create lands", async () => {
+    const sentinel = join(targetRoot, "unrelated-sentinel.txt");
+    await writeFile(sentinel, "leave-me-alone");
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const removalAttempts: string[] = [];
+    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (op !== "removeOwnedTemporary") return;
+      removalAttempts.push(entryPath);
+      // The hard link already landed the approved bytes; only the cleanup of
+      // this invocation's own temporary pathname fails.
+      throw new Error("injected owned-temporary cleanup failure");
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed.map((entry) => entry.targetPath)).toEqual([
+      "content/posts/example.mdx",
+    ]);
+    expect(result.report.failed[0]!.issue.code).toBe(
+      ISSUE_CODES.targetWriteFailed,
+    );
+    // Nothing is attempted after a failed action, and no rollback is claimed.
+    expect(result.report.unattempted).toEqual([
+      "public/posts/example/img-1.webp",
+    ]);
+
+    const posts = join(targetRoot, "content/posts");
+    const mdxPath = join(posts, "example.mdx");
+    expect(new Uint8Array(await readFile(mdxPath))).toEqual(MDX_BYTES);
+
+    // The temporary the cleanup could not remove stays visible rather than
+    // being silently reported as a clean success.
+    const leftover = (await readdir(posts)).filter((entry) =>
+      entry.includes(TARGET_WRITE_TEMPORARY_SUFFIX),
+    );
+    expect(leftover).toHaveLength(1);
+    expect(leftover[0]!.startsWith("example.mdx")).toBe(true);
+    expect(removalAttempts).toEqual([join(posts, leftover[0]!)]);
+    expect(new Uint8Array(await readFile(join(posts, leftover[0]!)))).toEqual(
+      MDX_BYTES,
+    );
+
+    // No unrelated entry is removed, and the unattempted sibling never appears.
+    expect(await readFile(sentinel, "utf8")).toBe("leave-me-alone");
+    expect((await readdir(posts)).sort()).toEqual(
+      ["example.mdx", leftover[0]!].sort(),
+    );
+    await expect(lstat(join(targetRoot, "public"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("never invokes a Git executable during writes", async () => {
     const envelope = sealedPlan(targetRoot);
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)

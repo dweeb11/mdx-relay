@@ -42,7 +42,7 @@ The plugin still must:
 - show exact target paths and output bytes before approval;
 - invalidate approval when source dependencies or approved target files change;
 - write only sealed approved bytes and never delete or broadly synchronize a directory;
-- use same-directory temporary files and atomic replacement for each output;
+- use same-directory temporary files and atomic file-level landing for each output — a conditional hard link plus owned-temporary cleanup for a create, a `rename` for an update;
 - preserve unrelated files and report partial multi-file failure truthfully;
 - prevent private source content from leaking through profiles, plans, logs, errors, snapshots, or any destination outside the sealed approved outputs; and
 - reject credentials from written output even when they appear in approved source content.
@@ -81,13 +81,27 @@ target root.
 
 **What the writer therefore guarantees:**
 
-- Replacement stays atomic at the file level. Each approved output is written to
-  a same-directory temporary file, synced, closed, and renamed over its target,
-  so a reader or a crash sees either the whole prior file or the whole approved
-  file — never a partial or truncated one.
+- Landing stays atomic at the file level. Each approved output is written to a
+  same-directory temporary file, synced, and closed, and only then made visible
+  at its target, so a reader or a crash sees either the whole prior file or the
+  whole approved file — never a partial or truncated one. The two landing shapes
+  differ:
+  - An approved **create** lands conditionally: a same-directory hard link
+    publishes the staged bytes at the target only if nothing occupies it, so a
+    target that appeared during staging is refused rather than overwritten. The
+    invocation-owned temporary is then removed, and the create is complete only
+    once that removal succeeds.
+  - An approved **update** lands atomically: a same-directory `rename` replaces
+    the target in one step, which also consumes the temporary.
+- A create whose owned-temporary cleanup fails is reported as a failed action,
+  never as success, because an unapproved pathname still holds the sealed bytes.
+  No rollback is claimed: the approved target may already hold its correct
+  approved bytes, the leftover temporary stays visible, and the remaining
+  actions are reported unattempted. Cleanup only ever unlinks a path that is
+  still the exact entry this invocation created.
 - The live prior state and the parent directory are rechecked immediately before
-  that rename, so an approval that went stale while the bytes were staged fails
-  closed instead of overwriting.
+  that link or rename, so an approval that went stale while the bytes were
+  staged fails closed instead of overwriting.
 - Missing parent directories are created one level at a time. Each level is
   created only into a parent whose identity and real path were just verified,
   those checks are repeated after the `mkdir`, and a level that resolves outside

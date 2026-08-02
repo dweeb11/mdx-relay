@@ -431,7 +431,9 @@ const discardTemporary = async (
  * immediately before the bytes land, so an approval that went stale while the
  * temporary file was staged fails instead of overwriting. A create then lands
  * its bytes with a create-only link, which refuses a target that appeared
- * during staging; an update lands its bytes with a same-directory `rename`,
+ * during staging, and removes its own temporary afterwards -- a create is
+ * complete only once that owned temporary is gone; an update lands its bytes
+ * with a same-directory `rename`,
  * which replaces the target atomically -- a concurrent reader observes either
  * the whole prior file or the whole approved file, never a partial write, and
  * a crash never leaves the target truncated.
@@ -473,12 +475,26 @@ const replaceApprovedTarget = async (
       await discardTemporary(deps, temporary);
       return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
     }
-    await deps.fileSystem
-      .removeOwnedTemporary(temporary.path, temporary.identity)
-      .catch(() => undefined);
-    return linked
-      ? undefined
-      : issueAt(ISSUE_CODES.targetChanged, relativePath);
+    if (!linked) {
+      await discardTemporary(deps, temporary);
+      return issueAt(ISSUE_CODES.targetChanged, relativePath);
+    }
+    // The approved bytes have landed under both names. Removing the
+    // invocation-owned temporary is part of the write, not best-effort tidying:
+    // if it fails, an unapproved pathname still holds the sealed bytes, so this
+    // action is reported as failed. No rollback is claimed -- the approved
+    // target keeps its correct bytes, and later actions stay unattempted. The
+    // removal stays identity-bound, so a path that stopped being this
+    // invocation's temporary is never unlinked.
+    try {
+      await deps.fileSystem.removeOwnedTemporary(
+        temporary.path,
+        temporary.identity,
+      );
+    } catch {
+      return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+    }
+    return undefined;
   }
 
   try {
