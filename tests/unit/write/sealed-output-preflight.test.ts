@@ -54,6 +54,76 @@ describe("containsCredentialBearingOutput", () => {
       expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
   });
 
+  it("rejects a scheme-less credential URL that starts after a slash", () => {
+    // A scheme-less credential form has no scheme to be found at its own
+    // offset, and `/` does not end a run, so a single slash in front of one
+    // would otherwise hide it from a gate that only reads the run start. The
+    // canonical rule is what decides each of these; the offset is this
+    // module's job to find.
+    for (const output of [
+      "/user:pw@example.test/repo.git",
+      "see/user:pw@example.test/repo.git",
+      "See the mirror at /user:pw@example.test/repo.git today.",
+      "Clone ./user:pw@example.test/repo.git into place.",
+      "[mirror](/user:pw@example.test/repo.git)",
+      "<img src=/user:pw@example.test/logo.png alt=logo />",
+      "a/b/c/user:pw@example.test/repo.git",
+      "see/user:pw@example.test:owner/repo.git",
+      // A run that opens with the separator hides the same form one character
+      // further on.
+      ":user:pw@example.test/repo.git",
+    ]) {
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
+    }
+  });
+
+  it("does not let an earlier harmless address hide a later credential", () => {
+    // The first `@` in the run belongs to something the canonical rule clears,
+    // so anchoring on it alone would clear the whole run. Each `@` gets its own
+    // candidate, starting where an embedded scheme-less form could start.
+    for (const output of [
+      "x@y:pw@example.test/repo.git",
+      "see/x@y:pw@example.test/repo.git",
+      "alice@example.test,deploy:s3cr3t@example.test/site.git",
+      "Contact alice@example.test/user:pw@example.test/repo.git",
+    ]) {
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
+    }
+  });
+
+  it("keeps multi-address prose and slash-bearing text acceptable", () => {
+    // Finding a start after every `/` and `@` must not turn ordinary addresses,
+    // paths, and SCP-style remotes into rejections.
+    for (const output of [
+      "Mail alice@example.test,bob@example.test today.",
+      "see/git@example.test:owner/repo.git",
+      "Notes at notes/2024/alice@example.test are fine.",
+      "a/b@c/d.md",
+      "https://example.test/a/b@c/d.png",
+    ]) {
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(false);
+    }
+  });
+
+  it("agrees with the canonical rule about the embedded candidate", () => {
+    // The verdict stays the canonical rule's, not an approximation of it: what
+    // this module adds is the offset the candidate begins at.
+    for (const [prefix, url] of [
+      ["/", "user:pw@example.test/repo.git"],
+      ["see/", "user:pw@example.test/repo.git"],
+      ["x@", "y:pw@example.test/repo.git"],
+    ] as const) {
+      expect(isCredentialBearingUrl(url), `canonical: ${url}`).toBe(true);
+      expect(isCredentialBearingUrl(prefix + url), `run: ${prefix}${url}`).toBe(
+        false,
+      );
+      expect(
+        containsCredentialBearingOutput(utf8(prefix + url)),
+        `${prefix}${url}`,
+      ).toBe(true);
+    }
+  });
+
   it("rejects an embedded URL whose secret sits past the bounded prefix", () => {
     // Fail-closed behaviour is measured from the candidate's own start, not
     // from the run start, so padding in front of the scheme buys nothing.
@@ -123,6 +193,8 @@ describe("containsCredentialBearingOutput", () => {
       `https://example.test/${filler}@evil.test/site.git`,
       `${filler}:s3cr3t@example.test/site.git`,
       `ssh://${filler}:s3cr3t@example.test/repo.git`,
+      // Measured from the embedded candidate's own start as well.
+      `see/${filler}:s3cr3t@example.test/site.git`,
     ])
       expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
   });

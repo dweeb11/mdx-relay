@@ -1437,6 +1437,22 @@ describe("approved target-folder writes", () => {
       `href=https://example.test/${"a".repeat(3000)}?access_token=secret`,
     ],
     [
+      "a scheme-less credential URL introduced by a slash",
+      "Mirror: /user:pw@example.test/repo.git",
+    ],
+    [
+      "a scheme-less credential URL glued to preceding prose by a slash",
+      "See the mirror at see/user:pw@example.test/repo.git today.",
+    ],
+    [
+      "the same shape inside an MDX link",
+      "[mirror](/user:pw@example.test/repo.git)",
+    ],
+    [
+      "a credential an earlier harmless address would otherwise hide",
+      "Contact alice@example.test, mirror x@y:pw@example.test/repo.git",
+    ],
+    [
       "a malformed supported-scheme URL written with backslashes",
       String.raw`Mirror: https:\\writer:token@example.invalid\site.git`,
     ],

@@ -32,6 +32,19 @@ const AT_SIGN = "@";
 const isRiskMarker = (character: string): boolean =>
   character === AT_SIGN || character === "?" || character === "#";
 
+/**
+ * Boundaries a scheme-less credential form cannot cross before its `@`.
+ *
+ * Every scheme-less form the canonical rule accepts reads `user:secret@host`,
+ * `user:secret@host:path`, or `[user@]host:path?query`, and each spells the text
+ * ahead of its decisive `@` with character classes that exclude `/` and `@`. So
+ * a scheme-less candidate embedded in a longer run can only begin immediately
+ * after one of those two characters -- which is what makes discovery of the
+ * embedded starts cheap rather than a scan from every offset.
+ */
+const isAuthorityBoundary = (character: string): boolean =>
+  character === "/" || character === AT_SIGN;
+
 /** Characters that can never appear inside a URL in generated output. */
 const DELIMITERS = new Set([...`"'\`<>()[]{}|^`]);
 
@@ -84,10 +97,16 @@ const isSupportedSchemeAt = (text: string, offset: number): boolean => {
  *
  * A candidate starts at a supported scheme wherever that scheme appears in the
  * run -- not only where the run itself starts -- which is what catches a URL
- * embedded after `=`, `,`, `;`, or any other non-delimiter punctuation. The run
- * start is a candidate too whenever the run carries userinfo, because the
+ * embedded after `=`, `,`, `;`, or any other non-delimiter punctuation. The
  * scheme-less SCP and userinfo forms the canonical rule also classifies have no
- * scheme to anchor on.
+ * scheme to anchor on, so they are anchored instead on the `@` they all require:
+ * the run start is a candidate whenever the run carries userinfo, and so is the
+ * offset just past the last `/` or `@` before each further `@`. That offset is
+ * where an embedded scheme-less form has to begin -- neither character may
+ * appear ahead of the `@` in any of those forms -- so `/user:pw@host/repo.git`
+ * and `see/user:pw@host/repo.git` are read as the credential URL the canonical
+ * rule reads them to be, and an earlier harmless `@` in `x@y:pw@host/repo.git`
+ * cannot hide the later one behind it.
  *
  * Each candidate is handed to `isCredentialBearingUrl` verbatim, with no extra
  * conditions layered on top and no second grammar of this module's own: a
@@ -96,8 +115,10 @@ const isSupportedSchemeAt = (text: string, offset: number): boolean => {
  * conservatism that follows is deliberate -- `git:` in the middle of a run that
  * also holds a `?` is judged as the URL the canonical rule reads it to be.
  *
- * Work is bounded: each candidate start is judged at most once, discovery costs
- * one character each, and the marker cursor only moves forward across the run.
+ * Work stays linear in the run and bounded per candidate: candidate starts only
+ * ever increase and each is judged at most once, discovery costs one character
+ * each, the marker cursor only moves forward across the run, and the canonical
+ * rule sees at most one candidate per supported scheme and one per `@`.
  */
 const scanRun = (
   text: string,
@@ -105,6 +126,8 @@ const scanRun = (
   runEnd: number,
   hasUserInfo: boolean,
   lastMarker: number,
+  lastColon: number,
+  lastQueryOrFragment: number,
 ): boolean => {
   // No marker anywhere in the run means no candidate in it can be credential
   // bearing, so the whole run is settled without a single canonical call.
@@ -121,22 +144,89 @@ const scanRun = (
     return markerCursor;
   };
 
-  for (let start = runStart; start < runEnd; start += 1) {
-    const isCandidate =
-      isSupportedSchemeAt(text, start) || (start === runStart && hasUserInfo);
-    if (!isCandidate) continue;
-
+  // `true` stops the whole scan, `false` only settles this candidate; `null`
+  // means every later candidate is settled too, because they all start further
+  // right than a candidate that already ran out of markers.
+  const judge = (start: number): boolean | null => {
     // Userinfo, a query, or a fragment beyond the bounded prefix would decide
     // the canonical verdict on characters this gate refuses to read, so an
     // overlong candidate carrying one is refused rather than cleared.
     if (lastMarker >= start + MAX_CANDIDATE_LENGTH) return true;
-
-    // No marker left in the run: neither this candidate nor any later one --
-    // they all start further right -- can be credential bearing.
-    if (firstMarkerFrom(start) >= runEnd) return false;
-
+    if (firstMarkerFrom(start) >= runEnd) return null;
     const end = Math.min(runEnd, start + MAX_CANDIDATE_LENGTH);
-    if (isCredentialBearingUrl(text.slice(start, end))) return true;
+    return isCredentialBearingUrl(text.slice(start, end));
+  };
+
+  let lastSchemeLessStart = -1;
+  let lastBoundary = runStart - 1;
+  let colonSinceBoundary = -1;
+
+  /**
+   * One scheme-less candidate, judged at most once. Every scheme-less form
+   * spells a literal `:` after at least one character, so a candidate with no
+   * colon left ahead of it cannot be one of them; the colon is located during
+   * the run scan, so that check costs nothing here and keeps ordinary
+   * `@`-bearing prose -- an email address -- off the canonical rule.
+   */
+  const judgeSchemeLess = (offset: number): boolean | null => {
+    // Every scheme-less form opens with at least one character that is not a
+    // colon, so leading colons are stepped over rather than allowed to fail a
+    // candidate that is credential bearing one character further on -- a run
+    // that begins `:user:pw@host/repo.git` reads as its own evasion otherwise.
+    // The skipped stretch holds no `/` and no `@`, so no two candidates ever
+    // walk the same characters.
+    let start = offset;
+    while (start < runEnd && text[start] === ":") start += 1;
+    if (start === lastSchemeLessStart || lastColon <= start) return false;
+    lastSchemeLessStart = start;
+    return judge(start);
+  };
+
+  /**
+   * Whether the candidate starting at `start` can match a scheme-less form that
+   * uses the `@` at `at` as its userinfo separator. Both branches are necessary
+   * conditions read straight off the canonical rule, so nothing this rejects
+   * could have been credential bearing:
+   *
+   * - the `user:secret@host` forms need a colon between the start and that `@`,
+   *   and at least one host character after it that is none of `/`, `@`, `:`;
+   * - the query and fragment form needs a `?` or `#` somewhere past the start.
+   *
+   * `@` is the anchor rather than an approximation of one: the text those forms
+   * allow before their separator excludes `@` and `/`, so this `@` is the only
+   * one a match from `start` could use. The check keeps repetitive URL-shaped
+   * filler -- `a:b@/a:b@/...` -- off the canonical rule, which is what stops a
+   * pathological run from costing one bounded slice per `@` in it.
+   */
+  const canOpenSchemeLessForm = (start: number, at: number): boolean => {
+    if (lastQueryOrFragment > start) return true;
+    if (colonSinceBoundary <= start) return false;
+    const host = at + 1 < runEnd ? text[at + 1]! : "";
+    return host !== "" && host !== ":" && !isAuthorityBoundary(host);
+  };
+
+  if (hasUserInfo && judgeSchemeLess(runStart) === true) return true;
+
+  for (let index = runStart; index < runEnd; index += 1) {
+    const character = text[index]!;
+    if (isSupportedSchemeAt(text, index)) {
+      const verdict = judge(index);
+      if (verdict === true) return true;
+      if (verdict === null) return false;
+    }
+    if (character === AT_SIGN) {
+      const start = Math.max(runStart, lastBoundary + 1);
+      if (canOpenSchemeLessForm(start, index)) {
+        const verdict = judgeSchemeLess(start);
+        if (verdict === true) return true;
+        if (verdict === null) return false;
+      }
+    }
+    if (character === ":") colonSinceBoundary = index;
+    if (isAuthorityBoundary(character)) {
+      lastBoundary = index;
+      colonSinceBoundary = -1;
+    }
   }
   return false;
 };
@@ -158,6 +248,8 @@ const scanText = (text: string, splitOnBackslash: boolean): boolean => {
     let runEnd = index;
     let hasUserInfo = false;
     let lastMarker = -1;
+    let lastColon = -1;
+    let lastQueryOrFragment = -1;
     while (
       runEnd < text.length &&
       !isDelimiter(text[runEnd]!, splitOnBackslash)
@@ -166,10 +258,23 @@ const scanText = (text: string, splitOnBackslash: boolean): boolean => {
       if (isRiskMarker(character)) {
         lastMarker = runEnd;
         if (character === AT_SIGN) hasUserInfo = true;
+        else lastQueryOrFragment = runEnd;
       }
+      if (character === ":") lastColon = runEnd;
       runEnd += 1;
     }
-    if (scanRun(text, runStart, runEnd, hasUserInfo, lastMarker)) return true;
+    if (
+      scanRun(
+        text,
+        runStart,
+        runEnd,
+        hasUserInfo,
+        lastMarker,
+        lastColon,
+        lastQueryOrFragment,
+      )
+    )
+      return true;
     index = runEnd;
   }
   return false;
