@@ -9,8 +9,7 @@ import { resolveProfile } from "../../../src/profiles/resolve-profile";
 const validBinding = {
   schemaVersion: 1,
   profileId: "dpw-mind-net-v1",
-  repositoryRoot: "/Users/example/sites/dpw-mind-net",
-  repositoryUrl: "https://example.invalid/dpw-mind-net.git",
+  targetRoot: "/Users/example/sites/dpw-mind-net",
 } as const;
 
 const expectBlocked = (binding: unknown, code: string) => {
@@ -26,22 +25,18 @@ const expectBlocked = (binding: unknown, code: string) => {
 };
 
 describe("profile resolution", () => {
-  it("keeps absolute repository data out of the portable profile snapshot", () => {
+  it("keeps absolute target-root data out of the portable profile snapshot", () => {
     const result = resolveProfile(DPW_MIND_NET_V1, validBinding);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.repositoryRoot).toBe(validBinding.repositoryRoot);
-    expect(result.value.repositoryUrl).toBe(validBinding.repositoryUrl);
+    expect(result.value.targetRoot).toBe(validBinding.targetRoot);
     expect(result.value.portableProfile.id).toBe(validBinding.profileId);
     expect(result.value.portableSnapshot).not.toContain(
-      validBinding.repositoryRoot,
-    );
-    expect(result.value.portableSnapshot).not.toContain(
-      validBinding.repositoryUrl,
+      validBinding.targetRoot,
     );
     expect(result.value.profileSnapshotSha256).toBe(
-      "sha256:3ce13ea7fab368516d05e8fdd55880a3a01e672812bfb32118c4c93a06c20ddb",
+      "sha256:d670b5126b81db6ef41b749b528470aaf9215d6d132f2a131fb304854b2c4191",
     );
     expect(result.value.machineBindingFingerprint).toMatch(
       /^sha256:[a-f0-9]{64}$/u,
@@ -56,24 +51,20 @@ describe("profile resolution", () => {
     expect(first.ok && repeated.ok).toBe(true);
     if (!first.ok || !repeated.ok) return;
     expect(first.value.fingerprint).toBe(
-      "sha256:afb403f9e56985fdfa9998803ca47d5b4bfafe340d7ade752d2b1a8f9fff4501",
+      "sha256:a3c8824e64f4ccd419abb95b2bae0a3b673965ab07060903793ff3e078cf5a4d",
     );
     expect(repeated.value.fingerprint).toBe(first.value.fingerprint);
-    // Hand-written field order (profileId, repositoryRoot, repositoryUrl,
-    // schemaVersion) is already JCS code-unit order — byte-identical digest.
+    // Hand-written field order (profileId, schemaVersion, targetRoot) is
+    // already JCS code-unit order — byte-identical digest.
     const handRolled =
-      '{"profileId":"dpw-mind-net-v1","repositoryRoot":"/Users/example/sites/dpw-mind-net","repositoryUrl":"https://example.invalid/dpw-mind-net.git","schemaVersion":1}';
+      '{"profileId":"dpw-mind-net-v1","schemaVersion":1,"targetRoot":"/Users/example/sites/dpw-mind-net"}';
     expect(sha256OfCanonical(validBinding)).toBe(sha256OfUtf8(handRolled));
     expect(first.value.fingerprint).toBe(sha256OfCanonical(validBinding));
 
     for (const changedBinding of [
       {
         ...validBinding,
-        repositoryRoot: "/Users/example/sites/other-checkout",
-      },
-      {
-        ...validBinding,
-        repositoryUrl: "https://example.invalid/other-checkout.git",
+        targetRoot: "/Users/example/sites/other-checkout",
       },
       { ...validBinding, profileId: "another-valid-profile" },
     ]) {
@@ -85,7 +76,7 @@ describe("profile resolution", () => {
 
     const validUnicode = resolveProfile(DPW_MIND_NET_V1, {
       ...validBinding,
-      repositoryRoot: "/Users/example/sites/😀",
+      targetRoot: "/Users/example/sites/😀",
     });
     expect(validUnicode.ok).toBe(true);
   });
@@ -124,8 +115,8 @@ describe("profile resolution", () => {
     "/Users/example/sites/./checkout",
     "C:\\sites\\..\\secrets",
     "//server/share/repository",
-  ])("rejects unsafe machine-local repository roots", (repositoryRoot) => {
-    expectBlocked({ ...validBinding, repositoryRoot }, ISSUE_CODES.unsafePath);
+  ])("rejects unsafe machine-local target roots", (targetRoot) => {
+    expectBlocked({ ...validBinding, targetRoot }, ISSUE_CODES.unsafePath);
   });
 
   it.each(["<", ">", ":", '"', "|", "?", "*"])(
@@ -134,7 +125,7 @@ describe("profile resolution", () => {
       expectBlocked(
         {
           ...validBinding,
-          repositoryRoot: `C:\\sites\\bad${character}segment`,
+          targetRoot: `C:\\sites\\bad${character}segment`,
         },
         ISSUE_CODES.unsafePath,
       );
@@ -143,19 +134,19 @@ describe("profile resolution", () => {
 
   it("classifies forward-slash Windows ADS characters as unsafe paths", () => {
     expectBlocked(
-      { ...validBinding, repositoryRoot: "C:/sites/bad?segment" },
+      { ...validBinding, targetRoot: "C:/sites/bad?segment" },
       ISSUE_CODES.unsafePath,
     );
   });
 
   it("preserves valid POSIX and Windows absolute roots", () => {
-    for (const repositoryRoot of [
+    for (const targetRoot of [
       "/Users/example/sites/posts:secret|draft?*",
       "C:\\sites\\valid-checkout",
       "D:/sites/valid-checkout",
     ])
       expect(
-        resolveProfile(DPW_MIND_NET_V1, { ...validBinding, repositoryRoot }).ok,
+        resolveProfile(DPW_MIND_NET_V1, { ...validBinding, targetRoot }).ok,
       ).toBe(true);
   });
 
@@ -165,7 +156,7 @@ describe("profile resolution", () => {
       ISSUE_CODES.invalidProfile,
     );
     expectBlocked(
-      { ...validBinding, resolveRoot: () => validBinding.repositoryRoot },
+      { ...validBinding, resolveRoot: () => validBinding.targetRoot },
       ISSUE_CODES.invalidProfile,
     );
     expectBlocked(
@@ -225,15 +216,15 @@ describe("profile resolution", () => {
     String.raw`ssh:\\writer:token@example.invalid\\site.git`,
     "writer:token@example.invalid/site.git",
     "writer:token@example.invalid:site.git",
-  ])("rejects credential-bearing binding URLs", (repositoryUrl) => {
+  ])("rejects credential-bearing binding strings", (credentialUrl) => {
     expectBlocked(
-      { ...validBinding, repositoryUrl },
+      { ...validBinding, targetRoot: credentialUrl },
       ISSUE_CODES.credentialUrl,
     );
     const serialized = JSON.stringify(
       resolveProfile(DPW_MIND_NET_V1, {
         ...validBinding,
-        repositoryUrl,
+        targetRoot: credentialUrl,
       }),
     );
     for (const sensitiveValue of [
@@ -247,32 +238,28 @@ describe("profile resolution", () => {
       expect(serialized).not.toContain(sensitiveValue);
   });
 
-  it.each([
-    "https://example.invalid/dpw-mind-net.git",
-    "ssh://git@example.invalid/dpw-mind-net.git",
-    "git://example.invalid/dpw-mind-net.git",
-    "git@example.invalid:dpw-mind-net.git",
-  ])("accepts credential-free repository URL %s", (repositoryUrl) => {
-    const result = resolveProfile(DPW_MIND_NET_V1, {
-      ...validBinding,
-      repositoryUrl,
-    });
-    expect(result.ok).toBe(true);
-  });
-
-  it.each([
-    String.raw`https:\\example.invalid\\site.git`,
-    String.raw`ssh:\\git@example.invalid\\site.git`,
-    "git@example.invalid:site\\repo.git",
-    "git@@example.invalid:site.git",
-    "git@-example.invalid:site.git",
-    "git@example..invalid:site.git",
-    "git@example.invalid:site//repo.git",
-    "git@example.invalid:site/../repo.git",
-    "git@example.invalid:",
-  ])("rejects malformed credential-free repository URL %s", (repositoryUrl) => {
+  it("rejects removed Git-shaped machine-binding fields", () => {
     expectBlocked(
-      { ...validBinding, repositoryUrl },
+      {
+        ...validBinding,
+        repositoryRoot: "/Users/example/sites/dpw-mind-net",
+      },
+      ISSUE_CODES.invalidProfile,
+    );
+    expectBlocked(
+      {
+        ...validBinding,
+        repositoryUrl: "https://example.invalid/dpw-mind-net.git",
+      },
+      ISSUE_CODES.invalidProfile,
+    );
+    expectBlocked(
+      {
+        schemaVersion: 1,
+        profileId: "dpw-mind-net-v1",
+        repositoryRoot: "/Users/example/sites/dpw-mind-net",
+        repositoryUrl: "https://example.invalid/dpw-mind-net.git",
+      },
       ISSUE_CODES.invalidProfile,
     );
   });
@@ -285,14 +272,7 @@ describe("profile resolution", () => {
         ISSUE_CODES.invalidProfile,
       );
       expectBlocked(
-        { ...validBinding, repositoryRoot: `/Users/example/${surrogate}` },
-        ISSUE_CODES.invalidProfile,
-      );
-      expectBlocked(
-        {
-          ...validBinding,
-          repositoryUrl: `https://example.invalid/${surrogate}.git`,
-        },
+        { ...validBinding, targetRoot: `/Users/example/${surrogate}` },
         ISSUE_CODES.invalidProfile,
       );
     },
@@ -330,17 +310,10 @@ describe("profile resolution", () => {
     expectBlocked(throwingProxy, ISSUE_CODES.invalidProfile);
   });
 
-  it("rejects malformed repository URLs and normalized empty path segments", () => {
+  it("rejects malformed and empty target roots", () => {
+    expectBlocked({ ...validBinding, targetRoot: "" }, ISSUE_CODES.unsafePath);
     expectBlocked(
-      { ...validBinding, repositoryUrl: "" },
-      ISSUE_CODES.invalidProfile,
-    );
-    expectBlocked(
-      { ...validBinding, repositoryUrl: "https://[" },
-      ISSUE_CODES.invalidProfile,
-    );
-    expectBlocked(
-      { ...validBinding, repositoryRoot: "/Users/example//checkout" },
+      { ...validBinding, targetRoot: "/Users/example//checkout" },
       ISSUE_CODES.unsafePath,
     );
   });

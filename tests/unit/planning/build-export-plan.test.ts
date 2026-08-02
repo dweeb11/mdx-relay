@@ -6,18 +6,17 @@ import type {
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
   GenerationToken,
-  RepositoryFingerprint,
-  RepositoryTargetFingerprint,
   SourceNoteMetadata,
+  TargetSnapshotEntry,
   ValidatedPortableProfileSnapshot,
 } from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
 import { MDX_RELAY_LIMITS } from "../../../src/core/limits";
 import {
   buildExportPlan,
-  isPortableRepositoryPath,
+  isPortableTargetPath,
   MAX_PORTABLE_PATH_SEGMENT_LENGTH,
-  MAX_PORTABLE_REPOSITORY_PATH_LENGTH,
+  MAX_PORTABLE_TARGET_PATH_LENGTH,
   verifySourceBytes,
   type CanonicalSourceImage,
   type ExportPlanBuildInput,
@@ -47,57 +46,8 @@ const sourceBytes = (): PlanSourceBytes => ({
   ]),
 });
 
-const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
-  realPaths: {
-    repositoryRoot: "/repo",
-    gitDirectory: "/repo/.git",
-    gitCommonDirectory: "/repo/.git",
-  },
-  supportedForm: {
-    isBareRepository: false,
-    configuredRootMatchesTopLevel: true,
-    gitDirectoryMatchesCommonDirectory: true,
-    isLinkedWorktree: false,
-    coreSparseCheckout: false,
-    extensionsWorktreeConfig: false,
-    worktreeSparseCheckout: false,
-    hasPlannedPathSubmoduleBoundary: false,
-    hasNestedRepositoryBoundary: false,
-    hasStorageOverlap: false,
-    effectiveFetchUrlCount: 1,
-    effectivePushUrlCount: 1,
-  },
-  filesystemCaseSensitivity: "sensitive",
-  branch: {
-    currentBranch: "main",
-    configuredBranch: "main",
-    upstreamRemote: "origin",
-    upstreamMergeRef: "refs/heads/main",
-  },
-  oids: {
-    head: "a".repeat(40),
-    localUpstream: "a".repeat(40),
-    pushDestinationTip: "a".repeat(40),
-  },
-  remotes: {
-    fetch: {
-      sha256: digest("fetch"),
-      redactedDisplay: "https://host/repo.git",
-    },
-    push: { sha256: digest("push"), redactedDisplay: "https://host/repo.git" },
-  },
-  stateHashes: {
-    porcelainStatusSha256: digest("status"),
-    indexSha256: digest("index"),
-    relevantConfigSha256: digest("config"),
-    plannedPathAttributesSha256: digest("attributes"),
-  },
-  git: { executableRealPath: "/usr/bin/git", version: "git version 2.50.1" },
-  canonicalCommitAuthor: {
-    name: "Example Author",
-    email: "author@example.test",
-  },
-});
+const TARGET_ROOT = "/repo/target";
+const CASE_SENSITIVITY = "sensitive" as const;
 
 const sourceNote = (): SourceNoteMetadata => ({
   vaultRelativePath: "notes/example.md",
@@ -129,20 +79,20 @@ const absent: ApprovedPriorTarget = { state: "absent" };
 
 const priorTargets = (
   overrides: Readonly<Record<string, ApprovedPriorTarget>> = {},
-): readonly RepositoryTargetFingerprint[] =>
+): readonly TargetSnapshotEntry[] =>
   [
     "content/posts/example.mdx",
     "public/posts/example/img-1.webp",
     "public/posts/example/img-2.webp",
-  ].map((normalizedPath) => ({
-    normalizedPath,
-    symlinkStatus: "not-symlink" as const,
-    approvedPriorTarget: overrides[normalizedPath] ?? absent,
+  ].map((relativePath) => ({
+    relativePath,
+    priorState: overrides[relativePath] ?? absent,
   }));
 
 const barrierFor = (input: {
-  readonly repository: Omit<RepositoryFingerprint, "targets">;
-  readonly targets: readonly RepositoryTargetFingerprint[];
+  readonly caseSensitivity?: "sensitive" | "insensitive";
+  readonly targets: readonly TargetSnapshotEntry[];
+  readonly targetRootRealPath?: string;
 }): FinalCaptureBarrier => ({
   profileSnapshotSha256: digest("profile"),
   dependencySnapshotSha256: digest("dependency"),
@@ -157,15 +107,17 @@ const barrierFor = (input: {
       contentSha256,
     }),
   ),
-  repository: input.repository,
+  targetRootRealPath: input.targetRootRealPath ?? TARGET_ROOT,
+  caseSensitivity: input.caseSensitivity ?? CASE_SENSITIVITY,
   targets: input.targets,
 });
 
 const buildInput = (
   overrides: Partial<ExportPlanBuildInput> = {},
 ): ExportPlanBuildInput => {
-  const repository = overrides.repository ?? repositoryState();
   const targets = overrides.priorTargets ?? priorTargets();
+  const caseSensitivity = overrides.caseSensitivity ?? CASE_SENSITIVITY;
+  const targetRootRealPath = overrides.targetRootRealPath ?? TARGET_ROOT;
   return {
     generationToken: "generation-1" as GenerationToken,
     profile: DPW_MIND_NET_V1,
@@ -177,7 +129,6 @@ const buildInput = (
     sourceImages: sourceImages(),
     sourceBytes: sourceBytes(),
     documentSlug: "example",
-    documentTitle: "Example",
     generatedMdxBytes: MDX_BYTES,
     transformedImages: [
       { sourceId: "image-a", bytes: IMAGE_ONE_BYTES },
@@ -187,10 +138,15 @@ const buildInput = (
       { sourceId: "image-a", assetFileName: "img-1.webp" },
       { sourceId: "image-b", assetFileName: "img-2.webp" },
     ],
-    repository,
+    targetRootRealPath,
+    caseSensitivity,
     priorTargets: targets,
     warnings: [createIssue(ISSUE_CODES.imageAltTextMissing, { count: 2 })],
-    finalCapture: barrierFor({ repository, targets }),
+    finalCapture: barrierFor({
+      targetRootRealPath,
+      caseSensitivity,
+      targets,
+    }),
     createdAtUtc: "2026-07-20T00:00:00.000Z",
     expiresAtUtc: "2026-07-27T00:00:00.000Z",
     ...overrides,
@@ -209,7 +165,7 @@ const blockerCode = (input: ExportPlanBuildInput): string | undefined => {
 };
 
 describe("buildExportPlan", () => {
-  it("derives ordered actions, target modes, and content-addressed blobs", () => {
+  it("derives ordered actions and content-addressed blobs", () => {
     const { plan, blobBytes } = buildOrThrow();
 
     expect(plan.state).toBe("ready");
@@ -226,7 +182,9 @@ describe("buildExportPlan", () => {
     ]);
     expect(plan.actions.every((action) => action.kind === "create")).toBe(true);
     expect(
-      plan.actions.every((action) => action.expectedGitMode === "100644"),
+      plan.actions.every(
+        (action) => action.approvedPriorTarget.state === "absent",
+      ),
     ).toBe(true);
 
     for (const output of Object.values(plan.blobs)) {
@@ -235,18 +193,14 @@ describe("buildExportPlan", () => {
         output.contentSha256,
       );
     }
-    expect(Object.keys(plan.blobs)).toHaveLength(4);
+    expect(Object.keys(plan.blobs)).toHaveLength(3);
     expect(plan.blobs[plan.generatedMdx.contentSha256]).toEqual(
       plan.generatedMdx,
     );
-    expect(plan.blobs[plan.commitMessage.contentSha256]).toEqual(
-      plan.commitMessage,
-    );
-    expect(plan.author).toEqual(
-      plan.repositoryFingerprint.canonicalCommitAuthor,
-    );
+    expect(plan.targetFolderSnapshot.targetRootRealPath).toBe(TARGET_ROOT);
+    expect(plan.targetFolderSnapshot.caseSensitivity).toBe(CASE_SENSITIVITY);
     expect(
-      plan.repositoryFingerprint.targets.map((t) => t.normalizedPath),
+      plan.targetFolderSnapshot.targets.map((entry) => entry.relativePath),
     ).toEqual([
       "content/posts/example.mdx",
       "public/posts/example/img-1.webp",
@@ -271,8 +225,8 @@ describe("buildExportPlan", () => {
         left.planRelativePath < right.planRelativePath ? -1 : 1,
       ),
     );
-    expect(plan.approvalFingerprint.repositoryFingerprint).toEqual(
-      plan.repositoryFingerprint,
+    expect(plan.approvalFingerprint.targetFolderSnapshot).toEqual(
+      plan.targetFolderSnapshot,
     );
     expect(plan.approvalFingerprint.sourceNote).toEqual({
       byteLength: plan.sourceNote.byteLength,
@@ -322,25 +276,23 @@ describe("buildExportPlan", () => {
     expect(imageActions[0]!.sealedOutput).toEqual(
       imageActions[1]!.sealedOutput,
     );
-    // generated MDX + one shared image blob + commit message.
-    expect(Object.keys(plan.blobs)).toHaveLength(3);
-    expect(blobBytes.size).toBe(3);
+    // generated MDX + one shared image blob.
+    expect(Object.keys(plan.blobs)).toHaveLength(2);
+    expect(blobBytes.size).toBe(2);
   });
 
-  it("preserves the approved prior mode on updates and reports no changes when nothing moved", () => {
-    const executable: ApprovedPriorTarget = {
-      state: "file",
+  it("preserves approved prior state on updates and reports no changes when nothing moved", () => {
+    const existing: ApprovedPriorTarget = {
+      state: "regularFile",
       contentSha256: sha256OfBytes(IMAGE_ONE_BYTES),
-      gitMode: "100755",
     };
     const partial = buildOrThrow({
       priorTargets: priorTargets({
-        "public/posts/example/img-1.webp": executable,
+        "public/posts/example/img-1.webp": existing,
       }),
       finalCapture: barrierFor({
-        repository: repositoryState(),
         targets: priorTargets({
-          "public/posts/example/img-1.webp": executable,
+          "public/posts/example/img-1.webp": existing,
         }),
       }),
     }).plan;
@@ -348,45 +300,30 @@ describe("buildExportPlan", () => {
       (action) => action.targetPath === "public/posts/example/img-1.webp",
     )!;
     expect(updated.kind).toBe("update");
-    expect(updated.expectedGitMode).toBe("100755");
-    expect(updated.approvedPriorTarget).toEqual(executable);
+    expect(updated.approvedPriorTarget).toEqual(existing);
 
     const unchanged = priorTargets({
       "content/posts/example.mdx": {
-        state: "file",
+        state: "regularFile",
         contentSha256: sha256OfBytes(MDX_BYTES),
-        gitMode: "100644",
       },
       "public/posts/example/img-1.webp": {
-        state: "file",
+        state: "regularFile",
         contentSha256: sha256OfBytes(IMAGE_ONE_BYTES),
-        gitMode: "100644",
       },
       "public/posts/example/img-2.webp": {
-        state: "file",
+        state: "regularFile",
         contentSha256: sha256OfBytes(IMAGE_TWO_BYTES),
-        gitMode: "100644",
       },
     });
     const noChanges = buildOrThrow({
       priorTargets: unchanged,
-      finalCapture: barrierFor({
-        repository: repositoryState(),
-        targets: unchanged,
-      }),
+      finalCapture: barrierFor({ targets: unchanged }),
     }).plan;
     expect(noChanges.state).toBe("no-changes");
     expect(noChanges.actions).toEqual([]);
-    expect(noChanges.repositoryFingerprint.targets).toEqual([]);
-    expect(Object.keys(noChanges.blobs)).toHaveLength(4);
-  });
-
-  it("renders the commit message without treating replacement patterns as expansion", () => {
-    const { plan, blobBytes } = buildOrThrow({
-      documentTitle: "$& and $` cash",
-    });
-    const bytes = blobBytes.get(plan.commitMessage.planRelativePath)!;
-    expect(new TextDecoder().decode(bytes)).toBe("Publish $& and $` cash\n");
+    expect(noChanges.targetFolderSnapshot.targets).toEqual([]);
+    expect(Object.keys(noChanges.blobs)).toHaveLength(3);
   });
 
   it("fails closed on unsafe slugs and colliding target paths", () => {
@@ -403,23 +340,18 @@ describe("buildExportPlan", () => {
       "content/posts/example.mdx",
       "public/posts/example/img-1.webp",
       "public/posts/example/IMG-1.webp",
-    ].map((normalizedPath) => ({
-      normalizedPath,
-      symlinkStatus: "not-symlink" as const,
-      approvedPriorTarget: absent,
+    ].map((relativePath) => ({
+      relativePath,
+      priorState: absent,
     }));
-    const insensitive = {
-      ...repositoryState(),
-      filesystemCaseSensitivity: "insensitive" as const,
-    };
     expect(
       blockerCode(
         buildInput({
           imageEmbeds: collidingEmbeds,
-          repository: insensitive,
+          caseSensitivity: "insensitive",
           priorTargets: collidingTargets,
           finalCapture: barrierFor({
-            repository: insensitive,
+            caseSensitivity: "insensitive",
             targets: collidingTargets,
           }),
         }),
@@ -430,10 +362,7 @@ describe("buildExportPlan", () => {
         buildInput({
           imageEmbeds: collidingEmbeds,
           priorTargets: collidingTargets,
-          finalCapture: barrierFor({
-            repository: repositoryState(),
-            targets: collidingTargets,
-          }),
+          finalCapture: barrierFor({ targets: collidingTargets }),
         }),
       ),
     ).toBeUndefined();
@@ -453,14 +382,11 @@ describe("buildExportPlan", () => {
       blockerCode(buildInput({ documentSlug: slugForOverlongMdxSegment })),
     ).toBe(ISSUE_CODES.unsafePath);
 
-    // Segment-valid slug that still pushes the composed repository path past
+    // Segment-valid slug that still pushes the composed target path past
     // the bounded portable-path contract used for profile roots.
     const contentRoot = DPW_MIND_NET_V1.output.contentRoot;
     const maxSlugForPath =
-      MAX_PORTABLE_REPOSITORY_PATH_LENGTH -
-      contentRoot.length -
-      1 -
-      ".mdx".length;
+      MAX_PORTABLE_TARGET_PATH_LENGTH - contentRoot.length - 1 - ".mdx".length;
     const overlongPathSlug = "b".repeat(maxSlugForPath + 1);
     expect(overlongPathSlug.length).toBeLessThanOrEqual(
       MAX_PORTABLE_PATH_SEGMENT_LENGTH,
@@ -475,12 +401,10 @@ describe("buildExportPlan", () => {
         MAX_PORTABLE_PATH_SEGMENT_LENGTH - ".mdx".length,
       ),
     );
-    const repository = repositoryState();
     const safeTargets = [
       {
-        normalizedPath: `${contentRoot}/${maxSafeSlug}.mdx`,
-        symlinkStatus: "not-symlink" as const,
-        approvedPriorTarget: absent,
+        relativePath: `${contentRoot}/${maxSafeSlug}.mdx`,
+        priorState: absent,
       },
     ];
     expect(
@@ -493,7 +417,7 @@ describe("buildExportPlan", () => {
           sourceBytes: { note: NOTE_BYTES, images: new Map() },
           priorTargets: safeTargets,
           finalCapture: {
-            ...barrierFor({ repository, targets: safeTargets }),
+            ...barrierFor({ targets: safeTargets }),
             sourceImages: [],
           },
         }),
@@ -511,9 +435,8 @@ describe("buildExportPlan", () => {
           priorTargets: [
             ...priorTargets(),
             {
-              normalizedPath: "content/posts/other.mdx",
-              symlinkStatus: "not-symlink",
-              approvedPriorTarget: absent,
+              relativePath: "content/posts/other.mdx",
+              priorState: absent,
             },
           ],
         }),
@@ -602,40 +525,30 @@ describe("buildExportPlan", () => {
         }),
       ],
       [
-        "repository.oids.head",
+        "targetRootRealPath",
         (barrier) => ({
           ...barrier,
-          repository: {
-            ...barrier.repository,
-            oids: { ...barrier.repository.oids, head: "b".repeat(40) },
-          },
+          targetRootRealPath: "/other/target",
         }),
       ],
       [
-        "repository.stateHashes.indexSha256",
+        "caseSensitivity",
         (barrier) => ({
           ...barrier,
-          repository: {
-            ...barrier.repository,
-            stateHashes: {
-              ...barrier.repository.stateHashes,
-              indexSha256: digest("moved"),
-            },
-          },
+          caseSensitivity: "insensitive",
         }),
       ],
       [
-        "targets.approvedPriorTarget",
+        "targets.priorState",
         (barrier) => ({
           ...barrier,
           targets: barrier.targets.map((target, index) =>
             index === 0
               ? {
                   ...target,
-                  approvedPriorTarget: {
-                    state: "file",
+                  priorState: {
+                    state: "regularFile",
                     contentSha256: digest("appeared"),
-                    gitMode: "100644",
                   },
                 }
               : target,
@@ -677,19 +590,16 @@ describe("buildExportPlan", () => {
       }));
       const targets = [
         {
-          normalizedPath: "content/posts/example.mdx",
-          symlinkStatus: "not-symlink" as const,
-          approvedPriorTarget: absent,
+          relativePath: "content/posts/example.mdx",
+          priorState: absent,
         },
         ...images.map((_, index) => ({
-          normalizedPath: `public/posts/example/img-${index + 1}.webp`,
-          symlinkStatus: "not-symlink" as const,
-          approvedPriorTarget: absent,
+          relativePath: `public/posts/example/img-${index + 1}.webp`,
+          priorState: absent,
         })),
       ];
-      const repository = repositoryState();
       return {
-        ...buildInput({ repository, priorTargets: targets }),
+        ...buildInput({ priorTargets: targets }),
         ...(outputBytes === undefined
           ? {}
           : { generatedMdxBytes: new Uint8Array(outputBytes).fill(255) }),
@@ -715,7 +625,7 @@ describe("buildExportPlan", () => {
           assetFileName: `img-${index + 1}.webp`,
         })),
         finalCapture: {
-          ...barrierFor({ repository, targets }),
+          ...barrierFor({ targets }),
           sourceImages: images.map(
             ({ sourceId, byteLength, contentSha256 }) => ({
               sourceId,
@@ -727,9 +637,9 @@ describe("buildExportPlan", () => {
       };
     };
 
-    // MDX + N images + commit message.
-    expect(blockerCode(withImageCount(embedCount - 1))).toBeUndefined();
-    expect(blockerCode(withImageCount(embedCount))).toBe(
+    // MDX + N images.
+    expect(blockerCode(withImageCount(embedCount))).toBeUndefined();
+    expect(blockerCode(withImageCount(embedCount + 1))).toBe(
       ISSUE_CODES.outputFileLimitExceeded,
     );
 
@@ -743,13 +653,13 @@ describe("buildExportPlan", () => {
       ),
     ).toBe(ISSUE_CODES.outputTooLarge);
 
-    // Four maximum-size outputs sit exactly on the total budget; the sealed
-    // commit message is what pushes the plan past it.
+    // Four maximum-size outputs sit exactly on the total budget; a fifth
+    // pushes the plan past it.
     expect(
-      blockerCode(withImageCount(3, MDX_RELAY_LIMITS.sealedOutputBytes)),
+      blockerCode(withImageCount(4, MDX_RELAY_LIMITS.sealedOutputBytes)),
     ).toBe(ISSUE_CODES.totalOutputTooLarge);
     expect(
-      blockerCode(withImageCount(2, MDX_RELAY_LIMITS.sealedOutputBytes)),
+      blockerCode(withImageCount(3, MDX_RELAY_LIMITS.sealedOutputBytes)),
     ).toBeUndefined();
   });
 
@@ -767,19 +677,16 @@ describe("buildExportPlan", () => {
       ];
       const targets = [
         {
-          normalizedPath: "content/posts/example.mdx",
-          symlinkStatus: "not-symlink" as const,
-          approvedPriorTarget: absent,
+          relativePath: "content/posts/example.mdx",
+          priorState: absent,
         },
         ...Array.from({ length: embedCount }, (_, index) => ({
-          normalizedPath: `public/posts/example/img-${index + 1}.webp`,
-          symlinkStatus: "not-symlink" as const,
-          approvedPriorTarget: absent,
+          relativePath: `public/posts/example/img-${index + 1}.webp`,
+          priorState: absent,
         })),
       ];
-      const repository = repositoryState();
       return {
-        ...buildInput({ repository, priorTargets: targets }),
+        ...buildInput({ priorTargets: targets }),
         sourceImages: images,
         sourceBytes: {
           note: NOTE_BYTES,
@@ -791,7 +698,7 @@ describe("buildExportPlan", () => {
           assetFileName: `img-${index + 1}.webp`,
         })),
         finalCapture: {
-          ...barrierFor({ repository, targets }),
+          ...barrierFor({ targets }),
           sourceImages: images.map(
             ({ sourceId, byteLength, contentSha256 }) => ({
               sourceId,
@@ -804,7 +711,7 @@ describe("buildExportPlan", () => {
     };
 
     // MDX + N repeated embeds of one image: planned targets = N + 1, but
-    // content-addressed blobs collapse to MDX + one image + commit message.
+    // content-addressed blobs collapse to MDX + one image.
     const atLimit = MDX_RELAY_LIMITS.sealedOutputFiles - 1;
     const overLimit = MDX_RELAY_LIMITS.sealedOutputFiles;
     expect(blockerCode(withRepeatedEmbeds(atLimit))).toBeUndefined();
@@ -816,7 +723,7 @@ describe("buildExportPlan", () => {
     expect(accepted.plan.actions).toHaveLength(
       MDX_RELAY_LIMITS.sealedOutputFiles,
     );
-    expect(Object.keys(accepted.plan.blobs)).toHaveLength(3);
+    expect(Object.keys(accepted.plan.blobs)).toHaveLength(2);
   });
 });
 
@@ -1013,9 +920,9 @@ describe("source-byte verification and locked source limits", () => {
 });
 
 describe("planning path and equality helpers", () => {
-  it("accepts portable repository paths and rejects escape shapes", () => {
+  it("accepts portable target paths and rejects escape shapes", () => {
     for (const value of ["content/posts/a.mdx", "a", "a/b/c.webp"])
-      expect(isPortableRepositoryPath(value), value).toBe(true);
+      expect(isPortableTargetPath(value), value).toBe(true);
     for (const value of [
       "",
       "/absolute",
@@ -1030,12 +937,12 @@ describe("planning path and equality helpers", () => {
       "content/a.",
       "content/a ",
       "content/a\u0000b",
-      "a".repeat(MAX_PORTABLE_REPOSITORY_PATH_LENGTH + 1),
+      "a".repeat(MAX_PORTABLE_TARGET_PATH_LENGTH + 1),
       `content/${"a".repeat(MAX_PORTABLE_PATH_SEGMENT_LENGTH + 1)}`,
     ])
-      expect(isPortableRepositoryPath(value), value).toBe(false);
+      expect(isPortableTargetPath(value), value).toBe(false);
     expect(
-      isPortableRepositoryPath("a".repeat(MAX_PORTABLE_REPOSITORY_PATH_LENGTH)),
+      isPortableTargetPath("a".repeat(MAX_PORTABLE_TARGET_PATH_LENGTH)),
     ).toBe(true);
   });
 

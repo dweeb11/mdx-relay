@@ -7,11 +7,11 @@ import type {
   NoChangesExportPlan,
   PlanId,
   ReadyExportPlan,
-  RepositoryFingerprint,
   SealedOutput,
   Sha256Digest,
   SourceImageMetadata,
   SourceNoteMetadata,
+  TargetFolderSnapshot,
   VerifiedReadyExportPlan,
 } from "../contracts/export-plan";
 import { createIssue, ISSUE_CODES, isMdxRelayIssue } from "../contracts/issues";
@@ -167,7 +167,7 @@ const hasPortableRelativePathShape = (value: unknown): value is string => {
 const isPlanRelativePath = (value: unknown): value is string =>
   hasPortableRelativePathShape(value) &&
   !value.toLowerCase().startsWith("plans/");
-const isRepositoryTargetPath = (value: unknown): value is string =>
+const isTargetRelativePath = (value: unknown): value is string =>
   hasPortableRelativePathShape(value) &&
   !value.split("/").some((segment) => segment.toLowerCase() === ".git");
 
@@ -175,164 +175,46 @@ const isPriorTarget = (value: unknown): value is ApprovedPriorTarget => {
   if (!isRecord(value)) return false;
   if (value.state === "absent") return hasExactKeys(value, ["state"]);
   return (
-    value.state === "file" &&
-    hasExactKeys(value, ["state", "contentSha256", "gitMode"]) &&
-    isNonemptyString(value.contentSha256) &&
-    (value.gitMode === "100644" || value.gitMode === "100755")
+    value.state === "regularFile" &&
+    hasExactKeys(value, ["state", "contentSha256"]) &&
+    isNonemptyString(value.contentSha256)
   );
 };
 
-const repositoryTargetKey = (
-  normalizedPath: string,
-  caseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"],
+const targetPathKey = (
+  relativePath: string,
+  caseSensitivity: TargetFolderSnapshot["caseSensitivity"],
 ): string =>
-  caseSensitivity === "insensitive"
-    ? normalizedPath.toLowerCase()
-    : normalizedPath;
+  caseSensitivity === "insensitive" ? relativePath.toLowerCase() : relativePath;
 
-const isRepositoryFingerprint = (
+const isTargetFolderSnapshot = (
   value: unknown,
-): value is RepositoryFingerprint => {
+): value is TargetFolderSnapshot => {
+  if (!exactObject(value, ["targetRootRealPath", "caseSensitivity", "targets"]))
+    return false;
+  if (!isNonemptyString(value.targetRootRealPath)) return false;
   if (
-    !exactObject(value, [
-      "realPaths",
-      "supportedForm",
-      "filesystemCaseSensitivity",
-      "branch",
-      "oids",
-      "remotes",
-      "stateHashes",
-      "git",
-      "canonicalCommitAuthor",
-      "targets",
-    ])
+    value.caseSensitivity !== "sensitive" &&
+    value.caseSensitivity !== "insensitive"
   )
     return false;
-  const {
-    realPaths,
-    supportedForm,
-    branch,
-    oids,
-    remotes,
-    stateHashes,
-    git,
-    canonicalCommitAuthor,
-    targets,
-  } = value;
-  if (
-    !exactObject(realPaths, [
-      "repositoryRoot",
-      "gitDirectory",
-      "gitCommonDirectory",
-    ]) ||
-    !Object.values(realPaths).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(supportedForm, [
-      "isBareRepository",
-      "configuredRootMatchesTopLevel",
-      "gitDirectoryMatchesCommonDirectory",
-      "isLinkedWorktree",
-      "coreSparseCheckout",
-      "extensionsWorktreeConfig",
-      "worktreeSparseCheckout",
-      "hasPlannedPathSubmoduleBoundary",
-      "hasNestedRepositoryBoundary",
-      "hasStorageOverlap",
-      "effectiveFetchUrlCount",
-      "effectivePushUrlCount",
-    ])
-  )
-    return false;
-  if (
-    supportedForm.isBareRepository !== false ||
-    supportedForm.configuredRootMatchesTopLevel !== true ||
-    supportedForm.gitDirectoryMatchesCommonDirectory !== true ||
-    supportedForm.isLinkedWorktree !== false ||
-    supportedForm.coreSparseCheckout !== false ||
-    supportedForm.extensionsWorktreeConfig !== false ||
-    supportedForm.worktreeSparseCheckout !== false ||
-    supportedForm.hasPlannedPathSubmoduleBoundary !== false ||
-    supportedForm.hasNestedRepositoryBoundary !== false ||
-    supportedForm.hasStorageOverlap !== false ||
-    supportedForm.effectiveFetchUrlCount !== 1 ||
-    supportedForm.effectivePushUrlCount !== 1
-  )
-    return false;
-  if (
-    value.filesystemCaseSensitivity !== "sensitive" &&
-    value.filesystemCaseSensitivity !== "insensitive"
-  )
-    return false;
-  if (
-    !exactObject(branch, [
-      "currentBranch",
-      "configuredBranch",
-      "upstreamRemote",
-      "upstreamMergeRef",
-    ]) ||
-    !Object.values(branch).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(oids, ["head", "localUpstream", "pushDestinationTip"]) ||
-    !Object.values(oids).every(isNonemptyString)
-  )
-    return false;
-  if (!exactObject(remotes, ["fetch", "push"])) return false;
-  for (const remote of [remotes.fetch, remotes.push])
-    if (
-      !exactObject(remote, ["sha256", "redactedDisplay"]) ||
-      !isNonemptyString(remote.sha256) ||
-      !isNonemptyString(remote.redactedDisplay)
-    )
-      return false;
-  if (
-    !exactObject(stateHashes, [
-      "porcelainStatusSha256",
-      "indexSha256",
-      "relevantConfigSha256",
-      "plannedPathAttributesSha256",
-    ]) ||
-    !Object.values(stateHashes).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(git, ["executableRealPath", "version"]) ||
-    !Object.values(git).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(canonicalCommitAuthor, ["name", "email"]) ||
-    !Object.values(canonicalCommitAuthor).every(isNonemptyString)
-  )
-    return false;
-  if (!Array.isArray(targets)) return false;
+  if (!Array.isArray(value.targets)) return false;
   let previous = "";
   const targetKeys = new Set<string>();
-  for (const target of targets) {
+  for (const target of value.targets) {
     const targetKey =
-      isRecord(target) && typeof target.normalizedPath === "string"
-        ? repositoryTargetKey(
-            target.normalizedPath,
-            value.filesystemCaseSensitivity,
-          )
+      isRecord(target) && typeof target.relativePath === "string"
+        ? targetPathKey(target.relativePath, value.caseSensitivity)
         : "";
     if (
-      !exactObject(target, [
-        "normalizedPath",
-        "symlinkStatus",
-        "approvedPriorTarget",
-      ]) ||
-      !isRepositoryTargetPath(target.normalizedPath) ||
-      target.symlinkStatus !== "not-symlink" ||
-      !isPriorTarget(target.approvedPriorTarget) ||
-      target.normalizedPath <= previous ||
+      !exactObject(target, ["relativePath", "priorState"]) ||
+      !isTargetRelativePath(target.relativePath) ||
+      !isPriorTarget(target.priorState) ||
+      target.relativePath <= previous ||
       targetKeys.has(targetKey)
     )
       return false;
-    previous = target.normalizedPath;
+    previous = target.relativePath;
     targetKeys.add(targetKey);
   }
   return true;
@@ -386,7 +268,7 @@ const isApprovalFingerprint = (
       "dependencySnapshotSha256",
       "sourceImages",
       "sealedOutputs",
-      "repositoryFingerprint",
+      "targetFolderSnapshot",
     ]) ||
     !isNonemptyString(value.profileSnapshotSha256) ||
     !isNonemptyString(value.dependencySnapshotSha256) ||
@@ -396,7 +278,7 @@ const isApprovalFingerprint = (
     !Array.isArray(value.sourceImages) ||
     !Array.isArray(value.sealedOutputs) ||
     value.sealedOutputs.length === 0 ||
-    !isRepositoryFingerprint(value.repositoryFingerprint)
+    !isTargetFolderSnapshot(value.targetFolderSnapshot)
   )
     return false;
   let previousSourceId = "";
@@ -437,20 +319,19 @@ const isExportAction = (value: unknown): value is ExportAction =>
     "kind",
     "documentOrder",
     "targetPath",
-    "expectedGitMode",
     "sealedOutput",
     "sourceOccurrence",
     "approvedPriorTarget",
   ]) &&
   (value.kind === "create" || value.kind === "update") &&
   isNonnegativeInteger(value.documentOrder) &&
-  isRepositoryTargetPath(value.targetPath) &&
-  (value.expectedGitMode === "100644" || value.expectedGitMode === "100755") &&
+  isTargetRelativePath(value.targetPath) &&
   isSealedOutput(value.sealedOutput) &&
   isNonnegativeInteger(value.sourceOccurrence) &&
   isPriorTarget(value.approvedPriorTarget) &&
   ((value.kind === "create" && value.approvedPriorTarget.state === "absent") ||
-    (value.kind === "update" && value.approvedPriorTarget.state === "file"));
+    (value.kind === "update" &&
+      value.approvedPriorTarget.state === "regularFile"));
 
 const isWarningIssue = (value: unknown): value is WarningIssue =>
   isMdxRelayIssue(value) && value.severity === "warning";
@@ -466,13 +347,11 @@ const PLAN_FIELD_KEYS = [
   "dependencySnapshot",
   "dependencySnapshotSha256",
   "sourceImages",
-  "repositoryFingerprint",
+  "targetFolderSnapshot",
   "approvalFingerprint",
   "generatedMdx",
   "actions",
   "blobs",
-  "commitMessage",
-  "author",
   "issues",
   "createdAtUtc",
   "expiresAtUtc",
@@ -514,24 +393,20 @@ const hasVerifiedBlobs = (
  * Digests of sealed blobs that a source-image transform may name.
  *
  * Blob-map membership alone is not enough: a forged transform can point at the
- * generated MDX or commit-message blob and still recompute a matching plan ID.
- * Ready plans bind transforms to image-embed actions (`documentOrder > 0`); the
- * order-0 action is always the document MDX. No-changes plans have no actions,
- * so both the commit-message and generated-MDX digests are excluded.
+ * generated MDX blob and still recompute a matching plan ID. Ready plans bind
+ * transforms to image-embed actions (`documentOrder > 0`); the order-0 action
+ * is always the document MDX. No-changes plans have no actions, so the
+ * generated-MDX digest is excluded.
  */
 const sealedImageTransformDigests = (
   plan: Record<string, unknown>,
 ): Set<string> | undefined => {
   const blobs = plan.blobs;
-  const commitMessage = plan.commitMessage;
   const generatedMdx = plan.generatedMdx;
   if (
     !isRecord(blobs) ||
-    !isRecord(commitMessage) ||
     !isRecord(generatedMdx) ||
-    typeof commitMessage.contentSha256 !== "string" ||
     typeof generatedMdx.contentSha256 !== "string" ||
-    !Object.prototype.hasOwnProperty.call(blobs, commitMessage.contentSha256) ||
     !Object.prototype.hasOwnProperty.call(blobs, generatedMdx.contentSha256)
   )
     return undefined;
@@ -564,7 +439,6 @@ const sealedImageTransformDigests = (
 
   if (plan.state === "no-changes") {
     const digests = new Set(Object.keys(blobs));
-    digests.delete(commitMessage.contentSha256);
     digests.delete(generatedMdx.contentSha256);
     return digests;
   }
@@ -602,7 +476,7 @@ const mirrorsApprovalCapture = (plan: Record<string, unknown>): boolean => {
       byteLength: sourceNote.byteLength,
       contentSha256: sourceNote.contentSha256,
     }) ||
-    !deepEquals(approval.repositoryFingerprint, plan.repositoryFingerprint) ||
+    !deepEquals(approval.targetFolderSnapshot, plan.targetFolderSnapshot) ||
     !Array.isArray(plan.sourceImages) ||
     !plan.sourceImages.every(isRecord) ||
     !deepEquals(
@@ -639,11 +513,11 @@ const withinLockedOutputLimits = (
     candidate.actions.length > MDX_RELAY_LIMITS.sealedOutputFiles
   )
     return false;
-  const repository = candidate.repositoryFingerprint;
+  const snapshot = candidate.targetFolderSnapshot;
   if (
-    !isRecord(repository) ||
-    !Array.isArray(repository.targets) ||
-    repository.targets.length > MDX_RELAY_LIMITS.sealedOutputFiles
+    !isRecord(snapshot) ||
+    !Array.isArray(snapshot.targets) ||
+    snapshot.targets.length > MDX_RELAY_LIMITS.sealedOutputFiles
   )
     return false;
   return (
@@ -654,8 +528,8 @@ const withinLockedOutputLimits = (
 
 /**
  * Shared structural fields for both plan states: exact keys, snapshots,
- * metadata shapes, approval fingerprint, blob/output coupling for MDX and
- * commit message, author/issues, and timestamps.
+ * metadata shapes, approval fingerprint, blob/output coupling for MDX,
+ * issues, and timestamps.
  */
 const hasSharedPlanStructure = (value: Record<string, unknown>): boolean => {
   if (
@@ -680,7 +554,7 @@ const hasSharedPlanStructure = (value: Record<string, unknown>): boolean => {
     !isSourceNoteMetadata(value.sourceNote) ||
     !Array.isArray(value.sourceImages) ||
     !value.sourceImages.every(isSourceImageMetadata) ||
-    !isRepositoryFingerprint(value.repositoryFingerprint) ||
+    !isTargetFolderSnapshot(value.targetFolderSnapshot) ||
     !isApprovalFingerprint(value.approvalFingerprint)
   )
     return false;
@@ -706,8 +580,8 @@ const hasSharedPlanStructure = (value: Record<string, unknown>): boolean => {
       approvalFingerprint.dependencySnapshotSha256 ||
     !sameValue(sourceImageFingerprints, approvalFingerprint.sourceImages) ||
     !sameValue(
-      value.repositoryFingerprint,
-      approvalFingerprint.repositoryFingerprint,
+      value.targetFolderSnapshot,
+      approvalFingerprint.targetFolderSnapshot,
     )
   )
     return false;
@@ -717,19 +591,17 @@ const hasSharedPlanStructure = (value: Record<string, unknown>): boolean => {
     !Object.entries(value.blobs).every(
       ([recordKey, output]) =>
         isSealedOutput(output) && recordKey === output.contentSha256,
-    ) ||
-    !isSealedOutput(value.commitMessage)
+    )
   )
     return false;
 
   const blobs = value.blobs as Record<string, SealedOutput>;
   const generatedMdx = value.generatedMdx as SealedOutput;
-  const commitMessage = value.commitMessage as SealedOutput;
   const matchesBlob = (sealedOutput: SealedOutput): boolean => {
     const blob = blobs[sealedOutput.contentSha256];
     return blob !== undefined && sameValue(blob, sealedOutput);
   };
-  if (!matchesBlob(generatedMdx) || !matchesBlob(commitMessage)) return false;
+  if (!matchesBlob(generatedMdx)) return false;
 
   const orderedBlobOutputs = Object.values(blobs).sort((left, right) =>
     compareCodeUnits(left.planRelativePath, right.planRelativePath),
@@ -739,13 +611,6 @@ const hasSharedPlanStructure = (value: Record<string, unknown>): boolean => {
 
   if (!Array.isArray(value.issues) || !value.issues.every(isWarningIssue))
     return false;
-  if (
-    !exactObject(value.author, ["name", "email"]) ||
-    !isNonemptyString(value.author.name) ||
-    !isNonemptyString(value.author.email) ||
-    !sameValue(value.author, value.repositoryFingerprint.canonicalCommitAuthor)
-  )
-    return false;
   return (
     isIsoUtc(value.createdAtUtc) &&
     isIsoUtc(value.expiresAtUtc) &&
@@ -753,7 +618,7 @@ const hasSharedPlanStructure = (value: Record<string, unknown>): boolean => {
   );
 };
 
-/** Ready plans require non-empty actions coupled to repository targets and blobs. */
+/** Ready plans require non-empty actions coupled to snapshot targets and blobs. */
 const hasReadyPlanStructure = (value: Record<string, unknown>): boolean => {
   if (value.state !== "ready" || !hasSharedPlanStructure(value)) return false;
   if (
@@ -766,8 +631,7 @@ const hasReadyPlanStructure = (value: Record<string, unknown>): boolean => {
   const actions = value.actions;
   const blobs = value.blobs as Record<string, SealedOutput>;
   const generatedMdx = value.generatedMdx as SealedOutput;
-  const commitMessage = value.commitMessage as SealedOutput;
-  const repository = value.repositoryFingerprint as RepositoryFingerprint;
+  const snapshot = value.targetFolderSnapshot as TargetFolderSnapshot;
   const matchesBlob = (sealedOutput: SealedOutput): boolean => {
     const blob = blobs[sealedOutput.contentSha256];
     return blob !== undefined && sameValue(blob, sealedOutput);
@@ -778,11 +642,7 @@ const hasReadyPlanStructure = (value: Record<string, unknown>): boolean => {
   const actionOutputHashes = new Set(
     actions.map((action) => action.sealedOutput.contentSha256),
   );
-  const expectedActionOutputHashes = new Set(
-    Object.keys(blobs).filter(
-      (contentSha256) => contentSha256 !== commitMessage.contentSha256,
-    ),
-  );
+  const expectedActionOutputHashes = new Set(Object.keys(blobs));
   if (
     !actionOutputHashes.has(generatedMdx.contentSha256) ||
     actionOutputHashes.size !== expectedActionOutputHashes.size ||
@@ -792,20 +652,17 @@ const hasReadyPlanStructure = (value: Record<string, unknown>): boolean => {
   )
     return false;
 
-  const repositoryTargets = new Map(
-    repository.targets.map((target) => [target.normalizedPath, target]),
+  const snapshotTargets = new Map(
+    snapshot.targets.map((target) => [target.relativePath, target]),
   );
   const actionTargetPaths = new Set<string>();
-  if (repositoryTargets.size !== actions.length) return false;
+  if (snapshotTargets.size !== actions.length) return false;
   for (const action of actions) {
-    const target = repositoryTargets.get(action.targetPath);
+    const target = snapshotTargets.get(action.targetPath);
     if (
       actionTargetPaths.has(action.targetPath) ||
       target === undefined ||
-      !sameValue(target.approvedPriorTarget, action.approvedPriorTarget) ||
-      (action.approvedPriorTarget.state === "file"
-        ? action.expectedGitMode !== action.approvedPriorTarget.gitMode
-        : action.expectedGitMode !== "100644")
+      !sameValue(target.priorState, action.approvedPriorTarget)
     )
       return false;
     actionTargetPaths.add(action.targetPath);
@@ -814,26 +671,23 @@ const hasReadyPlanStructure = (value: Record<string, unknown>): boolean => {
 };
 
 /**
- * No-changes plans keep reviewable blobs (MDX, images, commit message) but
- * leave actions and repository targets genuinely empty. Image transforms may
- * name only image blobs — never the MDX or commit-message digests.
+ * No-changes plans keep reviewable blobs (MDX and images) but leave actions
+ * and target-folder snapshot entries genuinely empty. Image transforms may
+ * name only image blobs — never the MDX digest.
  */
 const hasNoChangesPlanStructure = (value: Record<string, unknown>): boolean => {
   if (value.state !== "no-changes" || !hasSharedPlanStructure(value))
     return false;
   if (!Array.isArray(value.actions) || value.actions.length !== 0) return false;
-  const repository = value.repositoryFingerprint as RepositoryFingerprint;
-  if (repository.targets.length !== 0) return false;
+  const snapshot = value.targetFolderSnapshot as TargetFolderSnapshot;
+  if (snapshot.targets.length !== 0) return false;
 
   const blobs = value.blobs as Record<string, SealedOutput>;
   const generatedMdx = value.generatedMdx as SealedOutput;
-  const commitMessage = value.commitMessage as SealedOutput;
   const sourceImages = value.sourceImages as readonly SourceImageMetadata[];
   const imageBlobKeys = new Set(
     Object.keys(blobs).filter(
-      (contentSha256) =>
-        contentSha256 !== commitMessage.contentSha256 &&
-        contentSha256 !== generatedMdx.contentSha256,
+      (contentSha256) => contentSha256 !== generatedMdx.contentSha256,
     ),
   );
   const namedTransforms = new Set(

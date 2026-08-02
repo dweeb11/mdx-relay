@@ -1,8 +1,3 @@
-export interface PortableRepositoryRules {
-  readonly remote: string;
-  readonly branch: string;
-}
-
 export interface PortableOutputRules {
   readonly contentRoot: string;
   readonly assetRoot: string;
@@ -23,18 +18,12 @@ export interface PortableImageRules {
   readonly webpQuality: number;
 }
 
-export interface PortableCommitRules {
-  readonly message: string;
-}
-
-/** Declarative publishing rules only. Machine paths and repository URLs do not belong here. */
+/** Declarative conversion rules only. Machine paths do not belong here. */
 export interface PortableProfileV1 {
   readonly schemaVersion: 1;
   readonly id: string;
   readonly name: string;
-  readonly repository: PortableRepositoryRules;
   readonly output: PortableOutputRules;
   readonly document: PortableDocumentRules;
   readonly images: PortableImageRules;
-  readonly commit: PortableCommitRules;
 }

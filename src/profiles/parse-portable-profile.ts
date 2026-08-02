@@ -96,36 +96,6 @@ const isFilenameTemplate = (value: unknown): value is string =>
   value.endsWith(".webp") &&
   isPortableSegment(value.replace("{index}", "1"));
 
-const isCommitTemplate = (value: unknown): value is string =>
-  hasExactPlaceholders(value, ["title"], ["title"]) &&
-  value.length <= 10_000 &&
-  !value.includes("\r") &&
-  !value.includes("\0");
-
-const isRemoteName = (value: unknown): value is string =>
-  isBoundedString(value, 100) &&
-  /^[a-z0-9][a-z0-9._-]*$/iu.test(value) &&
-  !value.includes("..");
-
-const isBranchName = (value: unknown): value is string =>
-  isBoundedString(value, 240) &&
-  value !== "HEAD" &&
-  !value.startsWith("-") &&
-  !value.startsWith("/") &&
-  !value.endsWith("/") &&
-  !value.endsWith(".") &&
-  !value.includes("..") &&
-  !value.includes("//") &&
-  !value.includes("@{") &&
-  !/[~^:?*[\]\\\s]/u.test(value) &&
-  value
-    .split("/")
-    .every(
-      (component) =>
-        !component.startsWith(".") &&
-        !component.toLowerCase().endsWith(".lock"),
-    );
-
 /**
  * Exact portable-profile schema check shared by planning and the worker.
  * Returns the typed profile on success; undefined for any shape or range
@@ -144,11 +114,9 @@ export const parsePortableProfile = (
       "schemaVersion",
       "id",
       "name",
-      "repository",
       "output",
       "document",
       "images",
-      "commit",
     ]) ||
     value.schemaVersion !== 1 ||
     !isBoundedString(value.id, 64) ||
@@ -156,12 +124,8 @@ export const parsePortableProfile = (
     !isBoundedString(value.name, 100)
   )
     return undefined;
-  const { repository, output, document, images, commit } = value;
+  const { output, document, images } = value;
   if (
-    !isRecord(repository) ||
-    !hasExactKeys(repository, ["remote", "branch"]) ||
-    !isRemoteName(repository.remote) ||
-    !isBranchName(repository.branch) ||
     !isRecord(output) ||
     !hasExactKeys(output, ["contentRoot", "assetRoot", "assetUrlTemplate"]) ||
     !isPortableRelativePath(output.contentRoot) ||
@@ -194,10 +158,7 @@ export const parsePortableProfile = (
       Math.floor(Math.sqrt(MDX_RELAY_LIMITS.decodedImagePixels)) ||
     !Number.isInteger(images.webpQuality) ||
     (images.webpQuality as number) < 1 ||
-    (images.webpQuality as number) > 100 ||
-    !isRecord(commit) ||
-    !hasExactKeys(commit, ["message"]) ||
-    !isCommitTemplate(commit.message)
+    (images.webpQuality as number) > 100
   )
     return undefined;
   return value as unknown as PortableProfileV1;

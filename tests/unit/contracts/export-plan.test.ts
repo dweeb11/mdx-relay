@@ -13,21 +13,22 @@ import {
   type ApprovalSealedOutputFingerprint,
   type ApprovalSourceImageFingerprint,
   type ApprovalTransitionIdentity,
-  type ApprovedPriorTarget,
   type BlockedPreviewState,
   type CanonicalDependencySnapshot,
   type GenerationToken,
-  type GitFileMode,
   type NoChangesExportPlan,
   type PlanId,
   type ReadyExportPlan,
-  type RepositoryFingerprint,
-  type RepositoryTargetFingerprint,
   type SealedOutput,
   type Sha256Digest,
+  type TargetFolderSnapshot,
   type ValidatedPortableProfileSnapshot,
   type VerifiedReadyExportPlan,
 } from "../../../src/contracts/export-plan";
+import { parsePortableProfile } from "../../../src/profiles/parse-portable-profile";
+import { validateMachineBinding } from "../../../src/profiles/machine-binding";
+import { validatePortableProfile } from "../../../src/profiles/portable-profile";
+import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 
 const compareCodeUnitStrings = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
@@ -42,8 +43,6 @@ const sourceImageOneDigest =
 const sourceImageTwoDigest =
   "sha256:6987740fb624e3e9943ec5d9ac5519b72cea1b35fb4bde5719df3923a36c08f7" as Sha256Digest;
 const imageOutputDigest = sourceImageOneDigest;
-const commitMessageDigest =
-  "sha256:004798f9139fd39da9fce235e552618fc0b4e7326470781051a6d27f8521f429" as Sha256Digest;
 const generationToken = "generation-1" as GenerationToken;
 const planId = "plan-1" as PlanId;
 const output = (path: string, contentSha256: Sha256Digest): SealedOutput => ({
@@ -51,73 +50,25 @@ const output = (path: string, contentSha256: Sha256Digest): SealedOutput => ({
   byteLength: 4,
   contentSha256,
 });
-const repositoryFingerprint = (): RepositoryFingerprint => ({
-  realPaths: {
-    repositoryRoot: "/repo",
-    gitDirectory: "/repo/.git",
-    gitCommonDirectory: "/repo/.git",
-  },
-  supportedForm: {
-    isBareRepository: false,
-    configuredRootMatchesTopLevel: true,
-    gitDirectoryMatchesCommonDirectory: true,
-    isLinkedWorktree: false,
-    coreSparseCheckout: false,
-    extensionsWorktreeConfig: false,
-    worktreeSparseCheckout: false,
-    hasPlannedPathSubmoduleBoundary: false,
-    hasNestedRepositoryBoundary: false,
-    hasStorageOverlap: false,
-    effectiveFetchUrlCount: 1,
-    effectivePushUrlCount: 1,
-  },
-  filesystemCaseSensitivity: "sensitive",
-  branch: {
-    currentBranch: "main",
-    configuredBranch: "main",
-    upstreamRemote: "origin",
-    upstreamMergeRef: "refs/heads/main",
-  },
-  oids: {
-    head: "a".repeat(40),
-    localUpstream: "a".repeat(40),
-    pushDestinationTip: "a".repeat(40),
-  },
-  remotes: {
-    fetch: {
-      sha256: digest,
-      redactedDisplay: "https://example.test/repo.git",
-    },
-    push: { sha256: digest, redactedDisplay: "ssh://example.test/repo.git" },
-  },
-  stateHashes: {
-    porcelainStatusSha256: digest,
-    indexSha256: digest,
-    relevantConfigSha256: digest,
-    plannedPathAttributesSha256: digest,
-  },
-  git: { executableRealPath: "/usr/bin/git", version: "git version 2.50.1" },
-  canonicalCommitAuthor: {
-    name: "Example Author",
-    email: "author@example.test",
-  },
+
+const targetFolderSnapshot = (): TargetFolderSnapshot => ({
+  targetRootRealPath: "/repo/target",
+  caseSensitivity: "sensitive",
   targets: [
     {
-      normalizedPath: "content/post.mdx",
-      symlinkStatus: "not-symlink",
-      approvedPriorTarget: { state: "absent" },
+      relativePath: "content/post.mdx",
+      priorState: { state: "absent" },
     },
     {
-      normalizedPath: "public/post/img-1.webp",
-      symlinkStatus: "not-symlink",
-      approvedPriorTarget: {
-        state: "file",
+      relativePath: "public/post/img-1.webp",
+      priorState: {
+        state: "regularFile",
         contentSha256: digest,
-        gitMode: "100644",
       },
     },
   ],
 });
+
 const approvalFingerprint = (): ApprovalFingerprint => ({
   profileSnapshotSha256: canonicalEmptyObjectDigest,
   sourceNote: { byteLength: 4, contentSha256: digest },
@@ -137,16 +88,15 @@ const approvalFingerprint = (): ApprovalFingerprint => ({
     },
   ],
   sealedOutputs: [
-    output("messages/commit.txt", commitMessageDigest),
     output("outputs/0001", generatedMdxDigest),
     output("outputs/0002", imageOutputDigest),
   ],
-  repositoryFingerprint: repositoryFingerprint(),
+  targetFolderSnapshot: targetFolderSnapshot(),
 });
+
 const completeReadyPlan = (): VerifiedReadyExportPlan => {
   const generatedMdx = output("outputs/0001", generatedMdxDigest);
   const image = output("outputs/0002", imageOutputDigest);
-  const commitMessage = output("messages/commit.txt", commitMessageDigest);
   return {
     schemaVersion: 1,
     generationToken,
@@ -182,7 +132,7 @@ const completeReadyPlan = (): VerifiedReadyExportPlan => {
         transformedOutputSha256: imageOutputDigest,
       },
     ],
-    repositoryFingerprint: repositoryFingerprint(),
+    targetFolderSnapshot: targetFolderSnapshot(),
     approvalFingerprint: approvalFingerprint(),
     generatedMdx,
     actions: [
@@ -190,7 +140,6 @@ const completeReadyPlan = (): VerifiedReadyExportPlan => {
         kind: "create",
         documentOrder: 0,
         targetPath: "content/post.mdx",
-        expectedGitMode: "100644",
         sealedOutput: generatedMdx,
         sourceOccurrence: 0,
         approvedPriorTarget: { state: "absent" },
@@ -199,28 +148,25 @@ const completeReadyPlan = (): VerifiedReadyExportPlan => {
         kind: "update",
         documentOrder: 1,
         targetPath: "public/post/img-1.webp",
-        expectedGitMode: "100644",
         sealedOutput: image,
         sourceOccurrence: 1,
         approvedPriorTarget: {
-          state: "file",
+          state: "regularFile",
           contentSha256: digest,
-          gitMode: "100644",
         },
       },
     ],
     blobs: {
       [generatedMdxDigest]: generatedMdx,
       [imageOutputDigest]: image,
-      [commitMessageDigest]: commitMessage,
     },
-    commitMessage,
-    author: { name: "Example Author", email: "author@example.test" },
     issues: [],
     createdAtUtc: "2026-07-20T00:00:00.000Z",
     expiresAtUtc: "2026-07-27T00:00:00.000Z",
   } as unknown as VerifiedReadyExportPlan;
 };
+
+const createBlocker = (): BlockerIssue => createIssue(ISSUE_CODES.invalidMdx);
 
 describe("ExportPlan contract", () => {
   it("discriminates ready, no-changes, and unsealed blocked preview states", () => {
@@ -229,6 +175,17 @@ describe("ExportPlan contract", () => {
       ...ready,
       state: "no-changes",
       actions: [] as const,
+      targetFolderSnapshot: {
+        ...ready.targetFolderSnapshot,
+        targets: [],
+      },
+      approvalFingerprint: {
+        ...ready.approvalFingerprint,
+        targetFolderSnapshot: {
+          ...ready.targetFolderSnapshot,
+          targets: [],
+        },
+      },
     } satisfies NoChangesExportPlan;
     const blocked = {
       state: "blocked",
@@ -249,6 +206,7 @@ describe("ExportPlan contract", () => {
     void invalidNoChanges;
     expect(ready.actions).toHaveLength(2);
     expect(noChanges.actions).toEqual([]);
+    expect(noChanges.targetFolderSnapshot.targets).toEqual([]);
     expect("planId" in blocked).toBe(false);
     expect("generatedMdx" in blocked).toBe(false);
   });
@@ -256,7 +214,7 @@ describe("ExportPlan contract", () => {
   it("uses a verifier-coherent complete ready-plan fixture", () => {
     const plan = completeReadyPlan();
     expect(Object.keys(plan.blobs).sort()).toEqual(
-      [generatedMdxDigest, imageOutputDigest, commitMessageDigest].sort(),
+      [generatedMdxDigest, imageOutputDigest].sort(),
     );
     for (const [recordKey, sealedOutput] of Object.entries(plan.blobs)) {
       expect(recordKey).toBe(sealedOutput.contentSha256);
@@ -265,17 +223,13 @@ describe("ExportPlan contract", () => {
       expect(plan.blobs[action.sealedOutput.contentSha256]).toEqual(
         action.sealedOutput,
       );
-      expect(plan.repositoryFingerprint.targets).toContainEqual({
-        normalizedPath: action.targetPath,
-        symlinkStatus: "not-symlink",
-        approvedPriorTarget: action.approvedPriorTarget,
+      expect(plan.targetFolderSnapshot.targets).toContainEqual({
+        relativePath: action.targetPath,
+        priorState: action.approvedPriorTarget,
       });
     }
     expect(plan.blobs[plan.generatedMdx.contentSha256]).toEqual(
       plan.generatedMdx,
-    );
-    expect(plan.blobs[plan.commitMessage.contentSha256]).toEqual(
-      plan.commitMessage,
     );
     expect(plan.sourceImages[0]?.transformedOutputSha256).toBe(
       imageOutputDigest,
@@ -301,8 +255,8 @@ describe("ExportPlan contract", () => {
         }),
       ),
     );
-    expect(plan.approvalFingerprint.repositoryFingerprint).toEqual(
-      plan.repositoryFingerprint,
+    expect(plan.approvalFingerprint.targetFolderSnapshot).toEqual(
+      plan.targetFolderSnapshot,
     );
     expect(plan.approvalFingerprint.sealedOutputs).toEqual(
       Object.values(plan.blobs).sort((left, right) =>
@@ -353,7 +307,7 @@ describe("ExportPlan contract", () => {
       generationToken,
       planId,
       state: "ready",
-      repositoryFingerprint: repositoryFingerprint(),
+      targetFolderSnapshot: targetFolderSnapshot(),
     };
     expect(
       matchesApprovalContext(
@@ -367,28 +321,27 @@ describe("ExportPlan contract", () => {
 
   it("rejects case-folded target collisions only on insensitive filesystems", () => {
     const caseVariantPlan = (
-      filesystemCaseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"],
+      caseSensitivity: TargetFolderSnapshot["caseSensitivity"],
     ): VerifiedReadyExportPlan => {
       const plan = structuredClone(
         completeReadyPlan(),
       ) as VerifiedReadyExportPlan;
-      const repository = plan.repositoryFingerprint as unknown as {
-        filesystemCaseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"];
-        targets: RepositoryTargetFingerprint[];
+      const snapshot = plan.targetFolderSnapshot as unknown as {
+        caseSensitivity: TargetFolderSnapshot["caseSensitivity"];
+        targets: { relativePath: string; priorState: unknown }[];
       };
-      repository.filesystemCaseSensitivity = filesystemCaseSensitivity;
-      (repository.targets[1] as { normalizedPath: string }).normalizedPath =
-        "Content/Post.mdx";
-      repository.targets.sort((left, right) =>
-        compareCodeUnitStrings(left.normalizedPath, right.normalizedPath),
+      snapshot.caseSensitivity = caseSensitivity;
+      snapshot.targets[1]!.relativePath = "Content/Post.mdx";
+      snapshot.targets.sort((left, right) =>
+        compareCodeUnitStrings(left.relativePath, right.relativePath),
       );
       (plan.actions[1] as unknown as { targetPath: string }).targetPath =
         "Content/Post.mdx";
       (
         plan.approvalFingerprint as unknown as {
-          repositoryFingerprint: RepositoryFingerprint;
+          targetFolderSnapshot: TargetFolderSnapshot;
         }
-      ).repositoryFingerprint = structuredClone(plan.repositoryFingerprint);
+      ).targetFolderSnapshot = structuredClone(plan.targetFolderSnapshot);
       return plan;
     };
     const transition = { generationToken, planId };
@@ -413,7 +366,7 @@ describe("ExportPlan contract", () => {
     ).toBe(false);
   });
 
-  it("deep-compares every non-repository approval capture field and ordering", () => {
+  it("deep-compares every non-target-folder approval capture field and ordering", () => {
     const plan = completeReadyPlan();
     const transition = { generationToken, planId };
     const now = "2026-07-20T01:00:00.000Z";
@@ -494,7 +447,7 @@ describe("ExportPlan contract", () => {
         (f) => {
           (
             f.sealedOutputs[0] as { planRelativePath: string }
-          ).planRelativePath = "messages/changed.txt";
+          ).planRelativePath = "outputs/changed";
         },
       ],
       [
@@ -552,7 +505,7 @@ describe("ExportPlan contract", () => {
         ...approvalFingerprint(),
         sealedOutputs: approvalFingerprint().sealedOutputs.map(
           (sealed, index) =>
-            index === 1
+            index === 0
               ? { ...sealed, byteLength: sealed.byteLength + 1 }
               : sealed,
         ),
@@ -563,266 +516,90 @@ describe("ExportPlan contract", () => {
     }
   });
 
-  it("compares every nested repository field and ordered target field", () => {
+  it("invalidates approval on target-root, target-set, and content-hash changes", () => {
     const plan = completeReadyPlan();
     const transition = { generationToken, planId };
     const currentUtc = "2026-07-20T01:00:00.000Z";
-    type RepositoryMutation = readonly [
+    type SnapshotMutation = readonly [
       string,
-      (fingerprint: RepositoryFingerprint) => void,
+      (snapshot: TargetFolderSnapshot) => void,
     ];
-    const mutations: RepositoryMutation[] = [
+    const mutations: SnapshotMutation[] = [
       [
-        "realPaths.repositoryRoot",
+        "targetRootRealPath",
         (f) => {
-          (f.realPaths as { repositoryRoot: string }).repositoryRoot = "/other";
+          (f as { targetRootRealPath: string }).targetRootRealPath =
+            "/other/target";
         },
       ],
       [
-        "realPaths.gitDirectory",
+        "caseSensitivity",
         (f) => {
-          (f.realPaths as { gitDirectory: string }).gitDirectory =
-            "/other/.git";
+          (f as { caseSensitivity: string }).caseSensitivity = "insensitive";
         },
       ],
       [
-        "realPaths.gitCommonDirectory",
+        "targets[0].relativePath",
         (f) => {
-          (f.realPaths as { gitCommonDirectory: string }).gitCommonDirectory =
-            "/common";
+          (f.targets[0] as { relativePath: string }).relativePath =
+            "content/other.mdx";
         },
       ],
       [
-        "supportedForm.isBareRepository",
+        "targets[0].priorState.create-to-update",
         (f) => {
-          (f.supportedForm as { isBareRepository: boolean }).isBareRepository =
-            true;
-        },
-      ],
-      [
-        "supportedForm.configuredRootMatchesTopLevel",
-        (f) => {
-          (
-            f.supportedForm as { configuredRootMatchesTopLevel: boolean }
-          ).configuredRootMatchesTopLevel = false;
-        },
-      ],
-      [
-        "supportedForm.gitDirectoryMatchesCommonDirectory",
-        (f) => {
-          (
-            f.supportedForm as { gitDirectoryMatchesCommonDirectory: boolean }
-          ).gitDirectoryMatchesCommonDirectory = false;
-        },
-      ],
-      [
-        "supportedForm.isLinkedWorktree",
-        (f) => {
-          (f.supportedForm as { isLinkedWorktree: boolean }).isLinkedWorktree =
-            true;
-        },
-      ],
-      [
-        "supportedForm.coreSparseCheckout",
-        (f) => {
-          (
-            f.supportedForm as { coreSparseCheckout: boolean }
-          ).coreSparseCheckout = true;
-        },
-      ],
-      [
-        "supportedForm.extensionsWorktreeConfig",
-        (f) => {
-          (
-            f.supportedForm as { extensionsWorktreeConfig: boolean }
-          ).extensionsWorktreeConfig = true;
-        },
-      ],
-      [
-        "supportedForm.worktreeSparseCheckout",
-        (f) => {
-          (
-            f.supportedForm as { worktreeSparseCheckout: boolean }
-          ).worktreeSparseCheckout = true;
-        },
-      ],
-      [
-        "supportedForm.hasPlannedPathSubmoduleBoundary",
-        (f) => {
-          (
-            f.supportedForm as { hasPlannedPathSubmoduleBoundary: boolean }
-          ).hasPlannedPathSubmoduleBoundary = true;
-        },
-      ],
-      [
-        "supportedForm.hasNestedRepositoryBoundary",
-        (f) => {
-          (
-            f.supportedForm as { hasNestedRepositoryBoundary: boolean }
-          ).hasNestedRepositoryBoundary = true;
-        },
-      ],
-      [
-        "supportedForm.hasStorageOverlap",
-        (f) => {
-          (
-            f.supportedForm as { hasStorageOverlap: boolean }
-          ).hasStorageOverlap = true;
-        },
-      ],
-      [
-        "supportedForm.effectiveFetchUrlCount",
-        (f) => {
-          (
-            f.supportedForm as { effectiveFetchUrlCount: number }
-          ).effectiveFetchUrlCount = 2;
-        },
-      ],
-      [
-        "supportedForm.effectivePushUrlCount",
-        (f) => {
-          (
-            f.supportedForm as { effectivePushUrlCount: number }
-          ).effectivePushUrlCount = 2;
-        },
-      ],
-      [
-        "filesystemCaseSensitivity",
-        (f) => {
-          (
-            f as { filesystemCaseSensitivity: string }
-          ).filesystemCaseSensitivity = "insensitive";
-        },
-      ],
-      ...(
-        [
-          "currentBranch",
-          "configuredBranch",
-          "upstreamRemote",
-          "upstreamMergeRef",
-        ] as const
-      ).map(
-        (key): RepositoryMutation => [
-          `branch.${key}`,
-          (f) => {
-            (f.branch as unknown as Record<string, string>)[key] = "changed";
-          },
-        ],
-      ),
-      ...(["head", "localUpstream", "pushDestinationTip"] as const).map(
-        (key): RepositoryMutation => [
-          `oids.${key}`,
-          (f) => {
-            (f.oids as unknown as Record<string, string>)[key] = "changed";
-          },
-        ],
-      ),
-      ...(["fetch", "push"] as const).flatMap((remote) =>
-        (["sha256", "redactedDisplay"] as const).map(
-          (key): RepositoryMutation => [
-            `remotes.${remote}.${key}`,
-            (f) => {
-              (f.remotes[remote] as unknown as Record<string, string>)[key] =
-                "changed";
-            },
-          ],
-        ),
-      ),
-      ...(
-        [
-          "porcelainStatusSha256",
-          "indexSha256",
-          "relevantConfigSha256",
-          "plannedPathAttributesSha256",
-        ] as const
-      ).map(
-        (key): RepositoryMutation => [
-          `stateHashes.${key}`,
-          (f) => {
-            (f.stateHashes as unknown as Record<string, string>)[key] =
-              "changed";
-          },
-        ],
-      ),
-      ...(["executableRealPath", "version"] as const).map(
-        (key): RepositoryMutation => [
-          `git.${key}`,
-          (f) => {
-            (f.git as unknown as Record<string, string>)[key] = "changed";
-          },
-        ],
-      ),
-      ...(["name", "email"] as const).map(
-        (key): RepositoryMutation => [
-          `canonicalCommitAuthor.${key}`,
-          (f) => {
-            (f.canonicalCommitAuthor as unknown as Record<string, string>)[
-              key
-            ] = "changed";
-          },
-        ],
-      ),
-      [
-        "targets[0].normalizedPath",
-        (f) => {
-          (f.targets[0] as { normalizedPath: string }).normalizedPath = "a.mdx";
-        },
-      ],
-      [
-        "targets[0].symlinkStatus",
-        (f) => {
-          (f.targets[0] as { symlinkStatus: string }).symlinkStatus = "symlink";
-        },
-      ],
-      [
-        "targets[0].approvedPriorTarget",
-        (f) => {
-          (
-            f.targets[0] as { approvedPriorTarget: ApprovedPriorTarget }
-          ).approvedPriorTarget = {
-            state: "file",
+          (f.targets[0] as { priorState: unknown }).priorState = {
+            state: "regularFile",
             contentSha256: digest,
-            gitMode: "100644",
           };
         },
       ],
       [
-        "targets[1].approvedPriorTarget.contentSha256",
+        "targets[1].priorState.contentSha256",
         (f) => {
           (
-            f.targets[1]?.approvedPriorTarget as {
-              contentSha256: Sha256Digest;
-            }
-          ).contentSha256 = "sha256:changed" as Sha256Digest;
+            f.targets[1]?.priorState as { contentSha256: Sha256Digest }
+          ).contentSha256 = generatedMdxDigest;
         },
       ],
       [
-        "targets[1].approvedPriorTarget.gitMode",
+        "targets[1].priorState.update-to-absent",
         (f) => {
-          (
-            f.targets[1]?.approvedPriorTarget as { gitMode: GitFileMode }
-          ).gitMode = "100755";
+          (f.targets[1] as { priorState: unknown }).priorState = {
+            state: "absent",
+          };
         },
       ],
       [
         "targets.order",
         (f) => {
-          (f.targets as RepositoryTargetFingerprint[]).reverse();
+          (
+            f.targets as TargetFolderSnapshot["targets"] as unknown as unknown[]
+          ).reverse();
         },
       ],
       [
-        "targets.length",
+        "targets.length.remove",
         (f) => {
-          (f.targets as RepositoryTargetFingerprint[]).pop();
+          (f.targets as unknown as unknown[]).pop();
+        },
+      ],
+      [
+        "targets.length.create",
+        (f) => {
+          (f.targets as unknown as unknown[]).push({
+            relativePath: "zz/extra.mdx",
+            priorState: { state: "absent" },
+          });
         },
       ],
     ];
-    expect(mutations).toHaveLength(42);
+    expect(mutations).toHaveLength(9);
     for (const [label, mutate] of mutations) {
       const changed = structuredClone(
         approvalFingerprint(),
       ) as ApprovalFingerprint;
-      mutate(changed.repositoryFingerprint);
+      mutate(changed.targetFolderSnapshot);
       expect(
         matchesApprovalContext(plan, transition, changed, currentUtc),
         label,
@@ -841,11 +618,11 @@ describe("ExportPlan contract", () => {
       { ...approvalFingerprint(), sourceImages: [{}] },
       {
         ...approvalFingerprint(),
-        repositoryFingerprint: {
-          ...repositoryFingerprint(),
+        targetFolderSnapshot: {
+          ...targetFolderSnapshot(),
           targets: [
-            ...repositoryFingerprint().targets,
-            repositoryFingerprint().targets[0],
+            ...targetFolderSnapshot().targets,
+            targetFolderSnapshot().targets[0]!,
           ],
         },
       },
@@ -860,7 +637,7 @@ describe("ExportPlan contract", () => {
       "dependencySnapshotSha256",
       "sourceImages",
       "sealedOutputs",
-      "repositoryFingerprint",
+      "targetFolderSnapshot",
     ] as const) {
       const malformed = { ...approvalFingerprint() } as Record<string, unknown>;
       delete malformed[key];
@@ -874,13 +651,11 @@ describe("ExportPlan contract", () => {
       "sourceNote",
       "dependencySnapshot",
       "sourceImages",
-      "repositoryFingerprint",
+      "targetFolderSnapshot",
       "approvalFingerprint",
       "generatedMdx",
       "actions",
       "blobs",
-      "commitMessage",
-      "author",
       "issues",
       "createdAtUtc",
       "expiresAtUtc",
@@ -906,8 +681,6 @@ describe("ExportPlan contract", () => {
         ...plan,
         blobs: { "sha256:wrong-key": plan.generatedMdx },
       },
-      { ...plan, commitMessage: {} },
-      { ...plan, author: {} },
       { ...plan, issues: [createBlocker()] },
       { ...plan, state: "no-changes" },
       {
@@ -918,94 +691,89 @@ describe("ExportPlan contract", () => {
       { ...plan, extra: true },
     ];
     for (const malformed of malformedPlans) {
-      expect(
-        matchesApprovalContext(
+      let accepted: boolean;
+      try {
+        accepted = matchesApprovalContext(
           malformed as VerifiedReadyExportPlan,
           transition,
           approvalFingerprint(),
           now,
-        ),
-        JSON.stringify(malformed),
-      ).toBe(false);
+        );
+      } catch {
+        accepted = false;
+      }
+      expect(accepted).toBe(false);
     }
   });
 
-  it("fails closed for malformed nested repository fingerprint shapes", () => {
+  it("fails closed for malformed nested target-folder snapshot shapes", () => {
     const transition = { generationToken, planId };
     const now = "2026-07-20T01:00:00.000Z";
-    type MalformedRepositoryMutation = readonly [
+    type MalformedSnapshotMutation = readonly [
       string,
-      (repository: Record<string, unknown>) => void,
+      (snapshot: Record<string, unknown>) => void,
     ];
-    const mutations: MalformedRepositoryMutation[] = [
+    const mutations: MalformedSnapshotMutation[] = [
       [
-        "approvedPriorTarget",
-        (repository) => {
-          const targets = repository.targets as Record<string, unknown>[];
-          targets[0]!.approvedPriorTarget = null;
+        "priorState",
+        (snapshot) => {
+          const targets = snapshot.targets as Record<string, unknown>[];
+          targets[0]!.priorState = null;
         },
       ],
       [
-        "supportedForm",
-        (repository) => {
-          repository.supportedForm = {};
+        "caseSensitivity",
+        (snapshot) => {
+          snapshot.caseSensitivity = "unknown";
         },
       ],
       [
-        "branch",
-        (repository) => {
-          repository.branch = {};
-        },
-      ],
-      [
-        "oids",
-        (repository) => {
-          repository.oids = {};
-        },
-      ],
-      [
-        "remotes",
-        (repository) => {
-          repository.remotes = null;
-        },
-      ],
-      [
-        "remotes.fetch",
-        (repository) => {
-          (repository.remotes as Record<string, unknown>).fetch = {};
-        },
-      ],
-      [
-        "stateHashes",
-        (repository) => {
-          repository.stateHashes = {};
-        },
-      ],
-      [
-        "git",
-        (repository) => {
-          repository.git = {};
-        },
-      ],
-      [
-        "canonicalCommitAuthor",
-        (repository) => {
-          repository.canonicalCommitAuthor = {};
+        "targetRootRealPath",
+        (snapshot) => {
+          snapshot.targetRootRealPath = "";
         },
       ],
       [
         "targets",
-        (repository) => {
-          repository.targets = null;
+        (snapshot) => {
+          snapshot.targets = null;
+        },
+      ],
+      [
+        "legacy state:file",
+        (snapshot) => {
+          const targets = snapshot.targets as Record<string, unknown>[];
+          targets[1]!.priorState = {
+            state: "file",
+            contentSha256: digest,
+          };
+        },
+      ],
+      [
+        "legacy symlinkStatus",
+        (snapshot) => {
+          const targets = snapshot.targets as Record<string, unknown>[];
+          targets[0]!.symlinkStatus = "not-symlink";
+        },
+      ],
+      [
+        "legacy gitMode",
+        (snapshot) => {
+          const targets = snapshot.targets as Record<string, unknown>[];
+          targets[1]!.priorState = {
+            state: "regularFile",
+            contentSha256: digest,
+            gitMode: "100644",
+          };
         },
       ],
     ];
 
     for (const [label, mutate] of mutations) {
       const malformed = structuredClone(completeReadyPlan()) as unknown as {
-        repositoryFingerprint: Record<string, unknown>;
+        targetFolderSnapshot: Record<string, unknown>;
       };
-      mutate(malformed.repositoryFingerprint);
+      mutate(malformed.targetFolderSnapshot);
       expect(
         matchesApprovalContext(
           malformed as unknown as VerifiedReadyExportPlan,
@@ -1047,56 +815,57 @@ describe("ExportPlan contract", () => {
       "outputs/\u0000blob",
       "/absolute/blob",
       "plans/plan-1/blob",
-      "Plans/plan-1/blob",
-      "PLANS/recovery.json",
-      "outputs/CON",
-      "outputs/con.blob",
-      "nul/blob",
-      "outputs/com1",
-      "outputs/lpt9.blob",
-      "outputs/blob.",
-      "outputs/blob ",
+      "Plans/escape",
     ] as const;
 
     for (const planRelativePath of invalidPaths) {
       const plan = completeReadyPlan();
+      const generatedMdx = { ...plan.generatedMdx, planRelativePath };
       const malformed = {
         ...plan,
-        commitMessage: { ...plan.commitMessage, planRelativePath },
+        generatedMdx,
+        blobs: {
+          [generatedMdxDigest]: generatedMdx,
+          [imageOutputDigest]: plan.blobs[imageOutputDigest]!,
+        },
+        approvalFingerprint: {
+          ...plan.approvalFingerprint,
+          sealedOutputs: [generatedMdx, plan.blobs[imageOutputDigest]!].sort(
+            (left, right) =>
+              compareCodeUnitStrings(
+                left.planRelativePath,
+                right.planRelativePath,
+              ),
+          ),
+        },
       } as VerifiedReadyExportPlan;
       expect(
         matchesApprovalContext(
           malformed,
           transition,
-          plan.approvalFingerprint,
+          malformed.approvalFingerprint,
           now,
         ),
         planRelativePath,
       ).toBe(false);
     }
 
+    const plan = completeReadyPlan();
     expect(
-      matchesApprovalContext(
-        completeReadyPlan(),
-        transition,
-        approvalFingerprint(),
-        now,
-      ),
+      matchesApprovalContext(plan, transition, plan.approvalFingerprint, now),
     ).toBe(true);
   });
 
-  it("rejects unsafe repository action target paths before approval", () => {
+  it("rejects unsafe target action paths before approval", () => {
     const transition = { generationToken, planId };
     const now = "2026-07-20T01:00:00.000Z";
     const invalidPaths = [
-      "../outside.mdx",
+      "../post.mdx",
       "./post.mdx",
-      "content/../outside.mdx",
+      "content/../escape.mdx",
       "content//post.mdx",
       "content/",
       "C:/temp/post.mdx",
-      "C:\\temp\\post.mdx",
-      "\\\\server\\share\\post.mdx",
       "content\\post.mdx",
       "content/\u0000post.mdx",
       "/tmp/post.mdx",
@@ -1133,63 +902,41 @@ describe("ExportPlan contract", () => {
     }
   });
 
-  it("binds expected git modes to the approved prior target modes", () => {
+  it("couples action prior states to the ordered target-folder snapshot", () => {
     const transition = { generationToken, planId };
     const now = "2026-07-20T01:00:00.000Z";
-    const withActionMode = (
-      actionIndex: number,
-      expectedGitMode: GitFileMode,
-    ): VerifiedReadyExportPlan => {
-      const plan = structuredClone(
-        completeReadyPlan(),
-      ) as VerifiedReadyExportPlan;
-      (
-        plan.actions[actionIndex] as unknown as {
-          expectedGitMode: GitFileMode;
-        }
-      ).expectedGitMode = expectedGitMode;
-      return plan;
-    };
-    const chmodCreate = withActionMode(0, "100755");
-    expect(
-      matchesApprovalContext(
-        chmodCreate,
-        transition,
-        chmodCreate.approvalFingerprint,
-        now,
-      ),
-    ).toBe(false);
-    const chmodUpdate = withActionMode(1, "100755");
-    expect(
-      matchesApprovalContext(
-        chmodUpdate,
-        transition,
-        chmodUpdate.approvalFingerprint,
-        now,
-      ),
-    ).toBe(false);
-    const executableUpdate = structuredClone(
+    const mismatchedCreate = structuredClone(
       completeReadyPlan(),
     ) as VerifiedReadyExportPlan;
-    const setPriorMode = (target: RepositoryTargetFingerprint | undefined) => {
-      (target?.approvedPriorTarget as { gitMode: GitFileMode }).gitMode =
-        "100755";
+    (
+      mismatchedCreate.actions[0] as unknown as {
+        kind: string;
+        approvedPriorTarget: unknown;
+      }
+    ).kind = "update";
+    (
+      mismatchedCreate.actions[0] as unknown as {
+        approvedPriorTarget: unknown;
+      }
+    ).approvedPriorTarget = {
+      state: "regularFile",
+      contentSha256: digest,
     };
-    setPriorMode(executableUpdate.repositoryFingerprint.targets[1]);
-    setPriorMode(
-      executableUpdate.approvalFingerprint.repositoryFingerprint.targets[1],
-    );
-    const updateAction = executableUpdate.actions[1] as unknown as {
-      expectedGitMode: GitFileMode;
-      approvedPriorTarget: { gitMode: GitFileMode };
-    };
-    updateAction.approvedPriorTarget.gitMode = "100755";
-    updateAction.expectedGitMode = "100755";
     expect(
       matchesApprovalContext(
-        executableUpdate,
+        mismatchedCreate,
         transition,
-        executableUpdate.approvalFingerprint,
+        mismatchedCreate.approvalFingerprint,
+        now,
+      ),
+    ).toBe(false);
+
+    const coherentUpdate = completeReadyPlan();
+    expect(
+      matchesApprovalContext(
+        coherentUpdate,
+        transition,
+        coherentUpdate.approvalFingerprint,
         now,
       ),
     ).toBe(true);
@@ -1295,7 +1042,6 @@ describe("ExportPlan contract", () => {
           planRelativePath: "outputs/0003",
         },
       },
-      { ...plan, commitMessage: plan.generatedMdx },
       {
         ...plan,
         actions: [
@@ -1320,7 +1066,6 @@ describe("ExportPlan contract", () => {
           malformed.approvalFingerprint,
           now,
         ),
-        JSON.stringify(malformed),
       ).toBe(false);
     }
   });
@@ -1353,79 +1098,63 @@ describe("ExportPlan contract", () => {
         },
       ],
       [
-        "sourceImages[0].contentSha256",
+        "targetFolderSnapshot.targetRootRealPath",
         (plan) => {
           (
-            plan.sourceImages[0] as { contentSha256: Sha256Digest }
-          ).contentSha256 = digest;
-        },
-      ],
-      [
-        "repositoryFingerprint.branch.currentBranch",
-        (plan) => {
-          (
-            plan.repositoryFingerprint.branch as { currentBranch: string }
-          ).currentBranch = "other";
-        },
-      ],
-      [
-        "author.name",
-        (plan) => {
-          (plan.author as { name: string }).name = "Other Author";
+            plan.targetFolderSnapshot as { targetRootRealPath: string }
+          ).targetRootRealPath = "/other/target";
         },
       ],
     ];
-
     for (const [label, mutate] of mutations) {
-      const plan = structuredClone(
+      const changed = structuredClone(
         completeReadyPlan(),
       ) as VerifiedReadyExportPlan;
-      mutate(plan);
+      mutate(changed);
       expect(
-        matchesApprovalContext(plan, transition, plan.approvalFingerprint, now),
+        matchesApprovalContext(
+          changed,
+          transition,
+          changed.approvalFingerprint,
+          now,
+        ),
         label,
       ).toBe(false);
     }
   });
 
   it("orders sealed output paths by deterministic code-unit order", () => {
+    const transition = { generationToken, planId };
     const plan = completeReadyPlan();
     const generatedMdx = {
       ...plan.generatedMdx,
-      planRelativePath: "z-output",
+      planRelativePath: "zz/last",
     };
     const imageOutput = {
-      ...plan.actions[1]!.sealedOutput,
-      planRelativePath: "ä-output",
+      ...plan.blobs[imageOutputDigest]!,
+      planRelativePath: "aa/first",
     };
-    const commitMessage = {
-      ...plan.commitMessage,
-      planRelativePath: "a-commit",
-    };
-    const deterministicPlan = {
+    const ordered = {
       ...plan,
       generatedMdx,
       actions: [
-        { ...plan.actions[0], sealedOutput: generatedMdx },
-        { ...plan.actions[1], sealedOutput: imageOutput },
-      ],
+        { ...plan.actions[0]!, sealedOutput: generatedMdx },
+        { ...plan.actions[1]!, sealedOutput: imageOutput },
+      ] as typeof plan.actions,
       blobs: {
         [generatedMdx.contentSha256]: generatedMdx,
         [imageOutput.contentSha256]: imageOutput,
-        [commitMessage.contentSha256]: commitMessage,
       },
-      commitMessage,
       approvalFingerprint: {
         ...plan.approvalFingerprint,
-        sealedOutputs: [commitMessage, generatedMdx, imageOutput],
+        sealedOutputs: [imageOutput, generatedMdx],
       },
-    } as unknown as VerifiedReadyExportPlan;
-
+    } as VerifiedReadyExportPlan;
     expect(
       matchesApprovalContext(
-        deterministicPlan,
-        { generationToken, planId },
-        deterministicPlan.approvalFingerprint,
+        ordered,
+        transition,
+        ordered.approvalFingerprint,
         "2026-07-20T01:00:00.000Z",
       ),
     ).toBe(true);
@@ -1438,16 +1167,205 @@ describe("ExportPlan contract", () => {
       planId,
     } satisfies ApprovalTransitionIdentity;
     expect(Object.keys(approval)).toEqual(["planId"]);
-    expect(matchesPlanIdentity(transition, completeReadyPlan())).toBe(true);
+    expect(matchesPlanIdentity(transition, { generationToken, planId })).toBe(
+      true,
+    );
     expect(
-      matchesPlanIdentity(
-        { ...transition, generationToken: "stale" as GenerationToken },
-        completeReadyPlan(),
-      ),
+      matchesPlanIdentity(transition, {
+        generationToken: "other" as GenerationToken,
+        planId,
+      }),
     ).toBe(false);
   });
-});
 
-function createBlocker(): BlockerIssue {
-  return createIssue(ISSUE_CODES.invalidMdx);
-}
+  it("rejects every removed Git-shaped field from runtime contracts", () => {
+    const plan = completeReadyPlan();
+    const transition = { generationToken, planId };
+    const now = "2026-07-20T01:00:00.000Z";
+    const removedPlanFields = [
+      "repositoryFingerprint",
+      "commitMessage",
+      "author",
+      "CommitAuthorSnapshot",
+    ] as const;
+    for (const field of removedPlanFields) {
+      const smuggled = {
+        ...plan,
+        [field]:
+          field === "author" || field === "CommitAuthorSnapshot"
+            ? { name: "Example Author", email: "author@example.test" }
+            : field === "commitMessage"
+              ? output("messages/commit.txt", digest)
+              : {
+                  realPaths: {
+                    repositoryRoot: "/repo",
+                    gitDirectory: "/repo/.git",
+                    gitCommonDirectory: "/repo/.git",
+                  },
+                  supportedForm: { isBareRepository: false },
+                  branch: { currentBranch: "main" },
+                  oids: { head: "a".repeat(40) },
+                  remotes: {},
+                  stateHashes: {},
+                  git: { executableRealPath: "/usr/bin/git" },
+                  canonicalCommitAuthor: {
+                    name: "Example Author",
+                    email: "author@example.test",
+                  },
+                  targets: [],
+                },
+      };
+      expect(
+        matchesApprovalContext(
+          smuggled as VerifiedReadyExportPlan,
+          transition,
+          approvalFingerprint(),
+          now,
+        ),
+        field,
+      ).toBe(false);
+      expect(JSON.stringify(completeReadyPlan())).not.toContain(`"${field}"`);
+    }
+
+    const removedSnapshotKeys = [
+      "realPaths",
+      "supportedForm",
+      "branch",
+      "oids",
+      "remotes",
+      "stateHashes",
+      "git",
+      "canonicalCommitAuthor",
+      "filesystemCaseSensitivity",
+    ] as const;
+    for (const key of removedSnapshotKeys) {
+      const fingerprint = structuredClone(
+        approvalFingerprint(),
+      ) as ApprovalFingerprint & {
+        targetFolderSnapshot: Record<string, unknown>;
+      };
+      fingerprint.targetFolderSnapshot[key] = { smuggled: true };
+      expect(
+        matchesApprovalContext(plan, transition, fingerprint, now),
+        `snapshot.${key}`,
+      ).toBe(false);
+    }
+
+    const planWithExpectedGitMode = {
+      ...completeReadyPlan(),
+      expectedGitMode: "100644",
+    };
+    expect(
+      matchesApprovalContext(
+        planWithExpectedGitMode as VerifiedReadyExportPlan,
+        transition,
+        approvalFingerprint(),
+        now,
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(completeReadyPlan())).not.toContain(
+      "expectedGitMode",
+    );
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        completeReadyPlan().actions[0],
+        "expectedGitMode",
+      ),
+    ).toBe(false);
+
+    const legacyFileState = structuredClone(
+      completeReadyPlan(),
+    ) as VerifiedReadyExportPlan;
+    (
+      legacyFileState.actions[1] as unknown as { approvedPriorTarget: unknown }
+    ).approvedPriorTarget = {
+      state: "file",
+      contentSha256: digest,
+      gitMode: "100644",
+    };
+    (
+      legacyFileState.targetFolderSnapshot.targets[1] as unknown as {
+        priorState: unknown;
+      }
+    ).priorState = {
+      state: "file",
+      contentSha256: digest,
+      gitMode: "100644",
+    };
+    (
+      legacyFileState.approvalFingerprint.targetFolderSnapshot
+        .targets[1] as unknown as { priorState: unknown }
+    ).priorState = {
+      state: "file",
+      contentSha256: digest,
+      gitMode: "100644",
+    };
+    expect(
+      matchesApprovalContext(
+        legacyFileState,
+        transition,
+        legacyFileState.approvalFingerprint,
+        now,
+      ),
+    ).toBe(false);
+
+    const withSymlinkStatus = structuredClone(
+      completeReadyPlan(),
+    ) as VerifiedReadyExportPlan;
+    (
+      withSymlinkStatus.targetFolderSnapshot.targets[0] as unknown as {
+        symlinkStatus: string;
+      }
+    ).symlinkStatus = "not-symlink";
+    (
+      withSymlinkStatus.approvalFingerprint.targetFolderSnapshot
+        .targets[0] as unknown as { symlinkStatus: string }
+    ).symlinkStatus = "not-symlink";
+    expect(
+      matchesApprovalContext(
+        withSymlinkStatus,
+        transition,
+        withSymlinkStatus.approvalFingerprint,
+        now,
+      ),
+    ).toBe(false);
+
+    const profileWithGit = {
+      ...structuredClone(DPW_MIND_NET_V1),
+      repository: { branch: "main", remote: "origin" },
+      commit: { message: "Publish {title}" },
+    };
+    expect(parsePortableProfile(profileWithGit)).toBeUndefined();
+    expect(validatePortableProfile(profileWithGit).ok).toBe(false);
+
+    expect(
+      validateMachineBinding({
+        schemaVersion: 1,
+        profileId: "dpw-mind-net-v1",
+        repositoryRoot: "/Users/example/sites/dpw-mind-net",
+        repositoryUrl: "https://example.invalid/dpw-mind-net.git",
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateMachineBinding({
+        schemaVersion: 1,
+        profileId: "dpw-mind-net-v1",
+        targetRoot: "/Users/example/sites/dpw-mind-net",
+        repositoryRoot: "/Users/example/sites/dpw-mind-net",
+      }).ok,
+    ).toBe(false);
+
+    const serializedPlan = JSON.stringify(completeReadyPlan());
+    for (const token of [
+      "repositoryFingerprint",
+      "expectedGitMode",
+      "gitMode",
+      "commitMessage",
+      "canonicalCommitAuthor",
+      "symlinkStatus",
+      '"state":"file"',
+      "GitFileMode",
+    ])
+      expect(serializedPlan).not.toContain(token);
+  });
+});

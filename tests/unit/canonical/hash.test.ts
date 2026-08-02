@@ -24,13 +24,12 @@ describe("sha256OfCanonical", () => {
   it("digests the JCS form, matching a hand-written key-sorted object", () => {
     const value = {
       profileId: "dpw-mind-net",
-      repositoryRoot: "/Users/example/sites/checkout",
-      repositoryUrl: "https://example.invalid/checkout.git",
       schemaVersion: 1 as const,
+      targetRoot: "/Users/example/sites/checkout",
     };
     // Field order below is already RFC 8785 code-unit order.
     const handRolled =
-      '{"profileId":"dpw-mind-net","repositoryRoot":"/Users/example/sites/checkout","repositoryUrl":"https://example.invalid/checkout.git","schemaVersion":1}';
+      '{"profileId":"dpw-mind-net","schemaVersion":1,"targetRoot":"/Users/example/sites/checkout"}';
     expect(sha256OfCanonical(value)).toBe(sha256OfUtf8(handRolled));
   });
 });

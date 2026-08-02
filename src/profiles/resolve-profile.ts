@@ -16,8 +16,7 @@ export interface ResolvedProfile {
   readonly portableProfile: PortableProfileV1;
   readonly portableSnapshot: ValidatedPortableProfileSnapshot;
   readonly profileSnapshotSha256: Sha256Digest;
-  readonly repositoryRoot: string;
-  readonly repositoryUrl: string;
+  readonly targetRoot: string;
   readonly machineBindingFingerprint: Sha256Digest;
 }
 
@@ -36,8 +35,7 @@ export function resolveProfile(
       portableProfile: portableResult.value.profile,
       portableSnapshot: portableResult.value.snapshot,
       profileSnapshotSha256: portableResult.value.profileSnapshotSha256,
-      repositoryRoot: bindingResult.value.binding.repositoryRoot,
-      repositoryUrl: bindingResult.value.binding.repositoryUrl,
+      targetRoot: bindingResult.value.binding.targetRoot,
       machineBindingFingerprint: bindingResult.value.fingerprint,
     }),
   );

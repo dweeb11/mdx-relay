@@ -45,8 +45,8 @@ _Avoid_: dump, serialized state
 
 **Fingerprint**:
 A record of captured external state that a plan is bound to, compared
-structurally rather than by hash. Reserved for structured captures; when the
-identity is a single hash, say **digest**.
+structurally rather than by hash. Reserved for structured captures such as the
+target-folder snapshot; when the identity is a single hash, say **digest**.
 _Avoid_: using "fingerprint" for a bare digest
 
 **Identity manifest**:

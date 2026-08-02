@@ -40,11 +40,9 @@ describe("portable profile schema", () => {
     expect(result.value.profile).toEqual(DPW_MIND_NET_V1);
     expect(Object.isFrozen(result.value.profile)).toBe(true);
     for (const rules of [
-      result.value.profile.repository,
       result.value.profile.output,
       result.value.profile.document,
       result.value.profile.images,
-      result.value.profile.commit,
     ])
       expect(Object.isFrozen(rules)).toBe(true);
     expect(() => {
@@ -53,12 +51,14 @@ describe("portable profile schema", () => {
     }).toThrow(TypeError);
     expect(result.value.profile.output.contentRoot).toBe("content/posts");
     expect(result.value.snapshot).toBe(
-      '{"commit":{"message":"Publish {title}"},"document":{"callouts":"blockquote","frontmatterPreset":"dpw-post-v1","preset":"dpw-mind-net-v1","wikilinks":"flatten"},"id":"dpw-mind-net-v1","images":{"component":"PostImage","filenameTemplate":"img-{index}.webp","maxDimension":2000,"webpQuality":85},"name":"DPW Mind Net","output":{"assetRoot":"public/posts","assetUrlTemplate":"/posts/{slug}/{assetFile}","contentRoot":"content/posts"},"repository":{"branch":"main","remote":"origin"},"schemaVersion":1}',
+      '{"document":{"callouts":"blockquote","frontmatterPreset":"dpw-post-v1","preset":"dpw-mind-net-v1","wikilinks":"flatten"},"id":"dpw-mind-net-v1","images":{"component":"PostImage","filenameTemplate":"img-{index}.webp","maxDimension":2000,"webpQuality":85},"name":"DPW Mind Net","output":{"assetRoot":"public/posts","assetUrlTemplate":"/posts/{slug}/{assetFile}","contentRoot":"content/posts"},"schemaVersion":1}',
     );
     expect(result.value.profileSnapshotSha256).toBe(
-      "sha256:3ce13ea7fab368516d05e8fdd55880a3a01e672812bfb32118c4c93a06c20ddb",
+      "sha256:d670b5126b81db6ef41b749b528470aaf9215d6d132f2a131fb304854b2c4191",
     );
     expect(result.value.snapshot).not.toContain("/Users/");
+    expect(result.value.profile).not.toHaveProperty("repository");
+    expect(result.value.profile).not.toHaveProperty("commit");
   });
 
   it("parsePortableProfile rejects lone surrogates without the sealing path", () => {
@@ -91,7 +91,8 @@ describe("portable profile schema", () => {
 
   it("rejects executable values at any depth", () => {
     const profile = cloneBuiltin();
-    (profile.commit as Record<string, unknown>).message = () => "Publish";
+    (profile.output as Record<string, unknown>).contentRoot = () =>
+      "content/posts";
     expectBlocked(profile, ISSUE_CODES.invalidProfile);
 
     const nested = cloneBuiltin();
@@ -170,20 +171,35 @@ describe("portable profile schema", () => {
   it.each([
     ["assetUrlTemplate", "/posts/{slug}/{unknown}"],
     ["assetUrlTemplate", "/posts/{title}/{assetFile}"],
+    ["assetUrlTemplate", "/posts/{slug/{assetFile}"],
+    ["assetUrlTemplate", "/posts/{slug}}/{assetFile}"],
     ["filenameTemplate", "img-{slug}.webp"],
-    ["message", "Publish {slug}"],
-    ["message", "Publish {{title}}"],
-    ["message", 42],
   ])("rejects invalid placeholders in %s", (field, template) => {
     const profile = cloneBuiltin();
     const container =
       field === "filenameTemplate"
         ? (profile.images as Record<string, unknown>)
-        : field === "message"
-          ? (profile.commit as Record<string, unknown>)
-          : (profile.output as Record<string, unknown>);
+        : (profile.output as Record<string, unknown>);
     container[field] = template;
     expectBlocked(profile, ISSUE_CODES.invalidProfile);
+  });
+
+  it("rejects non-string placeholder templates", () => {
+    const assetTemplate = cloneBuiltin();
+    (assetTemplate.output as Record<string, unknown>).assetUrlTemplate = 12;
+    expectBlocked(assetTemplate, ISSUE_CODES.invalidProfile);
+
+    const filenameTemplate = cloneBuiltin();
+    (filenameTemplate.images as Record<string, unknown>).filenameTemplate = {
+      index: 1,
+    };
+    expectBlocked(filenameTemplate, ISSUE_CODES.invalidProfile);
+  });
+
+  it("treats scheme URLs without a credential userinfo segment as non-credential", () => {
+    const profile = cloneBuiltin();
+    profile.name = "git:@example.invalid/site";
+    expect(validatePortableProfile(profile).ok).toBe(true);
   });
 
   it.each([
@@ -196,10 +212,20 @@ describe("portable profile schema", () => {
     String.raw`https:\\writer:token@example.invalid\\site.git`,
     "writer:token@example.invalid/site.git",
     "writer:token@example.invalid:site.git",
-  ])("rejects credential-bearing repository URLs", (repositoryUrl) => {
+  ])("rejects credential-bearing strings anywhere in the profile", (url) => {
     const profile = cloneBuiltin();
-    (profile.repository as Record<string, unknown>).url = repositoryUrl;
+    profile.name = url;
     expectBlocked(profile, ISSUE_CODES.credentialUrl);
+  });
+
+  it("rejects removed Git-shaped profile blocks", () => {
+    const withRepository = cloneBuiltin();
+    withRepository.repository = { branch: "main", remote: "origin" };
+    expectBlocked(withRepository, ISSUE_CODES.invalidProfile);
+
+    const withCommit = cloneBuiltin();
+    withCommit.commit = { message: "Publish {title}" };
+    expectBlocked(withCommit, ISSUE_CODES.invalidProfile);
   });
 
   it("fails closed for cyclic and accessor-backed profile data", () => {
@@ -217,7 +243,7 @@ describe("portable profile schema", () => {
     expectBlocked({}, ISSUE_CODES.invalidProfile);
 
     const nonPlain = cloneBuiltin();
-    Object.setPrototypeOf(nonPlain.repository, { inherited: true });
+    Object.setPrototypeOf(nonPlain.output, { inherited: true });
     expectBlocked(nonPlain, ISSUE_CODES.invalidProfile);
 
     const throwingProxy = new Proxy(cloneBuiltin(), {
@@ -229,14 +255,14 @@ describe("portable profile schema", () => {
   });
 
   it("rejects malformed credential-like URLs without throwing", () => {
-    const profile = cloneBuiltin();
-    (profile.repository as Record<string, unknown>).url = "https://[";
-    expectBlocked(profile, ISSUE_CODES.invalidProfile);
-
-    const malformedCredentialFree = cloneBuiltin();
-    (malformedCredentialFree.repository as Record<string, unknown>).url =
-      String.raw`https:\\example.invalid\\site.git`;
-    expectBlocked(malformedCredentialFree, ISSUE_CODES.invalidProfile);
+    for (const url of [
+      "https://writer:token@[::1]/site.git",
+      String.raw`https:\\writer:token@example.invalid\\site.git`,
+    ]) {
+      const profile = cloneBuiltin();
+      profile.name = url;
+      expectBlocked(profile, ISSUE_CODES.credentialUrl);
+    }
   });
 
   it.each(["PostImage", "PostImage.Nested", "PostImage.Nested.Member"])(
@@ -274,8 +300,8 @@ describe("portable profile schema", () => {
     }
 
     const template = cloneBuiltin();
-    (template.commit as Record<string, unknown>).message =
-      `Publish {title}${String.fromCharCode(0xd800)}`;
+    (template.images as Record<string, unknown>).filenameTemplate =
+      `img-{index}${String.fromCharCode(0xd800)}.webp`;
     expectBlocked(template, ISSUE_CODES.invalidProfile);
   });
 
@@ -288,19 +314,6 @@ describe("portable profile schema", () => {
       expectBlocked(profile, ISSUE_CODES.invalidProfile);
     },
   );
-
-  it("enforces Git branch component rules", () => {
-    for (const branch of ["HEAD", "foo.lock/bar", "foo.LOCK/bar", "foo/.bar"]) {
-      const profile = cloneBuiltin();
-      (profile.repository as Record<string, unknown>).branch = branch;
-      expectBlocked(profile, ISSUE_CODES.invalidProfile);
-    }
-
-    const valid = cloneBuiltin();
-    (valid.repository as Record<string, unknown>).branch =
-      "feature/portable-profile";
-    expect(validatePortableProfile(valid).ok).toBe(true);
-  });
 
   it("canonicalizes every JSON value shape and rejects non-JSON values", () => {
     expect(canonicalizeJcs(null)).toBe("null");

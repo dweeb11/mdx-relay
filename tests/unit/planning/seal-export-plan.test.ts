@@ -7,8 +7,7 @@ import {
   type ApprovedPriorTarget,
   type CanonicalDependencySnapshot,
   type GenerationToken,
-  type RepositoryFingerprint,
-  type RepositoryTargetFingerprint,
+  type TargetSnapshotEntry,
   type ValidatedPortableProfileSnapshot,
 } from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
@@ -44,73 +43,22 @@ const sourceBytes = (): PlanSourceBytes => ({
   images: new Map([["image-a", SOURCE_A_BYTES]]),
 });
 
-const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
-  realPaths: {
-    repositoryRoot: "/repo",
-    gitDirectory: "/repo/.git",
-    gitCommonDirectory: "/repo/.git",
-  },
-  supportedForm: {
-    isBareRepository: false,
-    configuredRootMatchesTopLevel: true,
-    gitDirectoryMatchesCommonDirectory: true,
-    isLinkedWorktree: false,
-    coreSparseCheckout: false,
-    extensionsWorktreeConfig: false,
-    worktreeSparseCheckout: false,
-    hasPlannedPathSubmoduleBoundary: false,
-    hasNestedRepositoryBoundary: false,
-    hasStorageOverlap: false,
-    effectiveFetchUrlCount: 1,
-    effectivePushUrlCount: 1,
-  },
-  filesystemCaseSensitivity: "sensitive",
-  branch: {
-    currentBranch: "main",
-    configuredBranch: "main",
-    upstreamRemote: "origin",
-    upstreamMergeRef: "refs/heads/main",
-  },
-  oids: {
-    head: "a".repeat(40),
-    localUpstream: "a".repeat(40),
-    pushDestinationTip: "a".repeat(40),
-  },
-  remotes: {
-    fetch: {
-      sha256: digest("fetch"),
-      redactedDisplay: "https://host/repo.git",
-    },
-    push: { sha256: digest("push"), redactedDisplay: "https://host/repo.git" },
-  },
-  stateHashes: {
-    porcelainStatusSha256: digest("status"),
-    indexSha256: digest("index"),
-    relevantConfigSha256: digest("config"),
-    plannedPathAttributesSha256: digest("attributes"),
-  },
-  git: { executableRealPath: "/usr/bin/git", version: "git version 2.50.1" },
-  canonicalCommitAuthor: {
-    name: "Example Author",
-    email: "author@example.test",
-  },
-});
+const TARGET_ROOT = "/repo/target";
+const CASE_SENSITIVITY = "sensitive" as const;
 
 const targetsWith = (
   overrides: Readonly<Record<string, ApprovedPriorTarget>> = {},
-): readonly RepositoryTargetFingerprint[] =>
+): readonly TargetSnapshotEntry[] =>
   ["content/posts/example.mdx", "public/posts/example/img-1.webp"].map(
-    (normalizedPath) => ({
-      normalizedPath,
-      symlinkStatus: "not-symlink" as const,
-      approvedPriorTarget: overrides[normalizedPath] ?? { state: "absent" },
+    (relativePath) => ({
+      relativePath,
+      priorState: overrides[relativePath] ?? { state: "absent" },
     }),
   );
 
 const buildInput = (
   overrides: Partial<ExportPlanBuildInput> = {},
 ): ExportPlanBuildInput => {
-  const repository = overrides.repository ?? repositoryState();
   const targets = overrides.priorTargets ?? targetsWith();
   return {
     generationToken: "generation-1" as GenerationToken,
@@ -137,11 +85,11 @@ const buildInput = (
     ],
     sourceBytes: sourceBytes(),
     documentSlug: "example",
-    documentTitle: "Example",
     generatedMdxBytes: MDX_BYTES,
     transformedImages: [{ sourceId: "image-a", bytes: IMAGE_BYTES }],
     imageEmbeds: [{ sourceId: "image-a", assetFileName: "img-1.webp" }],
-    repository,
+    targetRootRealPath: TARGET_ROOT,
+    caseSensitivity: CASE_SENSITIVITY,
     priorTargets: targets,
     warnings: [createIssue(ISSUE_CODES.imageAltTextMissing, { count: 1 })],
     finalCapture: {
@@ -158,7 +106,8 @@ const buildInput = (
           contentSha256: sha256OfBytes(SOURCE_A_BYTES),
         },
       ],
-      repository,
+      targetRootRealPath: TARGET_ROOT,
+      caseSensitivity: CASE_SENSITIVITY,
       targets,
     },
     createdAtUtc: "2026-07-20T00:00:00.000Z",
@@ -181,17 +130,15 @@ const sealOrThrow = (overrides: Partial<ExportPlanBuildInput> = {}) => {
   return result.value;
 };
 
-const unchangedTargets = (): readonly RepositoryTargetFingerprint[] =>
+const unchangedTargets = (): readonly TargetSnapshotEntry[] =>
   targetsWith({
     "content/posts/example.mdx": {
-      state: "file",
+      state: "regularFile",
       contentSha256: sha256OfBytes(MDX_BYTES),
-      gitMode: "100644",
     },
     "public/posts/example/img-1.webp": {
-      state: "file",
+      state: "regularFile",
       contentSha256: sha256OfBytes(IMAGE_BYTES),
-      gitMode: "100644",
     },
   });
 
@@ -219,7 +166,7 @@ const expandSharedImageActions = (
       ...imageAction,
       documentOrder: index + 1,
       // Zero-pad so document order stays lexicographically sorted for the
-      // frozen repository-target path ordering gate.
+      // frozen target-folder path ordering gate.
       targetPath: `public/posts/example/img-${String(index + 1).padStart(3, "0")}.webp`,
       sourceOccurrence: index + 1,
     });
@@ -227,25 +174,24 @@ const expandSharedImageActions = (
   plan.actions = expanded;
   const targets = expanded
     .map((action) => ({
-      normalizedPath: action.targetPath as string,
-      symlinkStatus: "not-symlink" as const,
-      approvedPriorTarget: action.approvedPriorTarget,
+      relativePath: action.targetPath as string,
+      priorState: action.approvedPriorTarget,
     }))
     .sort((left, right) =>
-      left.normalizedPath < right.normalizedPath
+      left.relativePath < right.relativePath
         ? -1
-        : left.normalizedPath > right.normalizedPath
+        : left.relativePath > right.relativePath
           ? 1
           : 0,
     );
-  const repository = {
-    ...(plan.repositoryFingerprint as Record<string, unknown>),
+  const snapshot = {
+    ...(plan.targetFolderSnapshot as Record<string, unknown>),
     targets,
   };
-  plan.repositoryFingerprint = repository;
+  plan.targetFolderSnapshot = snapshot;
   (
-    plan.approvalFingerprint as { repositoryFingerprint: unknown }
-  ).repositoryFingerprint = repository;
+    plan.approvalFingerprint as { targetFolderSnapshot: unknown }
+  ).targetFolderSnapshot = snapshot;
 };
 
 describe("canonicalizeJcs", () => {
@@ -478,11 +424,13 @@ describe("sealExportPlan", () => {
     ).toBe(base);
 
     for (const changed of [
-      sealOrThrow({ documentTitle: "Other" }),
       sealOrThrow({ generatedMdxBytes: utf8("---\ntitle: X\n---\n") }),
       sealOrThrow({ expiresAtUtc: "2026-07-28T00:00:00.000Z" }),
       sealOrThrow({
         warnings: [createIssue(ISSUE_CODES.summaryMissing)],
+      }),
+      sealOrThrow({
+        transformedImages: [{ sourceId: "image-a", bytes: utf8("other-webp") }],
       }),
     ])
       expect(changed.planId).not.toBe(base);
@@ -496,7 +444,7 @@ describe("sealExportPlan", () => {
     });
     expect(envelope.state).toBe("no-changes");
     expect(envelope.plan.actions).toEqual([]);
-    expect(envelope.plan.repositoryFingerprint.targets).toEqual([]);
+    expect(envelope.plan.targetFolderSnapshot.targets).toEqual([]);
     expect(
       verifyStoredExportPlan(restored(envelope), envelope.blobBytes, NOW).ok,
     ).toBe(true);
