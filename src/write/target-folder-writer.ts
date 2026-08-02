@@ -1,5 +1,6 @@
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
+import { deepEquals } from "../canonical";
 import {
   matchesApprovalContext,
   matchesPlanIdentity,
@@ -12,6 +13,10 @@ import {
   ISSUE_CODES,
   type BlockerIssue,
 } from "../contracts/issues";
+import {
+  buildPlanIdentityManifest,
+  computePlanId,
+} from "../planning/plan-verification";
 import { containsCredentialBearingOutput } from "./sealed-output-preflight";
 import type {
   ApplyApprovedWritesInput,
@@ -580,6 +585,12 @@ const gateApprovalAuthority = async (
   plan: WritableExportPlan,
 ): Promise<BlockerIssue | undefined> => {
   const mismatch = createIssue(ISSUE_CODES.approvalMismatch) as BlockerIssue;
+  try {
+    if (computePlanId(buildPlanIdentityManifest(plan)) !== plan.planId)
+      return mismatch;
+  } catch {
+    return mismatch;
+  }
   if (input.approval.planId !== plan.planId) return mismatch;
   if (!matchesPlanIdentity(input.approvalTransition, plan)) return mismatch;
   let recorded;
@@ -591,11 +602,11 @@ const gateApprovalAuthority = async (
   if (!recorded.ok) return recorded.error[0];
   if (recorded.value !== plan.planId) return mismatch;
   if (plan.state === "no-changes") {
-    // Nothing is mutated, so the recaptured fingerprint has nothing to guard.
     const now = Date.parse(deps.now());
     return Number.isNaN(now) ||
       now < Date.parse(plan.createdAtUtc) ||
-      now >= Date.parse(plan.expiresAtUtc)
+      now >= Date.parse(plan.expiresAtUtc) ||
+      !deepEquals(input.currentApprovalFingerprint, plan.approvalFingerprint)
       ? mismatch
       : undefined;
   }
@@ -757,8 +768,76 @@ export async function applyApprovedWrites(
     return globalFailure(ISSUE_CODES.unsupportedTarget);
 
   if (plan.state === "no-changes") {
-    if (plan.actions.length !== 0 || snapshot.targets.length !== 0)
+    if (plan.actions.length !== 0 || snapshot.targets.length === 0)
       return globalFailure(ISSUE_CODES.staleApproval);
+    const expectedDigests = new Set(
+      Object.values(plan.blobs).map((output) => output.contentSha256),
+    );
+    const observedDigests = new Set<Sha256Digest>();
+    for (const target of snapshot.targets) {
+      if (
+        target.priorState.state !== "regularFile" ||
+        !expectedDigests.has(target.priorState.contentSha256)
+      )
+        return globalFailure(ISSUE_CODES.staleApproval);
+      observedDigests.add(target.priorState.contentSha256);
+    }
+    if (![...expectedDigests].every((digest) => observedDigests.has(digest)))
+      return globalFailure(ISSUE_CODES.staleApproval);
+    for (let index = 0; index < snapshot.targets.length; index += 1) {
+      const target = snapshot.targets[index]!;
+      const remaining = snapshot.targets
+        .slice(index + 1)
+        .map((entry) => entry.relativePath);
+      const absolutePath = resolveContainedTargetPath(
+        targetRootRealPath,
+        target.relativePath,
+      );
+      if (absolutePath === undefined)
+        return failure(
+          [],
+          [
+            {
+              targetPath: target.relativePath,
+              issue: issueAt(ISSUE_CODES.unsafeTarget, target.relativePath),
+            },
+          ],
+          remaining,
+        );
+      const segmentIssue = await assertPathSegmentsSafe(
+        deps,
+        targetRootRealPath,
+        target.relativePath,
+      );
+      if (segmentIssue !== undefined)
+        return failure(
+          [],
+          [{ targetPath: target.relativePath, issue: segmentIssue }],
+          remaining,
+        );
+      const live = await readLivePriorState(
+        deps,
+        absolutePath,
+        target.relativePath,
+      );
+      if (!live.ok)
+        return failure(
+          [],
+          [{ targetPath: target.relativePath, issue: live.issue }],
+          remaining,
+        );
+      if (!priorStatesEqual(live.prior, target.priorState))
+        return failure(
+          [],
+          [
+            {
+              targetPath: target.relativePath,
+              issue: issueAt(ISSUE_CODES.targetChanged, target.relativePath),
+            },
+          ],
+          remaining,
+        );
+    }
     return success([]);
   }
 

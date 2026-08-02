@@ -68,7 +68,7 @@ export interface TargetSnapshotEntry {
 /**
  * Bounded local destination state captured for approval and rechecked before
  * any write. Ready plans include one entry per create/update action; no-change
- * plans carry an empty target list.
+ * plans retain every target state that proved no write was needed.
  */
 export interface TargetFolderSnapshot {
   readonly targetRootRealPath: string;

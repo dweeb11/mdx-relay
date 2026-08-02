@@ -336,7 +336,9 @@ const capturedImageStates = (
  *
  * Every planned target becomes an action whenever anything changed, so a ready
  * plan always rewrites its own document; a plan whose every target already holds
- * the planned bytes is `no-changes` and carries no actions or targets at all.
+ * the planned bytes is `no-changes` and carries no actions, while retaining the
+ * target states that proved no write was needed so later application can detect
+ * drift after preview.
  */
 export function buildExportPlan(
   input: ExportPlanBuildInput,
@@ -472,11 +474,9 @@ export function buildExportPlan(
       })
     : [];
 
-  const planTargets = changed
-    ? orderedTargets(
-        planned.map((target) => priorByPath.get(target.relativePath)!),
-      )
-    : Object.freeze([]);
+  const planTargets = orderedTargets(
+    planned.map((target) => priorByPath.get(target.relativePath)!),
+  );
   const targetFolderSnapshot: TargetFolderSnapshot = Object.freeze({
     targetRootRealPath: input.targetRootRealPath,
     caseSensitivity: input.caseSensitivity,

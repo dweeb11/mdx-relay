@@ -444,7 +444,7 @@ describe("sealExportPlan", () => {
     });
     expect(envelope.state).toBe("no-changes");
     expect(envelope.plan.actions).toEqual([]);
-    expect(envelope.plan.targetFolderSnapshot.targets).toEqual([]);
+    expect(envelope.plan.targetFolderSnapshot.targets).toEqual(targets);
     expect(
       verifyStoredExportPlan(restored(envelope), envelope.blobBytes, NOW).ok,
     ).toBe(true);

@@ -398,6 +398,54 @@ describe("approved target-folder writes", () => {
     expect(new Uint8Array(await readFile(mdxPath))).toEqual(MDX_BYTES);
   });
 
+  it.each(["edited", "deleted"] as const)(
+    "rejects a no-change plan when an approved target is %s after preview",
+    async (drift) => {
+      const mdxPath = join(targetRoot, "content/posts/example.mdx");
+      const imagePath = join(targetRoot, "public/posts/example/img-1.webp");
+      await mkdir(dirname(mdxPath), { recursive: true });
+      await mkdir(dirname(imagePath), { recursive: true });
+      await writeFile(mdxPath, MDX_BYTES);
+      await writeFile(imagePath, IMAGE_BYTES);
+      const targets = targetsWith({
+        "content/posts/example.mdx": {
+          state: "regularFile",
+          contentSha256: sha256OfBytes(MDX_BYTES),
+        },
+        "public/posts/example/img-1.webp": {
+          state: "regularFile",
+          contentSha256: sha256OfBytes(IMAGE_BYTES),
+        },
+      });
+      const envelope = sealedPlan(targetRoot, {
+        priorTargets: targets,
+        finalCapture: { ...buildInput(targetRoot).finalCapture, targets },
+      });
+      if (envelope.state !== "no-changes")
+        throw new Error("expected a no-changes plan");
+
+      if (drift === "edited") await writeFile(mdxPath, "drifted");
+      else await rm(mdxPath);
+
+      const result = await applyApprovedWrites(
+        writeInput(envelope, targetRoot),
+        deps,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.report.completed).toEqual([]);
+      expect(result.report.failed).toHaveLength(1);
+      expect(result.report.failed[0]).toMatchObject({
+        targetPath: "content/posts/example.mdx",
+        issue: { code: ISSUE_CODES.targetChanged },
+      });
+      expect(result.report.unattempted).toEqual([
+        "public/posts/example/img-1.webp",
+      ]);
+      expect(new Uint8Array(await readFile(imagePath))).toEqual(IMAGE_BYTES);
+    },
+  );
+
   it("rejects a traversal-tampered action before any write", async () => {
     const envelope = sealedPlan(targetRoot);
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
@@ -1089,18 +1137,24 @@ describe("approved target-folder writes", () => {
     });
     if (envelope.state !== "no-changes")
       throw new Error("expected a no-changes plan");
-    // A no-changes plan that still carries snapshot targets is structurally
-    // invalid; it has no actions, so nothing may be reported as unattempted.
+    // A no-changes plan must retain the snapshot targets that proved it needed
+    // no actions. Emptying them is invalid and must not invent report paths.
     const tampered = structuredClone(envelope.plan);
     (
       tampered.targetFolderSnapshot as unknown as {
         targets: TargetSnapshotEntry[];
       }
-    ).targets = [targets[0]!];
+    ).targets = [];
+    (
+      tampered.approvalFingerprint.targetFolderSnapshot as unknown as {
+        targets: TargetSnapshotEntry[];
+      }
+    ).targets = [];
 
     const result = await applyApprovedWrites(
       writeInput(envelope, targetRoot, {
         plan: tampered as typeof envelope.plan,
+        currentApprovalFingerprint: tampered.approvalFingerprint,
       }),
       deps,
     );
@@ -1110,7 +1164,9 @@ describe("approved target-folder writes", () => {
     expect(result.report.completed).toEqual([]);
     expect(result.report.failed).toHaveLength(1);
     expect(result.report.failed[0]!.targetPath).toBe("");
-    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.staleApproval);
+    expect(result.report.failed[0]!.issue.code).toBe(
+      ISSUE_CODES.approvalMismatch,
+    );
     expect(result.report.unattempted).toEqual([]);
   });
 
