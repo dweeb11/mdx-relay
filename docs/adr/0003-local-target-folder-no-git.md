@@ -44,7 +44,8 @@ The plugin still must:
 - write only sealed approved bytes and never delete or broadly synchronize a directory;
 - use same-directory temporary files and atomic replacement for each output;
 - preserve unrelated files and report partial multi-file failure truthfully;
-- prevent private source content or credentials from leaking through profiles, plans, logs, errors, snapshots, or written output.
+- prevent private source content from leaking through profiles, plans, logs, errors, snapshots, or any destination outside the sealed approved outputs; and
+- reject credentials from written output even when they appear in approved source content.
 
 These rules protect the actual irreversible surface without rebuilding a deployment platform around it.
 
