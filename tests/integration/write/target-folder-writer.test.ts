@@ -1136,6 +1136,56 @@ describe("approved target-folder writes", () => {
     });
   });
 
+  it.each([
+    [
+      "a query pushed past the inspected prefix",
+      `[docs](https://example.test/${"a".repeat(3000)}?access_token=secret)`,
+    ],
+    [
+      "a fragment pushed past the inspected prefix",
+      `[docs](https://example.test/${"a".repeat(3000)}#access_token=secret)`,
+    ],
+    [
+      "userinfo pushed past the inspected prefix",
+      `Mirror: ${"a".repeat(3000)}:s3cr3t@example.test/site.git`,
+    ],
+    [
+      "a malformed supported-scheme URL written with backslashes",
+      String.raw`Mirror: https:\\writer:token@example.invalid\site.git`,
+    ],
+    [
+      "the same malformed shape over ssh",
+      String.raw`Mirror: ssh:\\writer:token@example.invalid\repo.git`,
+    ],
+  ])("rejects %s before any write action", async (_label, body) => {
+    // Length and backslashes are not laundering devices: each of these is
+    // refused before the first mutation, so no target file or directory
+    // exists afterwards.
+    const leaking = utf8(`---\ntitle: Example\n---\n\n${body}\n`);
+    const envelope = sealedPlan(targetRoot, { generatedMdxBytes: leaking });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.credentialUrl);
+    expect(result.report.unattempted).toEqual([
+      "public/posts/example/img-1.webp",
+    ]);
+    await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(lstat(join(targetRoot, "public"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("writes approved output whose links and addresses are plain", async () => {
     const linked = utf8(
       "---\ntitle: Example\n---\n\n[docs](https://example.test/search) alice@example.test\n",

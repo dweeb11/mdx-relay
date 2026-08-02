@@ -19,6 +19,17 @@ const MAX_CANDIDATE_BYTES = 2048;
 
 const AT_SIGN = 0x40;
 const COLON = 0x3a;
+const QUESTION_MARK = 0x3f;
+const NUMBER_SIGN = 0x23;
+const BACKSLASH = 0x5c;
+
+/**
+ * Bytes that introduce the parts of a URL a credential can hide in: userinfo
+ * (`@`), query (`?`), and fragment (`#`). Their position decides whether the
+ * bounded prefix is enough to classify a run.
+ */
+const isRiskMarker = (byte: number): boolean =>
+  byte === AT_SIGN || byte === QUESTION_MARK || byte === NUMBER_SIGN;
 
 /**
  * Longest supported scheme label (`https`) plus its colon. A run's scheme is
@@ -31,22 +42,29 @@ const supportedSchemePrefix = /^(?:https?|ssh|git):/iu;
 
 /** Bytes that can never appear inside a URL run in generated output. */
 const DELIMITER_BYTES = new Set(
-  [..."\"'`<>()[]{}|^\\"].map((character) => character.charCodeAt(0)),
+  [..."\"'`<>()[]{}|^"].map((character) => character.charCodeAt(0)),
 );
 
 /**
  * URL syntax is ASCII -- anything else must arrive percent-encoded -- so a
  * non-ASCII byte ends a run. That is also what makes an ASCII credential
  * embedded in the binary metadata of an image output visible as its own run.
+ *
+ * Backslash is the one byte whose delimiter status cannot be settled here: it
+ * ends a run for the runs-between-backslashes reading and belongs to the run
+ * for the malformed-URL reading, so `splitOnBackslash` selects the reading and
+ * both are scanned.
  */
-const isDelimiter = (byte: number): boolean =>
-  byte <= 0x20 || byte >= 0x7f || DELIMITER_BYTES.has(byte);
+const isDelimiter = (byte: number, splitOnBackslash: boolean): boolean =>
+  byte <= 0x20 ||
+  byte >= 0x7f ||
+  (splitOnBackslash && byte === BACKSLASH) ||
+  DELIMITER_BYTES.has(byte);
 
 const decoder = new TextDecoder("utf-8");
 
 /**
- * True when any URL-shaped run in these sealed bytes carries credentials under
- * the repository's canonical `isCredentialBearingUrl` rule.
+ * One linear pass over the sealed bytes under a single backslash reading.
  *
  * A run is URL-shaped when it opens with a supported scheme (`http`, `https`,
  * `ssh`, `git`) or carries userinfo (`@`); those are exactly the shapes the
@@ -55,24 +73,28 @@ const decoder = new TextDecoder("utf-8");
  * secret sits in a query string or fragment rather than its userinfo -- for
  * example `https://example.invalid/site.git?access_token=secret` -- is rejected
  * here exactly as it is when it appears in a profile.
- *
- * Every sealed output is scanned, text and binary alike: a credential embedded
- * in image metadata leaks exactly as far as one in Markdown.
  */
-export const containsCredentialBearingOutput = (bytes: Uint8Array): boolean => {
+const scanRuns = (bytes: Uint8Array, splitOnBackslash: boolean): boolean => {
   let start = -1;
   let isCandidate = false;
   let schemeDecided = false;
+  let riskMarkerBeyondPrefix = false;
   for (let index = 0; index <= bytes.length; index += 1) {
     // The trailing virtual space closes a run that reaches the final byte.
     const byte = index < bytes.length ? bytes[index]! : 0x20;
-    if (!isDelimiter(byte)) {
+    if (!isDelimiter(byte, splitOnBackslash)) {
       if (start < 0) {
         start = index;
         isCandidate = false;
         schemeDecided = false;
+        riskMarkerBeyondPrefix = false;
       }
       if (byte === AT_SIGN) isCandidate = true;
+      // A marker past the bounded prefix is a part of the URL the canonical
+      // rule would read but this scan cannot show it, so it is remembered
+      // rather than dropped.
+      if (isRiskMarker(byte) && index - start >= MAX_CANDIDATE_BYTES)
+        riskMarkerBeyondPrefix = true;
       // The scheme, if any, ends at the run's first colon; decoding those few
       // bytes keeps detection bounded regardless of how long the run runs on.
       if (byte === COLON && !schemeDecided) {
@@ -85,6 +107,11 @@ export const containsCredentialBearingOutput = (bytes: Uint8Array): boolean => {
       continue;
     }
     if (start >= 0 && isCandidate) {
+      // Userinfo, a query, or a fragment beyond the prefix would decide the
+      // canonical verdict on bytes this scan refuses to decode, so an overlong
+      // URL-shaped run carrying one is rejected rather than cleared on the
+      // strength of a prefix that cannot see it.
+      if (riskMarkerBeyondPrefix) return true;
       const end = Math.min(index, start + MAX_CANDIDATE_BYTES);
       if (isCredentialBearingUrl(decoder.decode(bytes.subarray(start, end))))
         return true;
@@ -93,3 +120,19 @@ export const containsCredentialBearingOutput = (bytes: Uint8Array): boolean => {
   }
   return false;
 };
+
+/**
+ * True when any URL-shaped run in these sealed bytes carries credentials under
+ * the repository's canonical `isCredentialBearingUrl` rule.
+ *
+ * Every sealed output is scanned, text and binary alike: a credential embedded
+ * in image metadata leaks exactly as far as one in Markdown.
+ */
+export const containsCredentialBearingOutput = (bytes: Uint8Array): boolean =>
+  // Two linear passes, one per backslash reading. Splitting alone would let
+  // `https:\\writer:token@host\repo.git` -- which the canonical rule rejects as
+  // a malformed supported-scheme URL -- fall apart into safe-looking pieces;
+  // never splitting alone would let a backslash glue a credential URL to
+  // preceding text and hide it inside a run the canonical rule then discards
+  // for containing a backslash. Neither reading is safe without the other.
+  scanRuns(bytes, true) || scanRuns(bytes, false);
