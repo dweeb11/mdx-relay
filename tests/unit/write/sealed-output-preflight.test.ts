@@ -31,6 +31,41 @@ describe("containsCredentialBearingOutput", () => {
       expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
   });
 
+  it("rejects a URL that starts after non-delimiter punctuation", () => {
+    // A URL does not have to start where a run starts. Attribute syntax and
+    // ordinary prose punctuation glue one to the preceding text, and none of
+    // `=`, `,`, `;`, `:` or `.` ends a run, so the scheme has to be found at
+    // its own offset rather than assumed to sit at the run start.
+    for (const output of [
+      "href=https://example.test/search?access_token=secret",
+      "src=https://user:pw@example.test/repo.git",
+      "x,https://example.test/repo#token",
+      "<img src=https://user:pw@example.test/logo.png alt=logo />",
+      '<a href="https://example.test/x?token=secret">docs</a>',
+      "Mirrors:https://user:pw@example.test/site.git",
+      "Mirrors;https://example.test/site.git?token=secret",
+      "See(https://example.test/a)and,https://example.test/b#tok",
+      "Ends here.https://user:pw@example.test/repo.git",
+      "SRC=HTTPS://USER:PW@EXAMPLE.TEST/REPO.GIT",
+      // The scheme-less forms the canonical rule also classifies keep working
+      // after punctuation, where the run start is still the URL start.
+      "clone=user:pw@example.test/repo.git",
+    ])
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
+  });
+
+  it("rejects an embedded URL whose secret sits past the bounded prefix", () => {
+    // Fail-closed behaviour is measured from the candidate's own start, not
+    // from the run start, so padding in front of the scheme buys nothing.
+    const filler = "a".repeat(3000);
+    for (const output of [
+      `href=https://example.test/${filler}?access_token=secret`,
+      `src=https://example.test/${filler}@evil.test/site.git`,
+      `x,ssh://${filler}:s3cr3t@example.test/repo.git`,
+    ])
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
+  });
+
   it("accepts ordinary post content, links, and addresses", () => {
     for (const output of [
       "---\ntitle: Example\n---\n\nBody\n",
@@ -39,6 +74,15 @@ describe("containsCredentialBearingOutput", () => {
       "Clone git@example.test:owner/repo.git to start.",
       "ssh://git@example.test/owner/repo.git",
       "Note:something? is not a URL.",
+      // Finding a scheme at any offset must not turn plain embedded links into
+      // rejections: these carry no query, fragment, or userinfo at all.
+      "href=https://example.test/search",
+      '<img src="https://example.test/logo.png" alt="logo" />',
+      "See(https://example.test/a)and,https://example.test/b",
+      "Ends here.https://example.test/repo.git",
+      "clone=git@example.test:owner/repo.git",
+      "Mail alice@example.test, then read https://example.test/docs.",
+      String.raw`Open C:\Users\alice\notes.md, then https://example.test/x`,
       "",
     ])
       expect(containsCredentialBearingOutput(utf8(output)), output).toBe(false);

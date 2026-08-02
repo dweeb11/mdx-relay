@@ -1150,6 +1150,30 @@ describe("approved target-folder writes", () => {
       `Mirror: ${"a".repeat(3000)}:s3cr3t@example.test/site.git`,
     ],
     [
+      "a query-bearing URL glued to an attribute name",
+      "href=https://example.test/search?access_token=secret",
+    ],
+    [
+      "userinfo in a URL glued to an attribute name",
+      "src=https://user:pw@example.test/repo.git",
+    ],
+    [
+      "a fragment-bearing URL introduced by a comma",
+      "x,https://example.test/repo#token",
+    ],
+    [
+      "the same shapes inside an MDX attribute",
+      '<img src=https://user:pw@example.test/logo.png alt="logo" />',
+    ],
+    [
+      "a semicolon-introduced URL in prose",
+      "Mirrors;https://example.test/site.git?token=secret",
+    ],
+    [
+      "an embedded URL whose secret sits past the inspected prefix",
+      `href=https://example.test/${"a".repeat(3000)}?access_token=secret`,
+    ],
+    [
       "a malformed supported-scheme URL written with backslashes",
       String.raw`Mirror: https:\\writer:token@example.invalid\site.git`,
     ],
@@ -1187,8 +1211,17 @@ describe("approved target-folder writes", () => {
   });
 
   it("writes approved output whose links and addresses are plain", async () => {
+    // Recognising a scheme at any offset must not cost plain output: links
+    // glued to punctuation, an address, a Windows path, and a long payload all
+    // stay writable because none of them carries a query, fragment, or
+    // userinfo.
     const linked = utf8(
-      "---\ntitle: Example\n---\n\n[docs](https://example.test/search) alice@example.test\n",
+      "---\ntitle: Example\n---\n\n[docs](https://example.test/search) alice@example.test\n" +
+        '<img src=https://example.test/logo.png alt="logo" />\n' +
+        "Ends here.https://example.test/repo.git, and see(https://example.test/a)too.\n" +
+        String.raw`Open C:\Users\alice\notes.md` +
+        "\n" +
+        `https://example.test/${"a".repeat(5000)}/index.html\n`,
     );
     const envelope = sealedPlan(targetRoot, { generatedMdxBytes: linked });
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
