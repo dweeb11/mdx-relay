@@ -425,6 +425,30 @@ describe("approved target-folder writes", () => {
     expect((await lstat(mdxPath)).isSymbolicLink()).toBe(true);
   });
 
+  it("rejects a symlinked parent directory before writing", async () => {
+    const realPosts = join(root, "real-posts");
+    await mkdir(realPosts);
+    await mkdir(join(targetRoot, "content"));
+    await symlink(realPosts, join(targetRoot, "content/posts"));
+
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(
+      {
+        plan: envelope.plan,
+        blobBytes: envelope.blobBytes,
+        configuredTargetRoot: targetRoot,
+      },
+      deps,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.unsafeTarget);
+    expect(result.report.completed).toEqual([]);
+  });
+
   it("rejects a directory occupying the target path", async () => {
     await mkdir(join(targetRoot, "content/posts/example.mdx"), {
       recursive: true,
