@@ -49,6 +49,7 @@ import {
   createNodeTargetFolderFileSystem,
   TARGET_WRITE_TEMPORARY_SUFFIX,
   type ApplyApprovedWritesInput,
+  type TargetEntryKind,
   type TargetFolderFileSystem,
   type TargetFolderWriterDeps,
   type WritableExportPlan,
@@ -910,6 +911,207 @@ describe("approved target-folder writes", () => {
     await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  describe("global pre-mutation failures report a complete partition", () => {
+    const PLANNED_TARGETS = [
+      "content/posts/example.mdx",
+      "public/posts/example/img-1.webp",
+    ];
+
+    const statAs = (kind: Exclude<TargetEntryKind, "absent">) => ({
+      kind,
+      byteLength: 0,
+      identity: { deviceId: "1", inode: "2" },
+    });
+
+    /** Replaces only the root-level probes; per-action calls keep real behavior. */
+    const rootProbes = (
+      base: TargetFolderFileSystem,
+      overrides: {
+        readonly resolveTargetRoot?: TargetFolderFileSystem["resolveTargetRoot"];
+        readonly rootLstat?: TargetFolderFileSystem["lstat"];
+      },
+      rootPath: () => string,
+    ): TargetFolderFileSystem => ({
+      ...base,
+      resolveTargetRoot: overrides.resolveTargetRoot ?? base.resolveTargetRoot,
+      lstat: async (entryPath) =>
+        overrides.rootLstat !== undefined && entryPath === rootPath()
+          ? overrides.rootLstat(entryPath)
+          : base.lstat(entryPath),
+    });
+
+    const cases: readonly {
+      readonly name: string;
+      readonly code: string;
+      /** Built per case because each needs the freshly created target root. */
+      readonly setUp: () => Promise<{
+        readonly deps: TargetFolderWriterDeps;
+        readonly configuredTargetRoot: string;
+      }>;
+    }[] = [
+      {
+        name: "case-sensitivity mismatch",
+        code: ISSUE_CODES.staleApproval,
+        setUp: async () => ({
+          deps: { ...deps, caseSensitivity: "insensitive" },
+          configuredTargetRoot: targetRoot,
+        }),
+      },
+      {
+        name: "target-root resolution failure",
+        code: ISSUE_CODES.unsafeTarget,
+        setUp: async () => ({
+          deps: {
+            ...deps,
+            fileSystem: rootProbes(
+              deps.fileSystem,
+              {
+                resolveTargetRoot: () => {
+                  throw new Error("resolve refused");
+                },
+              },
+              () => targetRoot,
+            ),
+          },
+          configuredTargetRoot: targetRoot,
+        }),
+      },
+      {
+        name: "target-root identity mismatch",
+        code: ISSUE_CODES.staleApproval,
+        setUp: async () => {
+          const moved = join(root, "moved-target");
+          await mkdir(moved);
+          return { deps, configuredTargetRoot: await realpath(moved) };
+        },
+      },
+      {
+        name: "root stat failure",
+        code: ISSUE_CODES.targetWriteFailed,
+        setUp: async () => ({
+          deps: {
+            ...deps,
+            fileSystem: rootProbes(
+              deps.fileSystem,
+              {
+                rootLstat: () => {
+                  throw new Error("root stat refused");
+                },
+              },
+              () => targetRoot,
+            ),
+          },
+          configuredTargetRoot: targetRoot,
+        }),
+      },
+      {
+        name: "symlinked root",
+        code: ISSUE_CODES.unsafeTarget,
+        setUp: async () => ({
+          deps: {
+            ...deps,
+            fileSystem: rootProbes(
+              deps.fileSystem,
+              { rootLstat: async () => statAs("symlink") },
+              () => targetRoot,
+            ),
+          },
+          configuredTargetRoot: targetRoot,
+        }),
+      },
+      {
+        name: "unsupported root",
+        code: ISSUE_CODES.unsupportedTarget,
+        setUp: async () => ({
+          deps: {
+            ...deps,
+            fileSystem: rootProbes(
+              deps.fileSystem,
+              { rootLstat: async () => statAs("regularFile") },
+              () => targetRoot,
+            ),
+          },
+          configuredTargetRoot: targetRoot,
+        }),
+      },
+    ];
+
+    for (const testCase of cases)
+      it(`lists every planned target as unattempted on ${testCase.name}`, async () => {
+        const envelope = sealedPlan(targetRoot);
+        if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+          throw new Error("expected verified ready plan");
+        const { deps: caseDeps, configuredTargetRoot } = await testCase.setUp();
+
+        const result = await applyApprovedWrites(
+          writeInput(envelope, configuredTargetRoot),
+          caseDeps,
+        );
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        // No action ran, so the report is completed/failed/unattempted with the
+        // whole approved target set accounted for as never attempted.
+        expect(result.report.completed).toEqual([]);
+        expect(result.report.failed).toHaveLength(1);
+        expect(result.report.failed[0]!.targetPath).toBe("");
+        expect(result.report.failed[0]!.issue.code).toBe(testCase.code);
+        expect(result.report.unattempted).toEqual(PLANNED_TARGETS);
+        await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      });
+  });
+
+  it("fails a structurally invalid no-changes plan without inventing paths", async () => {
+    const mdxPath = join(targetRoot, "content/posts/example.mdx");
+    const imagePath = join(targetRoot, "public/posts/example/img-1.webp");
+    await mkdir(dirname(mdxPath), { recursive: true });
+    await mkdir(dirname(imagePath), { recursive: true });
+    await writeFile(mdxPath, MDX_BYTES);
+    await writeFile(imagePath, IMAGE_BYTES);
+
+    const targets = targetsWith({
+      "content/posts/example.mdx": {
+        state: "regularFile",
+        contentSha256: sha256OfBytes(MDX_BYTES),
+      },
+      "public/posts/example/img-1.webp": {
+        state: "regularFile",
+        contentSha256: sha256OfBytes(IMAGE_BYTES),
+      },
+    });
+    const envelope = sealedPlan(targetRoot, {
+      priorTargets: targets,
+      finalCapture: { ...buildInput(targetRoot).finalCapture, targets },
+    });
+    if (envelope.state !== "no-changes")
+      throw new Error("expected a no-changes plan");
+    // A no-changes plan that still carries snapshot targets is structurally
+    // invalid; it has no actions, so nothing may be reported as unattempted.
+    const tampered = structuredClone(envelope.plan);
+    (
+      tampered.targetFolderSnapshot as unknown as {
+        targets: TargetSnapshotEntry[];
+      }
+    ).targets = [targets[0]!];
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot, {
+        plan: tampered as typeof envelope.plan,
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed).toHaveLength(1);
+    expect(result.report.failed[0]!.targetPath).toBe("");
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.staleApproval);
+    expect(result.report.unattempted).toEqual([]);
   });
 
   it("refuses an approval record that names a different plan", async () => {

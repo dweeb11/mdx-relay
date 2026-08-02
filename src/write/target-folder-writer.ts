@@ -707,6 +707,22 @@ export async function applyApprovedWrites(
   const { plan, blobBytes, configuredTargetRoot } = input;
   const snapshot = plan.targetFolderSnapshot;
 
+  // Every gate below runs before the first target mutation, so no planned
+  // target has been attempted when one of them fails. The report owes the
+  // caller a complete partition: a single global failure with no target path,
+  // and every path the plan actually carries listed as unattempted. A valid
+  // no-changes plan has no actions, so this stays empty there; a structurally
+  // invalid one reports only the paths in its own action list, never invented
+  // ones.
+  const globalFailure = (
+    code: (typeof ISSUE_CODES)[keyof typeof ISSUE_CODES],
+  ): ApplyApprovedWritesResult =>
+    failure(
+      [],
+      [{ targetPath: "", issue: createIssue(code) as BlockerIssue }],
+      plan.actions.map((entry) => entry.targetPath),
+    );
+
   const authorityIssue = await gateApprovalAuthority(deps, input, plan);
   if (authorityIssue !== undefined)
     return failure(
@@ -715,46 +731,34 @@ export async function applyApprovedWrites(
       plan.actions.map((entry) => entry.targetPath),
     );
 
-  if (deps.caseSensitivity !== snapshot.caseSensitivity) {
-    const issue = createIssue(ISSUE_CODES.staleApproval) as BlockerIssue;
-    return failure([], [{ targetPath: "", issue }], []);
-  }
+  if (deps.caseSensitivity !== snapshot.caseSensitivity)
+    return globalFailure(ISSUE_CODES.staleApproval);
 
   let targetRootRealPath: string;
   try {
     targetRootRealPath =
       await deps.fileSystem.resolveTargetRoot(configuredTargetRoot);
   } catch {
-    const issue = createIssue(ISSUE_CODES.unsafeTarget) as BlockerIssue;
-    return failure([], [{ targetPath: "", issue }], []);
+    return globalFailure(ISSUE_CODES.unsafeTarget);
   }
 
-  if (targetRootRealPath !== snapshot.targetRootRealPath) {
-    const issue = createIssue(ISSUE_CODES.staleApproval) as BlockerIssue;
-    return failure([], [{ targetPath: "", issue }], []);
-  }
+  if (targetRootRealPath !== snapshot.targetRootRealPath)
+    return globalFailure(ISSUE_CODES.staleApproval);
 
   let rootStat: { readonly kind: TargetEntryKind };
   try {
     rootStat = await deps.fileSystem.lstat(targetRootRealPath);
   } catch {
-    const issue = createIssue(ISSUE_CODES.targetWriteFailed) as BlockerIssue;
-    return failure([], [{ targetPath: "", issue }], []);
+    return globalFailure(ISSUE_CODES.targetWriteFailed);
   }
-  if (rootStat.kind === "symlink") {
-    const issue = createIssue(ISSUE_CODES.unsafeTarget) as BlockerIssue;
-    return failure([], [{ targetPath: "", issue }], []);
-  }
-  if (rootStat.kind !== "directory") {
-    const issue = createIssue(ISSUE_CODES.unsupportedTarget) as BlockerIssue;
-    return failure([], [{ targetPath: "", issue }], []);
-  }
+  if (rootStat.kind === "symlink")
+    return globalFailure(ISSUE_CODES.unsafeTarget);
+  if (rootStat.kind !== "directory")
+    return globalFailure(ISSUE_CODES.unsupportedTarget);
 
   if (plan.state === "no-changes") {
-    if (plan.actions.length !== 0 || snapshot.targets.length !== 0) {
-      const issue = createIssue(ISSUE_CODES.staleApproval) as BlockerIssue;
-      return failure([], [{ targetPath: "", issue }], []);
-    }
+    if (plan.actions.length !== 0 || snapshot.targets.length !== 0)
+      return globalFailure(ISSUE_CODES.staleApproval);
     return success([]);
   }
 
