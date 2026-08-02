@@ -754,9 +754,10 @@ export async function publishSealedPlan(
 /**
  * Records approval of the pinned active plan. The durable record is the exact
  * plan ID and nothing else; approving anything but the verified, unexpired,
- * currently pinned ready plan whose source bytes were just recomputed fails
- * closed. Serialization with publication is what makes the pin it read still
- * the pin when the approval lands.
+ * currently pinned writable plan whose source bytes were just recomputed fails
+ * closed. Ready plans authorize mutation; no-change plans authorize the
+ * non-mutating live-target validation path. Serialization with publication is
+ * what makes the pin it read still the pin when the approval lands.
  */
 export async function recordPlanApproval(
   deps: PlanStoreDeps,
@@ -766,7 +767,10 @@ export async function recordPlanApproval(
   return withStoreLock(deps, async () => {
     const loaded = await loadSealedPlan(deps, planId, sourceBytes);
     if (!loaded.ok) return loaded;
-    if (loaded.value.state !== "ready" || !loaded.value.sourceBytesVerified)
+    if (
+      (loaded.value.state !== "ready" && loaded.value.state !== "no-changes") ||
+      !loaded.value.sourceBytesVerified
+    )
       return mdxRelayErr([createIssue(ISSUE_CODES.approvalMismatch)]);
     if ((await readPointer(deps, activePlanFile(deps))) !== planId)
       return mdxRelayErr([createIssue(ISSUE_CODES.staleApproval)]);

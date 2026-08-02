@@ -46,7 +46,7 @@ const isAuthorityBoundary = (character: string): boolean =>
   character === "/" || character === AT_SIGN;
 
 /** Characters that can never appear inside a URL in generated output. */
-const DELIMITERS = new Set([...`"'\`<>()[]{}|^`]);
+const DELIMITERS = new Set([...`"'\`<>(){}|^`]);
 
 /**
  * URL syntax is ASCII -- anything else must arrive percent-encoded -- so a

@@ -234,6 +234,24 @@ describe("containsCredentialBearingOutput", () => {
     }
   });
 
+  it("keeps bracketed supported-scheme hosts in one candidate", () => {
+    for (const url of [
+      "https://[::1]/repo?token=secret",
+      "ssh://writer:token@[2001:db8::1]/repo.git",
+      "git://[2001:db8::1]/repo.git#token",
+    ]) {
+      expect(isCredentialBearingUrl(url), `canonical: ${url}`).toBe(true);
+      expect(containsCredentialBearingOutput(utf8(url)), url).toBe(true);
+      expect(
+        containsCredentialBearingOutput(utf8(`[mirror](${url})`)),
+        `markdown: ${url}`,
+      ).toBe(true);
+    }
+    expect(
+      containsCredentialBearingOutput(utf8("https://[::1]/plain/repo.git")),
+    ).toBe(false);
+  });
+
   it("rejects an embedded URL whose secret sits past the bounded prefix", () => {
     // Fail-closed behaviour is measured from the candidate's own start, not
     // from the run start, so padding in front of the scheme buys nothing.
