@@ -3,10 +3,9 @@ import { describe, expect, it } from "vitest";
 import { sha256OfBytes, sha256OfUtf8 } from "../../../src/canonical/hash";
 import type {
   ApprovedPriorTarget,
+  TargetSnapshotEntry,
   CanonicalDependencySnapshot,
   GenerationToken,
-  RepositoryFingerprint,
-  RepositoryTargetFingerprint,
   ValidatedPortableProfileSnapshot,
 } from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
@@ -45,73 +44,22 @@ const sourceBytes = (): PlanSourceBytes => ({
   images: new Map([["image-a", SOURCE_A_BYTES]]),
 });
 
-const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
-  realPaths: {
-    repositoryRoot: "/repo",
-    gitDirectory: "/repo/.git",
-    gitCommonDirectory: "/repo/.git",
-  },
-  supportedForm: {
-    isBareRepository: false,
-    configuredRootMatchesTopLevel: true,
-    gitDirectoryMatchesCommonDirectory: true,
-    isLinkedWorktree: false,
-    coreSparseCheckout: false,
-    extensionsWorktreeConfig: false,
-    worktreeSparseCheckout: false,
-    hasPlannedPathSubmoduleBoundary: false,
-    hasNestedRepositoryBoundary: false,
-    hasStorageOverlap: false,
-    effectiveFetchUrlCount: 1,
-    effectivePushUrlCount: 1,
-  },
-  filesystemCaseSensitivity: "sensitive",
-  branch: {
-    currentBranch: "main",
-    configuredBranch: "main",
-    upstreamRemote: "origin",
-    upstreamMergeRef: "refs/heads/main",
-  },
-  oids: {
-    head: "a".repeat(40),
-    localUpstream: "a".repeat(40),
-    pushDestinationTip: "a".repeat(40),
-  },
-  remotes: {
-    fetch: {
-      sha256: digest("fetch"),
-      redactedDisplay: "https://host/repo.git",
-    },
-    push: { sha256: digest("push"), redactedDisplay: "https://host/repo.git" },
-  },
-  stateHashes: {
-    porcelainStatusSha256: digest("status"),
-    indexSha256: digest("index"),
-    relevantConfigSha256: digest("config"),
-    plannedPathAttributesSha256: digest("attributes"),
-  },
-  git: { executableRealPath: "/usr/bin/git", version: "git version 2.50.1" },
-  canonicalCommitAuthor: {
-    name: "Example Author",
-    email: "author@example.test",
-  },
-});
+const TARGET_ROOT = "/repo/target";
+const CASE_SENSITIVITY = "sensitive" as const;
 
 const targetsWith = (
   overrides: Readonly<Record<string, ApprovedPriorTarget>> = {},
-): readonly RepositoryTargetFingerprint[] =>
+): readonly TargetSnapshotEntry[] =>
   ["content/posts/example.mdx", "public/posts/example/img-1.webp"].map(
-    (normalizedPath) => ({
-      normalizedPath,
-      symlinkStatus: "not-symlink" as const,
-      approvedPriorTarget: overrides[normalizedPath] ?? { state: "absent" },
+    (relativePath) => ({
+      relativePath,
+      priorState: overrides[relativePath] ?? { state: "absent" },
     }),
   );
 
 const buildInput = (
   overrides: Partial<ExportPlanBuildInput> = {},
 ): ExportPlanBuildInput => {
-  const repository = overrides.repository ?? repositoryState();
   const targets = overrides.priorTargets ?? targetsWith();
   return {
     generationToken: "generation-1" as GenerationToken,
@@ -138,11 +86,11 @@ const buildInput = (
     ],
     sourceBytes: sourceBytes(),
     documentSlug: "example",
-    documentTitle: "Example",
     generatedMdxBytes: MDX_BYTES,
     transformedImages: [{ sourceId: "image-a", bytes: IMAGE_BYTES }],
     imageEmbeds: [{ sourceId: "image-a", assetFileName: "img-1.webp" }],
-    repository,
+    targetRootRealPath: TARGET_ROOT,
+    caseSensitivity: CASE_SENSITIVITY,
     priorTargets: targets,
     warnings: [createIssue(ISSUE_CODES.imageAltTextMissing, { count: 1 })],
     finalCapture: {
@@ -159,7 +107,8 @@ const buildInput = (
           contentSha256: sha256OfBytes(SOURCE_A_BYTES),
         },
       ],
-      repository,
+      targetRootRealPath: TARGET_ROOT,
+      caseSensitivity: CASE_SENSITIVITY,
       targets,
     },
     createdAtUtc: "2026-07-20T00:00:00.000Z",
@@ -182,17 +131,15 @@ const sealOrThrow = (overrides: Partial<ExportPlanBuildInput> = {}) => {
   return result.value;
 };
 
-const unchangedTargets = (): readonly RepositoryTargetFingerprint[] =>
+const unchangedTargets = (): readonly TargetSnapshotEntry[] =>
   targetsWith({
     "content/posts/example.mdx": {
-      state: "file",
+      state: "regularFile",
       contentSha256: sha256OfBytes(MDX_BYTES),
-      gitMode: "100644",
     },
     "public/posts/example/img-1.webp": {
-      state: "file",
+      state: "regularFile",
       contentSha256: sha256OfBytes(IMAGE_BYTES),
-      gitMode: "100644",
     },
   });
 
@@ -250,7 +197,7 @@ const expandSharedImageActions = (
       ...imageAction,
       documentOrder: index + 1,
       // Zero-pad so document order stays lexicographically sorted for the
-      // frozen repository-target path ordering gate.
+      // frozen target-folder path ordering gate.
       targetPath: `public/posts/example/img-${String(index + 1).padStart(3, "0")}.webp`,
       sourceOccurrence: index + 1,
     });
@@ -258,30 +205,29 @@ const expandSharedImageActions = (
   plan.actions = expanded;
   const targets = expanded
     .map((action) => ({
-      normalizedPath: action.targetPath as string,
-      symlinkStatus: "not-symlink" as const,
-      approvedPriorTarget: action.approvedPriorTarget,
+      relativePath: action.targetPath as string,
+      priorState: action.approvedPriorTarget,
     }))
     .sort((left, right) =>
-      left.normalizedPath < right.normalizedPath
+      left.relativePath < right.relativePath
         ? -1
-        : left.normalizedPath > right.normalizedPath
+        : left.relativePath > right.relativePath
           ? 1
           : 0,
     );
-  const repository = {
-    ...(plan.repositoryFingerprint as Record<string, unknown>),
+  const snapshot = {
+    ...(plan.targetFolderSnapshot as Record<string, unknown>),
     targets,
   };
-  plan.repositoryFingerprint = repository;
+  plan.targetFolderSnapshot = snapshot;
   (
-    plan.approvalFingerprint as { repositoryFingerprint: unknown }
-  ).repositoryFingerprint = repository;
+    plan.approvalFingerprint as { targetFolderSnapshot: unknown }
+  ).targetFolderSnapshot = snapshot;
 };
 
 /**
  * Expands a ready plan to `actionOutputCount` distinct action-output blobs
- * (MDX plus unique image outputs) plus the existing commit-message blob, and
+ * (MDX plus unique image outputs), and
  * mirrors the new bytes into `blobBytes` so only the sealed-output count gate
  * can reject the candidate.
  */
@@ -294,23 +240,14 @@ const expandDistinctActionOutputBlobs = (
   const mdxAction = actions[0]!;
   const imageAction = actions[1]!;
   const blobs = { ...(plan.blobs as Record<string, unknown>) };
-  const commitMessage = plan.commitMessage as { contentSha256: string };
+  const mdxDigest = (mdxAction.sealedOutput as { contentSha256: string })
+    .contentSha256;
   for (const key of Object.keys(blobs)) {
-    if (
-      key !==
-        (mdxAction.sealedOutput as { contentSha256: string }).contentSha256 &&
-      key !== commitMessage.contentSha256
-    )
-      delete blobs[key];
+    if (key !== mdxDigest) delete blobs[key];
   }
   for (const [path] of [...blobBytes]) {
     const digestKey = `sha256:${path}`;
-    if (
-      digestKey !==
-        (mdxAction.sealedOutput as { contentSha256: string }).contentSha256 &&
-      digestKey !== commitMessage.contentSha256
-    )
-      blobBytes.delete(path);
+    if (digestKey !== mdxDigest) blobBytes.delete(path);
   }
 
   const expanded = [mdxAction];
@@ -355,25 +292,24 @@ const expandDistinctActionOutputBlobs = (
   ).sourceImages[0]!.transformedOutputSha256 = imageDigest;
   const targets = expanded
     .map((action) => ({
-      normalizedPath: action.targetPath as string,
-      symlinkStatus: "not-symlink" as const,
-      approvedPriorTarget: action.approvedPriorTarget,
+      relativePath: action.targetPath as string,
+      priorState: action.approvedPriorTarget,
     }))
     .sort((left, right) =>
-      left.normalizedPath < right.normalizedPath
+      left.relativePath < right.relativePath
         ? -1
-        : left.normalizedPath > right.normalizedPath
+        : left.relativePath > right.relativePath
           ? 1
           : 0,
     );
-  const repository = {
-    ...(plan.repositoryFingerprint as Record<string, unknown>),
+  const snapshot = {
+    ...(plan.targetFolderSnapshot as Record<string, unknown>),
     targets,
   };
-  plan.repositoryFingerprint = repository;
+  plan.targetFolderSnapshot = snapshot;
   (
-    plan.approvalFingerprint as { repositoryFingerprint: unknown }
-  ).repositoryFingerprint = repository;
+    plan.approvalFingerprint as { targetFolderSnapshot: unknown }
+  ).targetFolderSnapshot = snapshot;
 };
 
 describe("plan identity", () => {
@@ -403,6 +339,15 @@ describe("verifyStoredExportPlan", () => {
     if (result.ok) {
       expect(result.value.planId).toBe(envelope.planId);
       expect(result.value.identityManifest).toBe(envelope.identityManifest);
+      expect(result.value.plan.targetFolderSnapshot).toEqual(
+        envelope.plan.targetFolderSnapshot,
+      );
+      expect(
+        result.value.plan.approvalFingerprint.targetFolderSnapshot,
+      ).toEqual(envelope.plan.targetFolderSnapshot);
+      expect(result.value.plan).not.toHaveProperty("repositoryFingerprint");
+      expect(result.value.plan).not.toHaveProperty("commitMessage");
+      expect(result.value.plan).not.toHaveProperty("author");
     }
   });
 
@@ -424,14 +369,14 @@ describe("verifyStoredExportPlan", () => {
     expect(tamperCode(atLimit, envelope.blobBytes)).toBeUndefined();
   });
 
-  it("rejects fifty distinct action-output blobs plus a commit-message blob", () => {
+  it("rejects one more distinct action-output blob than the locked file budget", () => {
     const envelope = sealOrThrow();
     const overBlobBytes = new Map(envelope.blobBytes);
     const overLimit = reseal(envelope, (plan) =>
       expandDistinctActionOutputBlobs(
         plan,
         overBlobBytes,
-        MDX_RELAY_LIMITS.sealedOutputFiles,
+        MDX_RELAY_LIMITS.sealedOutputFiles + 1,
       ),
     );
     expect(Object.keys((overLimit.blobs as object) ?? {}).length).toBe(
@@ -453,7 +398,7 @@ describe("verifyStoredExportPlan", () => {
     expandDistinctActionOutputBlobs(
       handcrafted,
       handcraftedBytes,
-      MDX_RELAY_LIMITS.sealedOutputFiles,
+      MDX_RELAY_LIMITS.sealedOutputFiles + 1,
     );
     expect(
       sealExportPlan({
@@ -468,7 +413,7 @@ describe("verifyStoredExportPlan", () => {
       expandDistinctActionOutputBlobs(
         plan,
         atLimitBytes,
-        MDX_RELAY_LIMITS.sealedOutputFiles - 1,
+        MDX_RELAY_LIMITS.sealedOutputFiles,
       ),
     );
     expect(Object.keys((atLimit.blobs as object) ?? {}).length).toBe(
@@ -542,12 +487,12 @@ describe("verifyStoredExportPlan", () => {
         },
       ],
       [
-        "approvalFingerprint.repositoryFingerprint",
+        "approvalFingerprint.targetFolderSnapshot",
         (plan) => {
           const approval = plan.approvalFingerprint as {
-            repositoryFingerprint: { branch: { currentBranch: string } };
+            targetFolderSnapshot: { targetRootRealPath: string };
           };
-          approval.repositoryFingerprint.branch.currentBranch = "other";
+          approval.targetFolderSnapshot.targetRootRealPath = "/other/target";
         },
       ],
       [
@@ -558,10 +503,10 @@ describe("verifyStoredExportPlan", () => {
         },
       ],
       [
-        "actions.expectedGitMode",
+        "actions.kind",
         (plan) => {
-          const actions = plan.actions as { expectedGitMode: string }[];
-          actions[0]!.expectedGitMode = "100755";
+          const actions = plan.actions as { kind: string }[];
+          actions[0]!.kind = "update";
         },
       ],
       [
@@ -576,11 +521,6 @@ describe("verifyStoredExportPlan", () => {
           }[];
           issues[0]!.displayDetails.summary = "attacker text";
         },
-      ],
-      [
-        "author",
-        (plan) =>
-          void (plan.author = { name: "Other", email: "other@example.test" }),
       ],
       [
         "expiresAtUtc",
@@ -638,36 +578,42 @@ describe("verifyStoredExportPlan", () => {
         (plan) => void (plan.profileSnapshot = '{"tampered":true}'),
       ],
       [
-        "executable mode on a create action",
+        "create action rewritten as update",
         (plan) => {
-          const actions = plan.actions as { expectedGitMode: string }[];
-          actions[0]!.expectedGitMode = "100755";
+          const actions = plan.actions as {
+            kind: string;
+            approvedPriorTarget: unknown;
+          }[];
+          actions[0]!.kind = "update";
+          actions[0]!.approvedPriorTarget = {
+            state: "regularFile",
+            contentSha256: digest("prior"),
+          };
         },
       ],
       [
         "approval capture divergence",
         (plan) => {
           const approval = plan.approvalFingerprint as {
-            repositoryFingerprint: { oids: { head: string } };
+            targetFolderSnapshot: { targetRootRealPath: string };
           };
-          approval.repositoryFingerprint.oids.head = "b".repeat(40);
+          approval.targetFolderSnapshot.targetRootRealPath = "/other/target";
         },
       ],
       [
         "unplanned target appended",
         (plan) => {
-          const repository = plan.repositoryFingerprint as {
+          const snapshot = plan.targetFolderSnapshot as {
             targets: unknown[];
           };
-          repository.targets.push({
-            normalizedPath: "zz/extra.mdx",
-            symlinkStatus: "not-symlink",
-            approvedPriorTarget: { state: "absent" },
+          snapshot.targets.push({
+            relativePath: "zz/extra.mdx",
+            priorState: { state: "absent" },
           });
           const approval = plan.approvalFingerprint as {
-            repositoryFingerprint: { targets: unknown[] };
+            targetFolderSnapshot: { targets: unknown[] };
           };
-          approval.repositoryFingerprint.targets = repository.targets;
+          approval.targetFolderSnapshot.targets = snapshot.targets;
         },
       ],
       [
@@ -678,10 +624,8 @@ describe("verifyStoredExportPlan", () => {
         "action pointed at a blob it does not own",
         (plan) => {
           const actions = plan.actions as { sealedOutput: unknown }[];
-          actions[0]!.sealedOutput = plan.commitMessage as Record<
-            string,
-            unknown
-          >;
+          const imageAction = actions[1]!;
+          actions[0]!.sealedOutput = imageAction.sealedOutput;
         },
       ],
     ];
@@ -821,15 +765,12 @@ describe("verifyStoredExportPlan", () => {
         documentOrder: number;
         sealedOutput: { contentSha256: string };
       }[];
-      commitMessage: { contentSha256: string };
       sourceImages: readonly { transformedOutputSha256: string }[];
     };
     const imageDigest = plan.sourceImages[0]!.transformedOutputSha256;
     const mdxDigest = plan.actions.find((action) => action.documentOrder === 0)!
       .sealedOutput.contentSha256;
-    const commitDigest = plan.commitMessage.contentSha256;
     expect(mdxDigest).not.toBe(imageDigest);
-    expect(commitDigest).not.toBe(imageDigest);
 
     const forgeTransform = (sealed: typeof envelope, digestValue: string) =>
       reseal(sealed, (candidate) => {
@@ -846,7 +787,6 @@ describe("verifyStoredExportPlan", () => {
     for (const [label, digestValue] of [
       ["a forged digest", digest("forged-transform")],
       ["the generated MDX blob", mdxDigest],
-      ["the commit-message blob", commitDigest],
     ] as const) {
       const forged = forgeTransform(envelope, digestValue);
       expect(structuralCode(forged, envelope.blobBytes), label).toBe(
@@ -901,11 +841,6 @@ describe("verifyStoredExportPlan", () => {
     ).generatedMdx.contentSha256;
     for (const [label, digestValue] of [
       ["no-changes forged digest", digest("forged-transform")],
-      [
-        "no-changes commit-message blob",
-        (noChanges.plan as { commitMessage: { contentSha256: string } })
-          .commitMessage.contentSha256,
-      ],
       ["no-changes generated-MDX blob", noChangesMdxDigest],
     ] as const) {
       const forged = forgeTransform(noChanges, digestValue);
@@ -1010,10 +945,10 @@ describe("verifyStoredExportPlan", () => {
     expect(envelope.state).toBe("no-changes");
     expect(tamperCode(restored(envelope), envelope.blobBytes)).toBeUndefined();
 
-    const mirrorRepository = (plan: Record<string, unknown>) => {
+    const mirrorSnapshot = (plan: Record<string, unknown>) => {
       (
-        plan.approvalFingerprint as { repositoryFingerprint: unknown }
-      ).repositoryFingerprint = plan.repositoryFingerprint;
+        plan.approvalFingerprint as { targetFolderSnapshot: unknown }
+      ).targetFolderSnapshot = plan.targetFolderSnapshot;
     };
 
     const forgeries: readonly [
@@ -1021,39 +956,43 @@ describe("verifyStoredExportPlan", () => {
       (plan: Record<string, unknown>) => void,
     ][] = [
       [
-        "unsupported repository form",
+        "unknown case sensitivity",
         (plan) => {
           (
-            (plan.repositoryFingerprint as Record<string, unknown>)
-              .supportedForm as { isBareRepository: boolean }
-          ).isBareRepository = true;
-          mirrorRepository(plan);
+            plan.targetFolderSnapshot as { caseSensitivity: string }
+          ).caseSensitivity = "unknown";
+          mirrorSnapshot(plan);
         },
       ],
       [
-        "unknown filesystem case sensitivity",
+        "empty target root real path",
         (plan) => {
           (
-            plan.repositoryFingerprint as { filesystemCaseSensitivity: string }
-          ).filesystemCaseSensitivity = "unknown";
-          mirrorRepository(plan);
+            plan.targetFolderSnapshot as { targetRootRealPath: string }
+          ).targetRootRealPath = "";
+          mirrorSnapshot(plan);
         },
       ],
       [
-        "empty repository real path",
+        "extra target-folder field",
         (plan) => {
-          (
-            (plan.repositoryFingerprint as Record<string, unknown>)
-              .realPaths as { repositoryRoot: string }
-          ).repositoryRoot = "";
-          mirrorRepository(plan);
+          (plan.targetFolderSnapshot as Record<string, unknown>).extra = true;
+          mirrorSnapshot(plan);
         },
       ],
       [
-        "extra repository field",
+        "legacy symlink trust flag",
         (plan) => {
-          (plan.repositoryFingerprint as Record<string, unknown>).extra = true;
-          mirrorRepository(plan);
+          const targets = (
+            plan.targetFolderSnapshot as { targets: Record<string, unknown>[] }
+          ).targets;
+          // Force a non-empty targets list so the legacy key is visible.
+          targets.splice(0, targets.length, {
+            relativePath: "content/posts/example.mdx",
+            priorState: { state: "absent" },
+            symlinkStatus: "not-symlink",
+          });
+          mirrorSnapshot(plan);
         },
       ],
       [
@@ -1093,12 +1032,6 @@ describe("verifyStoredExportPlan", () => {
         },
       ],
       [
-        "extra author field",
-        (plan) => {
-          (plan.author as Record<string, unknown>).signature = "forged";
-        },
-      ],
-      [
         "an action smuggled into a no-changes plan",
         (plan) => {
           plan.actions = [
@@ -1106,7 +1039,6 @@ describe("verifyStoredExportPlan", () => {
               kind: "create",
               documentOrder: 0,
               targetPath: "content/posts/example.mdx",
-              expectedGitMode: "100644",
               sealedOutput: plan.generatedMdx,
               sourceOccurrence: 0,
               approvedPriorTarget: { state: "absent" },
@@ -1115,16 +1047,15 @@ describe("verifyStoredExportPlan", () => {
         },
       ],
       [
-        "a repository target smuggled into a no-changes plan",
+        "a target smuggled into a no-changes plan",
         (plan) => {
-          (plan.repositoryFingerprint as { targets: unknown[] }).targets = [
+          (plan.targetFolderSnapshot as { targets: unknown[] }).targets = [
             {
-              normalizedPath: "content/posts/example.mdx",
-              symlinkStatus: "not-symlink",
-              approvedPriorTarget: { state: "absent" },
+              relativePath: "content/posts/example.mdx",
+              priorState: { state: "absent" },
             },
           ];
-          mirrorRepository(plan);
+          mirrorSnapshot(plan);
         },
       ],
       [

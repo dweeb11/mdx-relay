@@ -74,7 +74,7 @@ const tampered = (): MdxRelayResult<never> =>
 const writeFailed = (): MdxRelayResult<never> =>
   mdxRelayErr([createIssue(ISSUE_CODES.storageWriteFailed)]);
 
-/** macOS alpha root, outside the vault, the repository and its Git directory. */
+/** macOS alpha root, outside the vault and the configured target folder. */
 export function defaultPlanStoreRoot(): string {
   return join(homedir(), "Library", "Application Support", "MDXRelay");
 }

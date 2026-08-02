@@ -2,15 +2,14 @@ import type {
   ApprovalFingerprint,
   ApprovedPriorTarget,
   CanonicalDependencySnapshot,
-  CommitAuthorSnapshot,
   ExportAction,
   GenerationToken,
-  RepositoryFingerprint,
-  RepositoryTargetFingerprint,
   SealedOutput,
   Sha256Digest,
   SourceImageMetadata,
   SourceNoteMetadata,
+  TargetFolderSnapshot,
+  TargetSnapshotEntry,
   ValidatedPortableProfileSnapshot,
 } from "../contracts/export-plan";
 import {
@@ -98,8 +97,9 @@ export interface FinalCaptureBarrier {
   readonly dependencySnapshotSha256: Sha256Digest;
   readonly sourceNote: CapturedSourceNoteState;
   readonly sourceImages: readonly CapturedSourceImageState[];
-  readonly repository: Omit<RepositoryFingerprint, "targets">;
-  readonly targets: readonly RepositoryTargetFingerprint[];
+  readonly targetRootRealPath: string;
+  readonly caseSensitivity: TargetFolderSnapshot["caseSensitivity"];
+  readonly targets: readonly TargetSnapshotEntry[];
 }
 
 export interface ExportPlanBuildInput {
@@ -114,13 +114,13 @@ export interface ExportPlanBuildInput {
   /** The captured bytes behind every source fingerprint above. */
   readonly sourceBytes: PlanSourceBytes;
   readonly documentSlug: string;
-  readonly documentTitle: string;
   readonly generatedMdxBytes: Uint8Array;
   readonly transformedImages: readonly TransformedImageBytes[];
   readonly imageEmbeds: readonly DocumentImageEmbed[];
-  readonly repository: Omit<RepositoryFingerprint, "targets">;
+  readonly targetRootRealPath: string;
+  readonly caseSensitivity: TargetFolderSnapshot["caseSensitivity"];
   /** Probed prior state for every planned target path. */
-  readonly priorTargets: readonly RepositoryTargetFingerprint[];
+  readonly priorTargets: readonly TargetSnapshotEntry[];
   readonly warnings: readonly WarningIssue[];
   readonly finalCapture: FinalCaptureBarrier;
   readonly createdAtUtc: string;
@@ -138,13 +138,11 @@ export interface UnsealedExportPlan {
   readonly dependencySnapshot: CanonicalDependencySnapshot;
   readonly dependencySnapshotSha256: Sha256Digest;
   readonly sourceImages: readonly SourceImageMetadata[];
-  readonly repositoryFingerprint: RepositoryFingerprint;
+  readonly targetFolderSnapshot: TargetFolderSnapshot;
   readonly approvalFingerprint: ApprovalFingerprint;
   readonly generatedMdx: SealedOutput;
   readonly actions: readonly ExportAction[];
   readonly blobs: Readonly<Record<string, SealedOutput>>;
-  readonly commitMessage: SealedOutput;
-  readonly author: CommitAuthorSnapshot;
   readonly issues: readonly WarningIssue[];
   readonly createdAtUtc: string;
   readonly expiresAtUtc: string;
@@ -171,7 +169,7 @@ export const MAX_PORTABLE_PATH_SEGMENT_LENGTH = 255;
  * Matches the bounded portable relative-path contract used for profile roots
  * (`contentRoot` / `assetRoot` in portable-profile validation).
  */
-export const MAX_PORTABLE_REPOSITORY_PATH_LENGTH = 240;
+export const MAX_PORTABLE_TARGET_PATH_LENGTH = 240;
 
 const hasControlCharacter = (value: string): boolean => {
   for (let index = 0; index < value.length; index += 1) {
@@ -194,10 +192,10 @@ const isPortableSegment = (segment: string): boolean =>
   !WINDOWS_RESERVED_SEGMENT.test(segment) &&
   !hasControlCharacter(segment);
 
-/** Mirrors the repository-target path shape the frozen plan contract accepts. */
-export const isPortableRepositoryPath = (value: string): boolean =>
+/** Mirrors the target-path shape the frozen plan contract accepts. */
+export const isPortableTargetPath = (value: string): boolean =>
   value.length > 0 &&
-  value.length <= MAX_PORTABLE_REPOSITORY_PATH_LENGTH &&
+  value.length <= MAX_PORTABLE_TARGET_PATH_LENGTH &&
   !value.startsWith("/") &&
   !value.includes("\\") &&
   !/^[A-Za-z]:/u.test(value) &&
@@ -284,117 +282,39 @@ const sealedOutputFor = (bytes: Uint8Array): SealedOutput => {
   });
 };
 
-const copyPriorTarget = (value: ApprovedPriorTarget): ApprovedPriorTarget =>
+const copyPriorState = (value: ApprovedPriorTarget): ApprovedPriorTarget =>
   value.state === "absent"
     ? Object.freeze({ state: "absent" as const })
     : Object.freeze({
-        state: "file" as const,
+        state: "regularFile" as const,
         contentSha256: value.contentSha256,
-        gitMode: value.gitMode,
       });
 
-const copyTarget = (
-  value: RepositoryTargetFingerprint,
-): RepositoryTargetFingerprint =>
+const copyTarget = (value: TargetSnapshotEntry): TargetSnapshotEntry =>
   Object.freeze({
-    normalizedPath: value.normalizedPath,
-    symlinkStatus: value.symlinkStatus,
-    approvedPriorTarget: copyPriorTarget(value.approvedPriorTarget),
+    relativePath: value.relativePath,
+    priorState: copyPriorState(value.priorState),
   });
 
 const orderedTargets = (
-  targets: readonly RepositoryTargetFingerprint[],
-): readonly RepositoryTargetFingerprint[] =>
+  targets: readonly TargetSnapshotEntry[],
+): readonly TargetSnapshotEntry[] =>
   Object.freeze(
     [...targets]
       .sort((left, right) =>
-        compareCodeUnits(left.normalizedPath, right.normalizedPath),
+        compareCodeUnits(left.relativePath, right.relativePath),
       )
       .map(copyTarget),
   );
 
-/** Rebuilds repository state field by field so caller extras never leak in. */
-const copyRepositoryState = (
-  repository: Omit<RepositoryFingerprint, "targets">,
-): Omit<RepositoryFingerprint, "targets"> =>
-  Object.freeze({
-    realPaths: Object.freeze({
-      repositoryRoot: repository.realPaths.repositoryRoot,
-      gitDirectory: repository.realPaths.gitDirectory,
-      gitCommonDirectory: repository.realPaths.gitCommonDirectory,
-    }),
-    supportedForm: Object.freeze({
-      isBareRepository: repository.supportedForm.isBareRepository,
-      configuredRootMatchesTopLevel:
-        repository.supportedForm.configuredRootMatchesTopLevel,
-      gitDirectoryMatchesCommonDirectory:
-        repository.supportedForm.gitDirectoryMatchesCommonDirectory,
-      isLinkedWorktree: repository.supportedForm.isLinkedWorktree,
-      coreSparseCheckout: repository.supportedForm.coreSparseCheckout,
-      extensionsWorktreeConfig:
-        repository.supportedForm.extensionsWorktreeConfig,
-      worktreeSparseCheckout: repository.supportedForm.worktreeSparseCheckout,
-      hasPlannedPathSubmoduleBoundary:
-        repository.supportedForm.hasPlannedPathSubmoduleBoundary,
-      hasNestedRepositoryBoundary:
-        repository.supportedForm.hasNestedRepositoryBoundary,
-      hasStorageOverlap: repository.supportedForm.hasStorageOverlap,
-      effectiveFetchUrlCount: repository.supportedForm.effectiveFetchUrlCount,
-      effectivePushUrlCount: repository.supportedForm.effectivePushUrlCount,
-    }),
-    filesystemCaseSensitivity: repository.filesystemCaseSensitivity,
-    branch: Object.freeze({
-      currentBranch: repository.branch.currentBranch,
-      configuredBranch: repository.branch.configuredBranch,
-      upstreamRemote: repository.branch.upstreamRemote,
-      upstreamMergeRef: repository.branch.upstreamMergeRef,
-    }),
-    oids: Object.freeze({
-      head: repository.oids.head,
-      localUpstream: repository.oids.localUpstream,
-      pushDestinationTip: repository.oids.pushDestinationTip,
-    }),
-    remotes: Object.freeze({
-      fetch: Object.freeze({
-        sha256: repository.remotes.fetch.sha256,
-        redactedDisplay: repository.remotes.fetch.redactedDisplay,
-      }),
-      push: Object.freeze({
-        sha256: repository.remotes.push.sha256,
-        redactedDisplay: repository.remotes.push.redactedDisplay,
-      }),
-    }),
-    stateHashes: Object.freeze({
-      porcelainStatusSha256: repository.stateHashes.porcelainStatusSha256,
-      indexSha256: repository.stateHashes.indexSha256,
-      relevantConfigSha256: repository.stateHashes.relevantConfigSha256,
-      plannedPathAttributesSha256:
-        repository.stateHashes.plannedPathAttributesSha256,
-    }),
-    git: Object.freeze({
-      executableRealPath: repository.git.executableRealPath,
-      version: repository.git.version,
-    }),
-    canonicalCommitAuthor: Object.freeze({
-      name: repository.canonicalCommitAuthor.name,
-      email: repository.canonicalCommitAuthor.email,
-    }),
-  });
-
 const targetKey = (
-  normalizedPath: string,
-  caseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"],
+  relativePath: string,
+  caseSensitivity: TargetFolderSnapshot["caseSensitivity"],
 ): string =>
-  caseSensitivity === "insensitive"
-    ? normalizedPath.toLowerCase()
-    : normalizedPath;
-
-/** Renders a validated single-`{title}` commit template without `$` expansion. */
-const renderCommitMessage = (template: string, title: string): string =>
-  `${template.replace("{title}", () => title)}\n`;
+  caseSensitivity === "insensitive" ? relativePath.toLowerCase() : relativePath;
 
 interface PlannedTarget {
-  readonly normalizedPath: string;
+  readonly relativePath: string;
   readonly documentOrder: number;
   readonly sourceOccurrence: number;
   readonly sealedOutput: SealedOutput;
@@ -480,7 +400,7 @@ export function buildExportPlan(
 
   const planned: PlannedTarget[] = [
     {
-      normalizedPath: `${profile.output.contentRoot}/${input.documentSlug}.mdx`,
+      relativePath: `${profile.output.contentRoot}/${input.documentSlug}.mdx`,
       documentOrder: 0,
       sourceOccurrence: 0,
       sealedOutput: generatedMdx,
@@ -493,7 +413,7 @@ export function buildExportPlan(
     const occurrence = (occurrences.get(embed.sourceId) ?? 0) + 1;
     occurrences.set(embed.sourceId, occurrence);
     planned.push({
-      normalizedPath: `${profile.output.assetRoot}/${input.documentSlug}/${embed.assetFileName}`,
+      relativePath: `${profile.output.assetRoot}/${input.documentSlug}/${embed.assetFileName}`,
       documentOrder: index + 1,
       sourceOccurrence: occurrence,
       sealedOutput: output,
@@ -502,52 +422,36 @@ export function buildExportPlan(
 
   const seenTargets = new Set<string>();
   for (const target of planned) {
-    const key = targetKey(
-      target.normalizedPath,
-      input.repository.filesystemCaseSensitivity,
-    );
-    if (
-      !isPortableRepositoryPath(target.normalizedPath) ||
-      seenTargets.has(key)
-    )
+    const key = targetKey(target.relativePath, input.caseSensitivity);
+    if (!isPortableTargetPath(target.relativePath) || seenTargets.has(key))
       return blocked(ISSUE_CODES.unsafePath);
     seenTargets.add(key);
   }
 
   const priorByPath = new Map(
-    input.priorTargets.map((target) => [target.normalizedPath, target]),
+    input.priorTargets.map((target) => [target.relativePath, target]),
   );
   if (
     priorByPath.size !== input.priorTargets.length ||
     priorByPath.size !== planned.length ||
-    planned.some((target) => !priorByPath.has(target.normalizedPath))
+    planned.some((target) => !priorByPath.has(target.relativePath))
   )
     return blocked(ISSUE_CODES.repositoryPreflightFailed);
 
-  const commitMessageBytes = new TextEncoder().encode(
-    renderCommitMessage(profile.commit.message, input.documentTitle),
-  );
-  const commitMessage = sealedOutputFor(commitMessageBytes);
-  if (blobBytes.has(commitMessage.planRelativePath))
-    return blocked(ISSUE_CODES.staleDuringPlanning);
-  blobBytes.set(commitMessage.planRelativePath, commitMessageBytes);
-
   const changed = planned.some((target) => {
-    const prior = priorByPath.get(target.normalizedPath)!.approvedPriorTarget;
+    const prior = priorByPath.get(target.relativePath)!.priorState;
     return (
-      prior.state !== "file" ||
+      prior.state !== "regularFile" ||
       prior.contentSha256 !== target.sealedOutput.contentSha256
     );
   });
 
   const actions: ExportAction[] = changed
     ? planned.map((target) => {
-        const prior = priorByPath.get(
-          target.normalizedPath,
-        )!.approvedPriorTarget;
+        const prior = priorByPath.get(target.relativePath)!.priorState;
         const fields = {
           documentOrder: target.documentOrder,
-          targetPath: target.normalizedPath,
+          targetPath: target.relativePath,
           sealedOutput: target.sealedOutput,
           sourceOccurrence: target.sourceOccurrence,
         };
@@ -555,30 +459,27 @@ export function buildExportPlan(
           ? Object.freeze({
               ...fields,
               kind: "create" as const,
-              expectedGitMode: "100644" as const,
               approvedPriorTarget: Object.freeze({ state: "absent" as const }),
             })
           : Object.freeze({
               ...fields,
               kind: "update" as const,
-              expectedGitMode: prior.gitMode,
               approvedPriorTarget: Object.freeze({
-                state: "file" as const,
+                state: "regularFile" as const,
                 contentSha256: prior.contentSha256,
-                gitMode: prior.gitMode,
               }),
             });
       })
     : [];
 
-  const repositoryState = copyRepositoryState(input.repository);
   const planTargets = changed
     ? orderedTargets(
-        planned.map((target) => priorByPath.get(target.normalizedPath)!),
+        planned.map((target) => priorByPath.get(target.relativePath)!),
       )
     : Object.freeze([]);
-  const repositoryFingerprint: RepositoryFingerprint = Object.freeze({
-    ...repositoryState,
+  const targetFolderSnapshot: TargetFolderSnapshot = Object.freeze({
+    targetRootRealPath: input.targetRootRealPath,
+    caseSensitivity: input.caseSensitivity,
     targets: planTargets,
   });
 
@@ -589,15 +490,12 @@ export function buildExportPlan(
   if (planned.length > MDX_RELAY_LIMITS.sealedOutputFiles)
     return blocked(ISSUE_CODES.outputFileLimitExceeded);
 
-  // A ready plan seals exactly its action outputs plus the commit message; a
-  // no-changes plan still seals every reviewable output for the preview.
+  // A ready plan seals exactly its action outputs; a no-changes plan still
+  // seals every reviewable output for the preview.
   const blobs: Record<string, SealedOutput> = {};
-  for (const output of [
-    ...(changed
-      ? actions.map((action) => action.sealedOutput)
-      : [generatedMdx, ...outputBySource.values()]),
-    commitMessage,
-  ])
+  for (const output of changed
+    ? actions.map((action) => action.sealedOutput)
+    : [generatedMdx, ...outputBySource.values()])
     blobs[output.contentSha256] = output;
 
   const approvalSealedOutputs = Object.values(blobs).sort((left, right) =>
@@ -638,7 +536,7 @@ export function buildExportPlan(
       ),
     ),
     sealedOutputs: Object.freeze(approvalSealedOutputs),
-    repositoryFingerprint,
+    targetFolderSnapshot,
   });
 
   const barrier = input.finalCapture;
@@ -651,7 +549,8 @@ export function buildExportPlan(
       capturedImageStates(barrier.sourceImages),
       capturedImageStates(input.sourceImages),
     ) ||
-    !deepEquals(copyRepositoryState(barrier.repository), repositoryState) ||
+    barrier.targetRootRealPath !== input.targetRootRealPath ||
+    barrier.caseSensitivity !== input.caseSensitivity ||
     !deepEquals(
       orderedTargets(barrier.targets),
       orderedTargets(input.priorTargets),
@@ -674,16 +573,11 @@ export function buildExportPlan(
     dependencySnapshot: input.dependencySnapshot,
     dependencySnapshotSha256: input.dependencySnapshotSha256,
     sourceImages: Object.freeze(sourceImages),
-    repositoryFingerprint,
+    targetFolderSnapshot,
     approvalFingerprint,
     generatedMdx,
     actions: Object.freeze(actions),
     blobs: Object.freeze(blobs),
-    commitMessage,
-    author: Object.freeze({
-      name: repositoryState.canonicalCommitAuthor.name,
-      email: repositoryState.canonicalCommitAuthor.email,
-    }),
     issues: Object.freeze([...input.warnings]),
     createdAtUtc: input.createdAtUtc,
     expiresAtUtc: input.expiresAtUtc,

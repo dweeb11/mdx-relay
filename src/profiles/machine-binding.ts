@@ -8,13 +8,12 @@ import {
   type MdxRelayResult,
 } from "../contracts/result";
 import { hasExactKeys, isRecord } from "../core/predicates";
-import { isCredentialBearingRepositoryUrl } from "./portable-profile";
+import { isCredentialBearingUrl } from "./portable-profile";
 
 export interface MachineBindingV1 {
   readonly schemaVersion: 1;
   readonly profileId: string;
-  readonly repositoryRoot: string;
-  readonly repositoryUrl: string;
+  readonly targetRoot: string;
 }
 
 export interface ValidatedMachineBinding {
@@ -23,7 +22,7 @@ export interface ValidatedMachineBinding {
 }
 
 const containsCredentialUrl = (value: unknown): boolean => {
-  if (typeof value === "string") return isCredentialBearingRepositoryUrl(value);
+  if (typeof value === "string") return isCredentialBearingUrl(value);
   if (value === null || typeof value !== "object") return false;
   return Reflect.ownKeys(value).some((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -47,7 +46,7 @@ const hasControlOrSpace = (value: string, includeSpace: boolean): boolean =>
     );
   });
 
-const isSafeAbsoluteRepositoryRoot = (value: unknown): value is string => {
+const isSafeAbsoluteTargetRoot = (value: unknown): value is string => {
   if (
     typeof value !== "string" ||
     value.length < 2 ||
@@ -79,36 +78,6 @@ const isSafeAbsoluteRepositoryRoot = (value: unknown): value is string => {
   );
 };
 
-const isCredentialFreeRepositoryUrl = (value: unknown): value is string => {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > 2048 ||
-    hasControlOrSpace(value, true) ||
-    isCredentialBearingRepositoryUrl(value)
-  )
-    return false;
-  if (/^(?:https?|ssh|git):/iu.test(value)) {
-    if (!/^(?:https?|ssh|git):\/\//iu.test(value) || value.includes("\\"))
-      return false;
-    try {
-      const parsed = new URL(value);
-      return (
-        parsed.hostname.length > 0 &&
-        !parsed.search &&
-        !parsed.hash &&
-        !parsed.password &&
-        (parsed.protocol === "ssh:" || !parsed.username)
-      );
-    } catch {
-      return false;
-    }
-  }
-  return /^(?:[^/@:\s]+@)?(?:\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)*):(?!.*\/\/)(?!(?:.*\/)?\.{1,2}(?:\/|$))[^\\?#\s]+$/iu.test(
-    value,
-  );
-};
-
 const cloneAndFreeze = (binding: MachineBindingV1): MachineBindingV1 =>
   Object.freeze(structuredClone(binding));
 
@@ -127,24 +96,18 @@ export function validateMachineBinding(
     if (containsCredentialUrl(value)) return invalid("credentialUrl");
     if (
       isRecord(value) &&
-      typeof value.repositoryRoot === "string" &&
-      !isSafeAbsoluteRepositoryRoot(value.repositoryRoot)
+      typeof value.targetRoot === "string" &&
+      !isSafeAbsoluteTargetRoot(value.targetRoot)
     )
       return invalid("unsafePath");
     if (
       !isRecord(value) ||
-      !hasExactKeys(value, [
-        "schemaVersion",
-        "profileId",
-        "repositoryRoot",
-        "repositoryUrl",
-      ]) ||
+      !hasExactKeys(value, ["schemaVersion", "profileId", "targetRoot"]) ||
       value.schemaVersion !== 1 ||
       typeof value.profileId !== "string" ||
       value.profileId.length > maximumProfileIdLength ||
       !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(value.profileId) ||
-      !isSafeAbsoluteRepositoryRoot(value.repositoryRoot) ||
-      !isCredentialFreeRepositoryUrl(value.repositoryUrl)
+      !isSafeAbsoluteTargetRoot(value.targetRoot)
     )
       return invalid("invalidProfile");
     const binding = cloneAndFreeze(value as unknown as MachineBindingV1);

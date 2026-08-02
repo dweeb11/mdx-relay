@@ -32,7 +32,6 @@ const profile = {
   schemaVersion: 1,
   id: "dpw-mind-net-v1",
   name: "DPW Mind Net",
-  repository: { remote: "origin", branch: "main" },
   output: {
     contentRoot: "content/posts",
     assetRoot: "public/posts",
@@ -50,7 +49,6 @@ const profile = {
     maxDimension: 2000,
     webpQuality: 85,
   },
-  commit: { message: "Publish {title}" },
 };
 
 const toArrayBuffer = (buffer) =>

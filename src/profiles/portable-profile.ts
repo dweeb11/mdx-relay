@@ -27,7 +27,7 @@ export interface ValidatedPortableProfile {
 const supportedSchemePrefix = /^(https?|ssh|git):/iu;
 const strictSupportedSchemeUrl = /^(?:https?|ssh|git):\/\//iu;
 
-export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
+export const isCredentialBearingUrl = (value: string): boolean => {
   const schemeMatch = supportedSchemePrefix.exec(value);
   if (schemeMatch) {
     if (value.includes("?") || value.includes("#")) return true;
@@ -61,7 +61,7 @@ export const isCredentialBearingRepositoryUrl = (value: string): boolean => {
 };
 
 const containsCredentialUrl = (value: unknown): boolean => {
-  if (typeof value === "string") return isCredentialBearingRepositoryUrl(value);
+  if (typeof value === "string") return isCredentialBearingUrl(value);
   if (value === null || typeof value !== "object") return false;
   return Reflect.ownKeys(value).some((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);

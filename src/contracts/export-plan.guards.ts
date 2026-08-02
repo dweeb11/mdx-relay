@@ -13,10 +13,10 @@ import type {
   ExportAction,
   PlanIdentity,
   ReadyExportPlan,
-  RepositoryFingerprint,
   SealedOutput,
   SourceImageMetadata,
   SourceNoteMetadata,
+  TargetFolderSnapshot,
   VerifiedReadyExportPlan,
 } from "./export-plan.types";
 
@@ -30,164 +30,46 @@ const isPriorTarget = (value: unknown): value is ApprovedPriorTarget => {
   if (!isRecord(value)) return false;
   if (value.state === "absent") return hasExactKeys(value, ["state"]);
   return (
-    value.state === "file" &&
-    hasExactKeys(value, ["state", "contentSha256", "gitMode"]) &&
-    isNonemptyString(value.contentSha256) &&
-    (value.gitMode === "100644" || value.gitMode === "100755")
+    value.state === "regularFile" &&
+    hasExactKeys(value, ["state", "contentSha256"]) &&
+    isNonemptyString(value.contentSha256)
   );
 };
 
-const repositoryTargetKey = (
-  normalizedPath: string,
-  caseSensitivity: RepositoryFingerprint["filesystemCaseSensitivity"],
+const targetPathKey = (
+  relativePath: string,
+  caseSensitivity: TargetFolderSnapshot["caseSensitivity"],
 ): string =>
-  caseSensitivity === "insensitive"
-    ? normalizedPath.toLowerCase()
-    : normalizedPath;
+  caseSensitivity === "insensitive" ? relativePath.toLowerCase() : relativePath;
 
-const isRepositoryFingerprint = (
+const isTargetFolderSnapshot = (
   value: unknown,
-): value is RepositoryFingerprint => {
+): value is TargetFolderSnapshot => {
+  if (!exactObject(value, ["targetRootRealPath", "caseSensitivity", "targets"]))
+    return false;
+  if (!isNonemptyString(value.targetRootRealPath)) return false;
   if (
-    !exactObject(value, [
-      "realPaths",
-      "supportedForm",
-      "filesystemCaseSensitivity",
-      "branch",
-      "oids",
-      "remotes",
-      "stateHashes",
-      "git",
-      "canonicalCommitAuthor",
-      "targets",
-    ])
+    value.caseSensitivity !== "sensitive" &&
+    value.caseSensitivity !== "insensitive"
   )
     return false;
-  const {
-    realPaths,
-    supportedForm,
-    branch,
-    oids,
-    remotes,
-    stateHashes,
-    git,
-    canonicalCommitAuthor,
-    targets,
-  } = value;
-  if (
-    !exactObject(realPaths, [
-      "repositoryRoot",
-      "gitDirectory",
-      "gitCommonDirectory",
-    ]) ||
-    !Object.values(realPaths).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(supportedForm, [
-      "isBareRepository",
-      "configuredRootMatchesTopLevel",
-      "gitDirectoryMatchesCommonDirectory",
-      "isLinkedWorktree",
-      "coreSparseCheckout",
-      "extensionsWorktreeConfig",
-      "worktreeSparseCheckout",
-      "hasPlannedPathSubmoduleBoundary",
-      "hasNestedRepositoryBoundary",
-      "hasStorageOverlap",
-      "effectiveFetchUrlCount",
-      "effectivePushUrlCount",
-    ])
-  )
-    return false;
-  if (
-    supportedForm.isBareRepository !== false ||
-    supportedForm.configuredRootMatchesTopLevel !== true ||
-    supportedForm.gitDirectoryMatchesCommonDirectory !== true ||
-    supportedForm.isLinkedWorktree !== false ||
-    supportedForm.coreSparseCheckout !== false ||
-    supportedForm.extensionsWorktreeConfig !== false ||
-    supportedForm.worktreeSparseCheckout !== false ||
-    supportedForm.hasPlannedPathSubmoduleBoundary !== false ||
-    supportedForm.hasNestedRepositoryBoundary !== false ||
-    supportedForm.hasStorageOverlap !== false ||
-    supportedForm.effectiveFetchUrlCount !== 1 ||
-    supportedForm.effectivePushUrlCount !== 1
-  )
-    return false;
-  if (
-    value.filesystemCaseSensitivity !== "sensitive" &&
-    value.filesystemCaseSensitivity !== "insensitive"
-  )
-    return false;
-  if (
-    !exactObject(branch, [
-      "currentBranch",
-      "configuredBranch",
-      "upstreamRemote",
-      "upstreamMergeRef",
-    ]) ||
-    !Object.values(branch).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(oids, ["head", "localUpstream", "pushDestinationTip"]) ||
-    !Object.values(oids).every(isNonemptyString)
-  )
-    return false;
-  if (!exactObject(remotes, ["fetch", "push"])) return false;
-  for (const remote of [remotes.fetch, remotes.push])
-    if (
-      !exactObject(remote, ["sha256", "redactedDisplay"]) ||
-      !isNonemptyString(remote.sha256) ||
-      !isNonemptyString(remote.redactedDisplay)
-    )
-      return false;
-  if (
-    !exactObject(stateHashes, [
-      "porcelainStatusSha256",
-      "indexSha256",
-      "relevantConfigSha256",
-      "plannedPathAttributesSha256",
-    ]) ||
-    !Object.values(stateHashes).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(git, ["executableRealPath", "version"]) ||
-    !Object.values(git).every(isNonemptyString)
-  )
-    return false;
-  if (
-    !exactObject(canonicalCommitAuthor, ["name", "email"]) ||
-    !Object.values(canonicalCommitAuthor).every(isNonemptyString)
-  )
-    return false;
-  if (!Array.isArray(targets)) return false;
+  if (!Array.isArray(value.targets)) return false;
   let previous = "";
   const targetKeys = new Set<string>();
-  for (const target of targets) {
+  for (const target of value.targets) {
     const targetKey =
-      isRecord(target) && typeof target.normalizedPath === "string"
-        ? repositoryTargetKey(
-            target.normalizedPath,
-            value.filesystemCaseSensitivity,
-          )
+      isRecord(target) && typeof target.relativePath === "string"
+        ? targetPathKey(target.relativePath, value.caseSensitivity)
         : "";
     if (
-      !exactObject(target, [
-        "normalizedPath",
-        "symlinkStatus",
-        "approvedPriorTarget",
-      ]) ||
-      !isRepositoryTargetPath(target.normalizedPath) ||
-      target.symlinkStatus !== "not-symlink" ||
-      !isPriorTarget(target.approvedPriorTarget) ||
-      target.normalizedPath <= previous ||
+      !exactObject(target, ["relativePath", "priorState"]) ||
+      !isTargetRelativePath(target.relativePath) ||
+      !isPriorTarget(target.priorState) ||
+      target.relativePath <= previous ||
       targetKeys.has(targetKey)
     )
       return false;
-    previous = target.normalizedPath;
+    previous = target.relativePath;
     targetKeys.add(targetKey);
   }
   return true;
@@ -260,7 +142,7 @@ const hasPortableRelativePathShape = (value: unknown): value is string => {
 const isPlanRelativePath = (value: unknown): value is string =>
   hasPortableRelativePathShape(value) &&
   !value.toLowerCase().startsWith("plans/");
-const isRepositoryTargetPath = (value: unknown): value is string =>
+const isTargetRelativePath = (value: unknown): value is string =>
   hasPortableRelativePathShape(value) &&
   !value.split("/").some((segment) => segment.toLowerCase() === ".git");
 const isSealedOutput = (value: unknown): value is SealedOutput =>
@@ -312,7 +194,7 @@ const isApprovalFingerprint = (
       "dependencySnapshotSha256",
       "sourceImages",
       "sealedOutputs",
-      "repositoryFingerprint",
+      "targetFolderSnapshot",
     ]) ||
     !isNonemptyString(value.profileSnapshotSha256) ||
     !isNonemptyString(value.dependencySnapshotSha256) ||
@@ -322,7 +204,7 @@ const isApprovalFingerprint = (
     !Array.isArray(value.sourceImages) ||
     !Array.isArray(value.sealedOutputs) ||
     value.sealedOutputs.length === 0 ||
-    !isRepositoryFingerprint(value.repositoryFingerprint)
+    !isTargetFolderSnapshot(value.targetFolderSnapshot)
   )
     return false;
   let previousSourceId = "";
@@ -362,20 +244,19 @@ const isExportAction = (value: unknown): value is ExportAction =>
     "kind",
     "documentOrder",
     "targetPath",
-    "expectedGitMode",
     "sealedOutput",
     "sourceOccurrence",
     "approvedPriorTarget",
   ]) &&
   (value.kind === "create" || value.kind === "update") &&
   isNonnegativeInteger(value.documentOrder) &&
-  isRepositoryTargetPath(value.targetPath) &&
-  (value.expectedGitMode === "100644" || value.expectedGitMode === "100755") &&
+  isTargetRelativePath(value.targetPath) &&
   isSealedOutput(value.sealedOutput) &&
   isNonnegativeInteger(value.sourceOccurrence) &&
   isPriorTarget(value.approvedPriorTarget) &&
   ((value.kind === "create" && value.approvedPriorTarget.state === "absent") ||
-    (value.kind === "update" && value.approvedPriorTarget.state === "file"));
+    (value.kind === "update" &&
+      value.approvedPriorTarget.state === "regularFile"));
 
 /** Stored warning issues must equal registry-owned policy exactly. */
 const isWarningIssue = (value: unknown): value is WarningIssue =>
@@ -406,13 +287,11 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
       "dependencySnapshot",
       "dependencySnapshotSha256",
       "sourceImages",
-      "repositoryFingerprint",
+      "targetFolderSnapshot",
       "approvalFingerprint",
       "generatedMdx",
       "actions",
       "blobs",
-      "commitMessage",
-      "author",
       "issues",
       "createdAtUtc",
       "expiresAtUtc",
@@ -433,7 +312,7 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
     !isSourceNoteMetadata(value.sourceNote) ||
     !Array.isArray(value.sourceImages) ||
     !value.sourceImages.every(isSourceImageMetadata) ||
-    !isRepositoryFingerprint(value.repositoryFingerprint) ||
+    !isTargetFolderSnapshot(value.targetFolderSnapshot) ||
     !isApprovalFingerprint(value.approvalFingerprint)
   )
     return false;
@@ -459,8 +338,8 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
       approvalFingerprint.dependencySnapshotSha256 ||
     !sameValue(sourceImageFingerprints, approvalFingerprint.sourceImages) ||
     !sameValue(
-      value.repositoryFingerprint,
-      approvalFingerprint.repositoryFingerprint,
+      value.targetFolderSnapshot,
+      approvalFingerprint.targetFolderSnapshot,
     )
   )
     return false;
@@ -470,8 +349,7 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
     !Object.entries(value.blobs).every(
       ([recordKey, output]) =>
         isSealedOutput(output) && recordKey === output.contentSha256,
-    ) ||
-    !isSealedOutput(value.commitMessage)
+    )
   )
     return false;
   if (
@@ -483,14 +361,12 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
 
   const blobs = value.blobs as Record<string, SealedOutput>;
   const generatedMdx = value.generatedMdx as SealedOutput;
-  const commitMessage = value.commitMessage as SealedOutput;
   const matchesBlob = (sealedOutput: SealedOutput): boolean => {
     const blob = blobs[sealedOutput.contentSha256];
     return blob !== undefined && sameValue(blob, sealedOutput);
   };
   if (
     !matchesBlob(generatedMdx) ||
-    !matchesBlob(commitMessage) ||
     !value.actions.every((action) => matchesBlob(action.sealedOutput))
   )
     return false;
@@ -498,11 +374,7 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
   const actionOutputHashes = new Set(
     value.actions.map((action) => action.sealedOutput.contentSha256),
   );
-  const expectedActionOutputHashes = new Set(
-    Object.keys(blobs).filter(
-      (contentSha256) => contentSha256 !== commitMessage.contentSha256,
-    ),
-  );
+  const expectedActionOutputHashes = new Set(Object.keys(blobs));
   if (
     !actionOutputHashes.has(generatedMdx.contentSha256) ||
     actionOutputHashes.size !== expectedActionOutputHashes.size ||
@@ -518,36 +390,26 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
   if (!sameValue(orderedBlobOutputs, value.approvalFingerprint.sealedOutputs))
     return false;
 
-  const repositoryTargets = new Map(
-    value.repositoryFingerprint.targets.map((target) => [
-      target.normalizedPath,
+  const snapshotTargets = new Map(
+    value.targetFolderSnapshot.targets.map((target) => [
+      target.relativePath,
       target,
     ]),
   );
   const actionTargetPaths = new Set<string>();
-  if (repositoryTargets.size !== value.actions.length) return false;
+  if (snapshotTargets.size !== value.actions.length) return false;
   for (const action of value.actions) {
-    const target = repositoryTargets.get(action.targetPath);
+    const target = snapshotTargets.get(action.targetPath);
     if (
       actionTargetPaths.has(action.targetPath) ||
       target === undefined ||
-      !sameValue(target.approvedPriorTarget, action.approvedPriorTarget) ||
-      (action.approvedPriorTarget.state === "file"
-        ? action.expectedGitMode !== action.approvedPriorTarget.gitMode
-        : action.expectedGitMode !== "100644")
+      !sameValue(target.priorState, action.approvedPriorTarget)
     )
       return false;
     actionTargetPaths.add(action.targetPath);
   }
 
   if (!Array.isArray(value.issues) || !value.issues.every(isWarningIssue))
-    return false;
-  if (
-    !exactObject(value.author, ["name", "email"]) ||
-    !isNonemptyString(value.author.name) ||
-    !isNonemptyString(value.author.email) ||
-    !sameValue(value.author, value.repositoryFingerprint.canonicalCommitAuthor)
-  )
     return false;
   return (
     isIsoUtc(value.createdAtUtc) &&

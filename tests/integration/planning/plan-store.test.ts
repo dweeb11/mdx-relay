@@ -18,11 +18,10 @@ import { canonicalizeJcs } from "../../../src/canonical";
 import { sha256OfBytes, sha256OfUtf8 } from "../../../src/canonical/hash";
 import type {
   ApprovedPriorTarget,
+  TargetSnapshotEntry,
   CanonicalDependencySnapshot,
   GenerationToken,
   PlanId,
-  RepositoryFingerprint,
-  RepositoryTargetFingerprint,
   Sha256Digest,
   ValidatedPortableProfileSnapshot,
 } from "../../../src/contracts/export-plan";
@@ -60,7 +59,6 @@ import {
 import { DPW_MIND_NET_V1 } from "../../../src/profiles/builtins/dpw-mind-net-v1";
 
 const utf8 = (value: string) => new TextEncoder().encode(value);
-const digest = (value: string) => sha256OfBytes(utf8(value));
 
 const PROFILE_SNAPSHOT = JSON.stringify(DPW_MIND_NET_V1);
 const DEPENDENCY_SNAPSHOT = '{"images":["assets/a.png"]}';
@@ -82,73 +80,22 @@ const sourceBytes = (): PlanSourceBytes => ({
 /** Comfortably longer than one whole publication against a temporary root. */
 const CONCURRENT_PUBLISH_BUDGET_MS = 1_000;
 
-const repositoryState = (): Omit<RepositoryFingerprint, "targets"> => ({
-  realPaths: {
-    repositoryRoot: "/repo",
-    gitDirectory: "/repo/.git",
-    gitCommonDirectory: "/repo/.git",
-  },
-  supportedForm: {
-    isBareRepository: false,
-    configuredRootMatchesTopLevel: true,
-    gitDirectoryMatchesCommonDirectory: true,
-    isLinkedWorktree: false,
-    coreSparseCheckout: false,
-    extensionsWorktreeConfig: false,
-    worktreeSparseCheckout: false,
-    hasPlannedPathSubmoduleBoundary: false,
-    hasNestedRepositoryBoundary: false,
-    hasStorageOverlap: false,
-    effectiveFetchUrlCount: 1,
-    effectivePushUrlCount: 1,
-  },
-  filesystemCaseSensitivity: "sensitive",
-  branch: {
-    currentBranch: "main",
-    configuredBranch: "main",
-    upstreamRemote: "origin",
-    upstreamMergeRef: "refs/heads/main",
-  },
-  oids: {
-    head: "a".repeat(40),
-    localUpstream: "a".repeat(40),
-    pushDestinationTip: "a".repeat(40),
-  },
-  remotes: {
-    fetch: {
-      sha256: digest("fetch"),
-      redactedDisplay: "https://host/repo.git",
-    },
-    push: { sha256: digest("push"), redactedDisplay: "https://host/repo.git" },
-  },
-  stateHashes: {
-    porcelainStatusSha256: digest("status"),
-    indexSha256: digest("index"),
-    relevantConfigSha256: digest("config"),
-    plannedPathAttributesSha256: digest("attributes"),
-  },
-  git: { executableRealPath: "/usr/bin/git", version: "git version 2.50.1" },
-  canonicalCommitAuthor: {
-    name: "Example Author",
-    email: "author@example.test",
-  },
-});
+const TARGET_ROOT = "/repo/target";
+const CASE_SENSITIVITY = "sensitive" as const;
 
 const targetsWith = (
   overrides: Readonly<Record<string, ApprovedPriorTarget>> = {},
-): readonly RepositoryTargetFingerprint[] =>
+): readonly TargetSnapshotEntry[] =>
   ["content/posts/example.mdx", "public/posts/example/img-1.webp"].map(
-    (normalizedPath) => ({
-      normalizedPath,
-      symlinkStatus: "not-symlink" as const,
-      approvedPriorTarget: overrides[normalizedPath] ?? { state: "absent" },
+    (relativePath) => ({
+      relativePath,
+      priorState: overrides[relativePath] ?? { state: "absent" },
     }),
   );
 
 const buildInput = (
   overrides: Partial<ExportPlanBuildInput> = {},
 ): ExportPlanBuildInput => {
-  const repository = repositoryState();
   const targets = overrides.priorTargets ?? targetsWith();
   return {
     generationToken: "generation-1" as GenerationToken,
@@ -175,11 +122,11 @@ const buildInput = (
     ],
     sourceBytes: sourceBytes(),
     documentSlug: "example",
-    documentTitle: "Example",
     generatedMdxBytes: MDX_BYTES,
     transformedImages: [{ sourceId: "image-a", bytes: IMAGE_BYTES }],
     imageEmbeds: [{ sourceId: "image-a", assetFileName: "img-1.webp" }],
-    repository,
+    targetRootRealPath: TARGET_ROOT,
+    caseSensitivity: CASE_SENSITIVITY,
     priorTargets: targets,
     warnings: [createIssue(ISSUE_CODES.imageAltTextMissing, { count: 1 })],
     finalCapture: {
@@ -196,7 +143,8 @@ const buildInput = (
           contentSha256: sha256OfBytes(SOURCE_A_BYTES),
         },
       ],
-      repository,
+      targetRootRealPath: TARGET_ROOT,
+      caseSensitivity: CASE_SENSITIVITY,
       targets,
     },
     createdAtUtc: CREATED_AT,
@@ -218,14 +166,12 @@ const sealedPlan = (
 const unchangedPlan = (): SealedExportPlanEnvelope => {
   const targets = targetsWith({
     "content/posts/example.mdx": {
-      state: "file",
+      state: "regularFile",
       contentSha256: sha256OfBytes(MDX_BYTES),
-      gitMode: "100644",
     },
     "public/posts/example/img-1.webp": {
-      state: "file",
+      state: "regularFile",
       contentSha256: sha256OfBytes(IMAGE_BYTES),
-      gitMode: "100644",
     },
   });
   return sealedPlan({
@@ -391,7 +337,9 @@ describe("private plan storage", () => {
     const reloaded = await loadActivePlan(deps);
     expect(reloaded.ok && reloaded.value.planId).toBe(first.planId);
 
-    const second = sealedPlan({ documentTitle: "Second" });
+    const second = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Second\n---\n"),
+    });
     expect(second.planId).not.toBe(first.planId);
     await publishSealedPlan(deps, second);
     const repinned = await loadActivePlan(deps);
@@ -457,7 +405,9 @@ describe("private plan storage", () => {
     const first = sealedPlan({
       generationToken: "generation-1" as GenerationToken,
     });
-    const other = sealedPlan({ documentTitle: "Other" });
+    const other = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Other\n---\n"),
+    });
     const second = sealedPlan({
       generationToken: "generation-2" as GenerationToken,
     });
@@ -577,7 +527,9 @@ describe("private plan storage", () => {
     const approval = await readPlanApproval(deps, envelope.planId);
     expect(approval.ok && approval.value).toBe(envelope.planId);
 
-    const later = sealedPlan({ documentTitle: "Later" });
+    const later = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Later\n---\n"),
+    });
     await publishSealedPlan(deps, later);
     expect(
       await failureCode(
@@ -751,7 +703,9 @@ describe("private plan storage", () => {
       generationToken: "generation-1" as GenerationToken,
     });
     await publishSealedPlan(deps, first);
-    const other = sealedPlan({ documentTitle: "Other" });
+    const other = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Other\n---\n"),
+    });
     await publishSealedPlan(deps, other);
 
     const blobName = [...first.blobBytes.keys()].sort()[0]!;
@@ -799,7 +753,9 @@ describe("private plan storage", () => {
       generationToken: "generation-1" as GenerationToken,
     });
     expect((await publishSealedPlan(deps, first)).ok).toBe(true);
-    const other = sealedPlan({ documentTitle: "Other" });
+    const other = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Other\n---\n"),
+    });
     expect((await publishSealedPlan(deps, other)).ok).toBe(true);
     const documentPath = planDocumentOf(first.planId);
     const original = new Uint8Array(await readFile(documentPath));
@@ -1023,7 +979,9 @@ describe("private plan storage", () => {
   it("keeps the previously published plan when a later publication fails", async () => {
     const first = sealedPlan();
     await publishSealedPlan(deps, first);
-    const second = sealedPlan({ documentTitle: "Second" });
+    const second = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Second\n---\n"),
+    });
     const faulted = withDeps({
       fileSystem: injectFault(deps.fileSystem, (operation, entryPath) => {
         if (operation === "rename" && entryPath.includes(".staging-"))
@@ -1044,7 +1002,9 @@ describe("private plan storage", () => {
   it("removes an unpinnable publication and restores the pin that was there", async () => {
     const first = sealedPlan();
     await publishSealedPlan(deps, first);
-    const second = sealedPlan({ documentTitle: "Second" });
+    const second = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Second\n---\n"),
+    });
     const activePath = join(root, "active-plan.json");
     const activeTemporary = `${activePath}.tmp`;
 
@@ -1114,7 +1074,9 @@ describe("private plan storage", () => {
   it("keeps an already valid plan when an idempotent re-pin fails", async () => {
     const envelope = sealedPlan();
     await publishSealedPlan(deps, envelope);
-    const other = sealedPlan({ documentTitle: "Other" });
+    const other = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Other\n---\n"),
+    });
     await publishSealedPlan(deps, other);
 
     const activeTemporary = `${join(root, "active-plan.json")}.tmp`;
@@ -1230,7 +1192,9 @@ describe("private plan storage", () => {
     expect((await readPlanApproval(deps, envelope.planId)).ok).toBe(true);
 
     // An approval is authority over reviewed bytes, so the bytes are reread.
-    const later = sealedPlan({ documentTitle: "Later" });
+    const later = sealedPlan({
+      generatedMdxBytes: utf8("---\ntitle: Later\n---\n"),
+    });
     await publishSealedPlan(deps, later);
     expect(
       await failureCode(
@@ -1265,7 +1229,9 @@ describe("private plan storage", () => {
 
       const first = sealedPlan();
       expect((await publishSealedPlan(deps, first)).ok, spelling).toBe(true);
-      const second = sealedPlan({ documentTitle: "Second" });
+      const second = sealedPlan({
+        generatedMdxBytes: utf8("---\ntitle: Second\n---\n"),
+      });
 
       const activePath = join(root, "active-plan.json");
       const approvalTemporary = `${join(root, "approvals", `${first.planId}.json`)}.tmp`;

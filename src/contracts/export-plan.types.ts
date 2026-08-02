@@ -43,20 +43,42 @@ export interface SealedOutput {
   readonly byteLength: number;
   readonly contentSha256: Sha256Digest;
 }
-export type GitFileMode = "100644" | "100755";
-export type ApprovedPriorTarget =
+
+/**
+ * Prior state of one approved target path beneath the configured target root.
+ * Symlink, containment, and file-type safety are rechecked live and are never
+ * cached as trust flags here.
+ */
+export type TargetPriorState =
   | Readonly<{ state: "absent" }>
   | Readonly<{
-      state: "file";
+      state: "regularFile";
       contentSha256: Sha256Digest;
-      gitMode: GitFileMode;
     }>;
+
+/** Action-coupled name for the sealed prior state of one write target. */
+export type ApprovedPriorTarget = TargetPriorState;
+
+export interface TargetSnapshotEntry {
+  /** Normalized target-root-relative path; targets are ordered by this field. */
+  readonly relativePath: string;
+  readonly priorState: TargetPriorState;
+}
+
+/**
+ * Bounded local destination state captured for approval and rechecked before
+ * any write. Ready plans include one entry per create/update action; no-change
+ * plans carry an empty target list.
+ */
+export interface TargetFolderSnapshot {
+  readonly targetRootRealPath: string;
+  readonly caseSensitivity: "sensitive" | "insensitive";
+  readonly targets: readonly TargetSnapshotEntry[];
+}
 
 interface ExportActionFields {
   readonly documentOrder: number;
   readonly targetPath: string;
-  /** Updates must preserve the approved prior mode; creates seal "100644". */
-  readonly expectedGitMode: GitFileMode;
   readonly sealedOutput: SealedOutput;
   readonly sourceOccurrence: number;
 }
@@ -71,89 +93,11 @@ export type ExportAction =
       ExportActionFields & {
         kind: "update";
         approvedPriorTarget: Readonly<{
-          state: "file";
+          state: "regularFile";
           contentSha256: Sha256Digest;
-          gitMode: GitFileMode;
         }>;
       }
     >;
-
-export interface CommitAuthorSnapshot {
-  readonly name: string;
-  readonly email: string;
-}
-
-export interface RepositoryRealPaths {
-  readonly repositoryRoot: string;
-  readonly gitDirectory: string;
-  readonly gitCommonDirectory: string;
-}
-
-/** Exact successful preflight outcomes required for a ready plan. */
-export interface SupportedRepositoryFormChecks {
-  readonly isBareRepository: false;
-  readonly configuredRootMatchesTopLevel: true;
-  readonly gitDirectoryMatchesCommonDirectory: true;
-  readonly isLinkedWorktree: false;
-  readonly coreSparseCheckout: false;
-  readonly extensionsWorktreeConfig: false;
-  readonly worktreeSparseCheckout: false;
-  readonly hasPlannedPathSubmoduleBoundary: false;
-  readonly hasNestedRepositoryBoundary: false;
-  readonly hasStorageOverlap: false;
-  readonly effectiveFetchUrlCount: 1;
-  readonly effectivePushUrlCount: 1;
-}
-
-export interface RepositoryBranchFingerprint {
-  readonly currentBranch: string;
-  readonly configuredBranch: string;
-  readonly upstreamRemote: string;
-  readonly upstreamMergeRef: string;
-}
-export interface RepositoryOidFingerprint {
-  readonly head: string;
-  readonly localUpstream: string;
-  readonly pushDestinationTip: string;
-}
-export interface RedactedRemoteFingerprint {
-  readonly sha256: Sha256Digest;
-  readonly redactedDisplay: string;
-}
-export interface RepositoryStateHashes {
-  readonly porcelainStatusSha256: Sha256Digest;
-  readonly indexSha256: Sha256Digest;
-  readonly relevantConfigSha256: Sha256Digest;
-  readonly plannedPathAttributesSha256: Sha256Digest;
-}
-export interface GitRuntimeFingerprint {
-  readonly executableRealPath: string;
-  readonly version: string;
-}
-export interface RepositoryTargetFingerprint {
-  /** Normalized repository-relative path; targets are ordered by this field. */
-  readonly normalizedPath: string;
-  /** Ready plans can only seal targets proven not to be symlinks. */
-  readonly symlinkStatus: "not-symlink";
-  readonly approvedPriorTarget: ApprovedPriorTarget;
-}
-
-/** Structured repository state captured for approval and rechecked at export. */
-export interface RepositoryFingerprint {
-  readonly realPaths: RepositoryRealPaths;
-  readonly supportedForm: SupportedRepositoryFormChecks;
-  readonly filesystemCaseSensitivity: "sensitive" | "insensitive";
-  readonly branch: RepositoryBranchFingerprint;
-  readonly oids: RepositoryOidFingerprint;
-  readonly remotes: Readonly<{
-    fetch: RedactedRemoteFingerprint;
-    push: RedactedRemoteFingerprint;
-  }>;
-  readonly stateHashes: RepositoryStateHashes;
-  readonly git: GitRuntimeFingerprint;
-  readonly canonicalCommitAuthor: CommitAuthorSnapshot;
-  readonly targets: readonly RepositoryTargetFingerprint[];
-}
 
 export interface ApprovalSourceNoteFingerprint {
   readonly byteLength: number;
@@ -180,7 +124,7 @@ export interface ApprovalFingerprint {
   readonly dependencySnapshotSha256: Sha256Digest;
   readonly sourceImages: readonly ApprovalSourceImageFingerprint[];
   readonly sealedOutputs: readonly ApprovalSealedOutputFingerprint[];
-  readonly repositoryFingerprint: RepositoryFingerprint;
+  readonly targetFolderSnapshot: TargetFolderSnapshot;
 }
 
 export type ExportPlanState = "ready" | "no-changes";
@@ -193,13 +137,11 @@ interface SealedExportPlanFields extends PlanIdentity {
   readonly dependencySnapshot: CanonicalDependencySnapshot;
   readonly dependencySnapshotSha256: Sha256Digest;
   readonly sourceImages: readonly SourceImageMetadata[];
-  readonly repositoryFingerprint: RepositoryFingerprint;
+  readonly targetFolderSnapshot: TargetFolderSnapshot;
   readonly approvalFingerprint: ApprovalFingerprint;
   readonly generatedMdx: SealedOutput;
   /** Content-addressed outputs; each record key must equal output contentSha256. */
   readonly blobs: Readonly<Record<Sha256Digest, SealedOutput>>;
-  readonly commitMessage: SealedOutput;
-  readonly author: CommitAuthorSnapshot;
   readonly createdAtUtc: string;
   readonly expiresAtUtc: string;
 }
@@ -230,18 +172,18 @@ export interface BlockedPreviewState {
 }
 
 /**
- * Nominal authority produced by the future T4 canonical plan verifier. Before
- * branding, that verifier MUST: canonicalize and recompute profile/dependency
- * hashes; recompute the source-note and source-image content hashes; recompute
- * every transformed and sealed-output hash and byte length; verify
- * action-to-blob equality and every blob record key/path; require the generated
- * MDX, every unique image/blob output, and commit message exactly once in the
- * ordered approvalFingerprint.sealedOutputs; require every duplicated profile,
- * source-note, dependency, source-image, sealed-output, and repository field to
- * equal approvalFingerprint; couple action targets/prior states to ordered
- * repository targets; reject expired plans and blocker-severity issues; and
- * recompute planId from the RFC 8785 identity manifest. Preview, approval, and
- * execution accept only this brand. T0 defines but does not implement the sealer.
+ * Nominal authority produced by the canonical plan verifier. Before branding,
+ * that verifier MUST: canonicalize and recompute profile/dependency hashes;
+ * recompute the source-note and source-image content hashes; recompute every
+ * transformed and sealed-output hash and byte length; verify action-to-blob
+ * equality and every blob record key/path; require the generated MDX and every
+ * unique image/blob output exactly once in the ordered
+ * approvalFingerprint.sealedOutputs; require every duplicated profile,
+ * source-note, dependency, source-image, sealed-output, and target-folder
+ * field to equal approvalFingerprint; couple action targets/prior states to
+ * ordered target-folder snapshot entries; reject expired plans and
+ * blocker-severity issues; and recompute planId from the RFC 8785 identity
+ * manifest. Preview, approval, and execution accept only this brand.
  */
 declare const verifiedReadyExportPlanBrand: unique symbol;
 export type VerifiedReadyExportPlan = ReadyExportPlan & {
