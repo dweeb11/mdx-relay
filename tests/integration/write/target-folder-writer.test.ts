@@ -1469,6 +1469,22 @@ describe("approved target-folder writes", () => {
       "See the mirror at see/example.test:repo.git?token=secret today.",
     ],
     [
+      "a single-label host whose path names a repository",
+      "Mirror: localhost:repo.git?token=secret",
+    ],
+    [
+      "the same single-label shape with a fragment instead of a query",
+      "Mirror: localhost:repo.git#token",
+    ],
+    [
+      "localhost with an owner/repo path",
+      "Mirror: localhost:owner/repo?token=secret",
+    ],
+    [
+      "a single-label remote introduced by a slash",
+      "See the mirror at see/localhost:repo.git?token=secret today.",
+    ],
+    [
       "a malformed supported-scheme URL written with backslashes",
       String.raw`Mirror: https:\\writer:token@example.invalid\site.git`,
     ],

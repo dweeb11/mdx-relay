@@ -104,6 +104,48 @@ describe("containsCredentialBearingOutput", () => {
     }
   });
 
+  it("rejects a single-label host whose path is remote-shaped", () => {
+    // A dot in the host label is not the only URL-shaped start the canonical
+    // rule reads: `localhost:repo.git?token=secret` is canonical
+    // credential-bearing output too, and so is an owner/repo path. The shape
+    // can sit on either side of the path colon.
+    for (const output of [
+      "localhost:repo.git?token=secret",
+      "localhost:repo.git#token",
+      "localhost:owner/repo?token=secret",
+      "localhost:owner/repo#token",
+      // Glued to prose and MDX punctuation, including a colon of its own.
+      "Mirror:localhost:repo.git?token=secret",
+      "Mirrors;localhost:repo.git#token",
+      "x,localhost:owner/repo?token=secret",
+      "[mirror](localhost:repo.git?token=secret)",
+      "<img src=localhost:logo.png?token=secret alt=logo />",
+      // And after a slash, which no host label may cross.
+      "/localhost:repo.git?token=secret",
+      "see/localhost:repo.git?token=secret",
+      "a/b/c/localhost:owner/repo#token",
+      // Fail-closed still measures from the candidate's own start.
+      `see/localhost:repo.git${"a".repeat(3000)}?token=secret`,
+    ]) {
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
+    }
+  });
+
+  it("agrees with the canonical rule about the single-label candidate", () => {
+    // The verdict stays the canonical rule's; what this module contributes is
+    // that a single-label host with a remote-shaped path is worth asking about.
+    for (const [prefix, url] of [
+      ["see/", "localhost:repo.git?token=secret"],
+      ["Mirror:", "localhost:owner/repo#token"],
+    ] as const) {
+      expect(isCredentialBearingUrl(url), `canonical: ${url}`).toBe(true);
+      expect(
+        containsCredentialBearingOutput(utf8(prefix + url)),
+        `${prefix}${url}`,
+      ).toBe(true);
+    }
+  });
+
   it("agrees with the canonical rule about the userinfo-free candidate", () => {
     // Again the verdict is the canonical rule's: this module contributes the
     // offset the candidate begins at, not a second grammar for credentials.
@@ -120,14 +162,23 @@ describe("containsCredentialBearingOutput", () => {
   });
 
   it("keeps colon-bearing prose without a URL-shaped host acceptable", () => {
-    // The dotted host label is what separates a scheme-less remote from
-    // arbitrary colon prose, so ordinary text that merely pairs a colon with a
-    // later `?` or `#` stays writable.
+    // Remote shape on one side of the colon is what separates a scheme-less
+    // remote from arbitrary colon prose, so ordinary text that merely pairs a
+    // colon with a later `?` or `#` stays writable: a bare word on each side is
+    // not a remote.
     for (const output of [
       "Note:something? is not a URL.",
       "Question:answer#1 stays prose.",
       "See heading:overview#section for details.",
       "TODO:review? later",
+      "Warning:draft#2 is prose too.",
+      // The shape has to reach the path before the query does; a dot inside
+      // the query itself is not a remote-shaped path.
+      "Note:something?x.y",
+      "TODO:review#1.2",
+      "Version:1.2#notes",
+      "Ratio:16/9?",
+      "Heading:overview/section#part",
       "Clone git@example.test:owner/repo.git to start.",
       "see/git@example.test:owner/repo.git",
       "Ask alice@example.test about it?",

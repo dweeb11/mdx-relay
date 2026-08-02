@@ -124,12 +124,17 @@ const isSupportedSchemeAt = (text: string, offset: number): boolean => {
  * One scheme-less form needs no `@` at all: the canonical rule reads
  * `host:path?query` and `host:path#fragment` as credential bearing whether or
  * not userinfo precedes the host. Those have neither a scheme nor an `@` to
- * anchor on, so they are anchored on a host label that carries a `.` before the
- * path colon -- narrow on purpose, because the alternative is reading every
- * colon in prose as a remote. `example.test:repo.git?token=secret` is a
- * candidate; `Note:something?` is not, and no wider colon grammar is spelled
- * here. What the anchor decides is where a candidate starts, never whether it
- * bears a credential -- that stays the canonical rule's answer.
+ * anchor on, so they are anchored on remote-shaped structure around the path
+ * colon -- narrow on purpose, because the alternative is reading every colon in
+ * prose as a remote. A dotted host label is unambiguous; among single-label
+ * hosts, only the conventional local-host name `localhost` is unambiguous
+ * enough to recognize without turning compact prose into a remote. So
+ * `example.test:repo.git?token=secret` and
+ * `localhost:repo.git?token=secret` are candidates, while
+ * `Note:something?`, `Version:1.2#notes`, and
+ * `Heading:overview/section#part` are not. What the anchor decides is where a
+ * candidate starts, never whether it bears a credential -- that stays the
+ * canonical rule's answer.
  */
 const scanRun = (
   text: string,
@@ -238,16 +243,29 @@ const scanRun = (
     if (character === ".") labelHasDot = true;
     if (character === ":") {
       colonSinceBoundary = index;
-      // A dotted label immediately ahead of this colon, with a query or a
-      // fragment somewhere past it, is the URL-shaped start of a scheme-less
-      // remote that carries no userinfo. `labelStart` is one past the nearest
-      // preceding `/`, `@`, or `:` -- the three characters the canonical host
-      // class excludes -- so it is exactly where such a host begins.
+      // A label immediately ahead of this colon, with a query or a fragment
+      // somewhere past it, is the URL-shaped start of a scheme-less remote that
+      // carries no userinfo -- provided the host is unambiguous: either dotted,
+      // or the conventional single-label local host. A dotted host begins at
+      // `labelStart`. `localhost` may itself be embedded after punctuation that
+      // is legal elsewhere in a run, so locate that exact label at the colon and
+      // require a non-host character before it.
+      const localhostStart = index - "localhost".length;
+      const localhostBefore =
+        localhostStart > runStart ? text[localhostStart - 1]! : "";
+      const isEmbeddedLocalhost =
+        localhostStart >= runStart &&
+        text.slice(localhostStart, index).toLowerCase() === "localhost" &&
+        (localhostStart === runStart || !/[a-z0-9._-]/iu.test(localhostBefore));
+      const candidateStart = labelHasDot
+        ? labelStart
+        : isEmbeddedLocalhost
+          ? localhostStart
+          : -1;
       if (
-        labelHasDot &&
-        index > labelStart &&
+        candidateStart >= runStart &&
         lastQueryOrFragment > index &&
-        judgeSchemeLess(labelStart) === true
+        judgeSchemeLess(candidateStart) === true
       )
         return true;
       labelStart = index + 1;
