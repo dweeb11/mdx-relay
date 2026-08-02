@@ -207,9 +207,9 @@ const injectFault = (
     fail("readFile", filePath);
     return base.readFile(filePath);
   },
-  makeDirectory: async (directoryPath) => {
-    fail("makeDirectory", directoryPath);
-    return base.makeDirectory(directoryPath);
+  createDirectoryIn: async (parentPath, parentIdentity, name) => {
+    fail("createDirectoryIn", join(parentPath, name));
+    return base.createDirectoryIn(parentPath, parentIdentity, name);
   },
   createTemporary: async (directoryPath, baseName) => {
     fail("createTemporary", join(directoryPath, baseName));
@@ -1069,6 +1069,201 @@ describe("approved target-folder writes", () => {
       expect(await readFile(mdxPath, "utf8")).toBe("keep-mdx");
     },
   );
+
+  it("rejects credential-bearing sealed output before any write action", async () => {
+    const leaking = utf8(
+      "---\ntitle: Example\n---\n\nMirror: https://deploy:s3cr3t-token@example.test/site.git\n",
+    );
+    const envelope = sealedPlan(targetRoot, { generatedMdxBytes: leaking });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.credentialUrl);
+    // The whole invocation fails before the first mutation, so even the
+    // unrelated image action stays unattempted and no directory is created.
+    expect(result.report.unattempted).toEqual([
+      "public/posts/example/img-1.webp",
+    ]);
+    await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(lstat(join(targetRoot, "public"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("writes approved output whose links merely carry query strings", async () => {
+    const linked = utf8(
+      "---\ntitle: Example\n---\n\n[docs](https://example.test/search?q=1#top) alice@example.test\n",
+    );
+    const envelope = sealedPlan(targetRoot, { generatedMdxBytes: linked });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot),
+      deps,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(
+      new Uint8Array(
+        await readFile(join(targetRoot, "content/posts/example.mdx")),
+      ),
+    ).toEqual(linked);
+  });
+
+  it("refuses an update whose target is rewritten just before replacement", async () => {
+    const mdxPath = join(targetRoot, "content/posts/example.mdx");
+    await mkdir(join(targetRoot, "content/posts"), { recursive: true });
+    await writeFile(mdxPath, "keep-mdx");
+    const targets = targetsWith({
+      "content/posts/example.mdx": {
+        state: "regularFile",
+        contentSha256: sha256OfBytes(utf8("keep-mdx")),
+      },
+    });
+    const envelope = sealedPlan(targetRoot, {
+      generatedMdxBytes: UPDATED_MDX_BYTES,
+      priorTargets: targets,
+      finalCapture: { ...buildInput(targetRoot).finalCapture, targets },
+    });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    // The race is injected inside the replacement primitive itself, after every
+    // revalidation the writer can perform and before the bytes are swapped in.
+    let raced = false;
+    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (op !== "rename" || raced || !entryPath.includes(mdxPath)) return;
+      raced = true;
+      writeFileSync(mdxPath, "competing-bytes");
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(raced).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.targetChanged);
+    // The competing bytes are never overwritten and never destroyed.
+    expect(await readFile(mdxPath, "utf8")).toBe("competing-bytes");
+    expect(await readdir(join(targetRoot, "content/posts"))).toEqual([
+      "example.mdx",
+    ]);
+  });
+
+  it("creates no directory through an ancestor swapped before creation", async () => {
+    const outside = join(root, "outside");
+    await mkdir(outside);
+    const content = join(targetRoot, "content");
+    await mkdir(content);
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    let swapped = false;
+    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      // Swap the already-verified `content` ancestor for a link out of the root
+      // at the moment the walk looks past it, before any directory is created.
+      if (op !== "lstat" || swapped || entryPath !== join(content, "posts"))
+        return;
+      swapped = true;
+      rmSync(content, { recursive: true });
+      symlinkSync(outside, content);
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(swapped).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.unsafeTarget);
+    // Nothing at all is created through the swapped ancestor.
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  describe("production directory creation", () => {
+    const fileSystem = createNodeTargetFolderFileSystem();
+
+    const identityOf = async (entryPath: string) => {
+      const stat = await fileSystem.lstat(entryPath);
+      if (stat.kind === "absent") throw new Error(`absent: ${entryPath}`);
+      return stat.identity;
+    };
+
+    it("creates one bound level and reports what it created", async () => {
+      const identity = await identityOf(targetRoot);
+      const first = await fileSystem.createDirectoryIn(
+        targetRoot,
+        identity,
+        "content",
+      );
+      expect(first.kind).toBe("created");
+      const second = await fileSystem.createDirectoryIn(
+        targetRoot,
+        identity,
+        "content",
+      );
+      expect(second.kind).toBe("existing");
+      // Only the requested level, never a whole pathname subtree.
+      expect(await readdir(join(targetRoot, "content"))).toEqual([]);
+    });
+
+    it("refuses a parent that is no longer the bound directory", async () => {
+      const outside = join(root, "outside-parent");
+      await mkdir(outside);
+      const content = join(targetRoot, "content");
+      await mkdir(content);
+      const identity = await identityOf(content);
+      rmSync(content, { recursive: true });
+      symlinkSync(outside, content);
+
+      expect(
+        await fileSystem.createDirectoryIn(content, identity, "posts"),
+      ).toEqual({ kind: "unsafe" });
+      expect(await readdir(outside)).toEqual([]);
+    });
+
+    it("reports a non-directory occupying the level as unsupported", async () => {
+      await writeFile(join(targetRoot, "content"), "not-a-directory");
+      expect(
+        await fileSystem.createDirectoryIn(
+          targetRoot,
+          await identityOf(targetRoot),
+          "content",
+        ),
+      ).toEqual({ kind: "unsupported" });
+    });
+
+    it("reports a symlinked level as unsafe without following it", async () => {
+      const outside = join(root, "outside-level");
+      await mkdir(outside);
+      await symlink(outside, join(targetRoot, "content"));
+      expect(
+        await fileSystem.createDirectoryIn(
+          targetRoot,
+          await identityOf(targetRoot),
+          "content",
+        ),
+      ).toEqual({ kind: "unsafe" });
+    });
+  });
 
   it("persists the sealed bytes even when the caller mutates its buffer", async () => {
     const envelope = sealedPlan(targetRoot);

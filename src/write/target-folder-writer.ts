@@ -12,6 +12,7 @@ import {
   ISSUE_CODES,
   type BlockerIssue,
 } from "../contracts/issues";
+import { containsCredentialBearingOutput } from "./sealed-output-preflight";
 import type {
   ApplyApprovedWritesInput,
   ApplyApprovedWritesResult,
@@ -68,7 +69,8 @@ const issueAt = (
     | typeof ISSUE_CODES.unsupportedTarget
     | typeof ISSUE_CODES.targetChanged
     | typeof ISSUE_CODES.targetWriteFailed
-    | typeof ISSUE_CODES.staleApproval,
+    | typeof ISSUE_CODES.staleApproval
+    | typeof ISSUE_CODES.credentialUrl,
   targetPath: string,
 ): BlockerIssue =>
   createIssue(code, {}, { safePathLabel: targetPath }) as BlockerIssue;
@@ -130,7 +132,12 @@ const identitiesEqual = (
 ): boolean => left.deviceId === right.deviceId && left.inode === right.inode;
 
 type LivePriorStateResult =
-  | { readonly ok: true; readonly prior: TargetPriorState }
+  | {
+      readonly ok: true;
+      readonly prior: TargetPriorState;
+      /** Identity of the entry that produced this state; absent targets have none. */
+      readonly identity?: TargetEntryIdentity;
+    }
   | { readonly ok: false; readonly issue: BlockerIssue };
 
 const isAbsent = async (
@@ -202,6 +209,7 @@ const readLivePriorState = async (
       state: "regularFile",
       contentSha256: deps.hash(bytes),
     },
+    identity: stat.identity,
   };
 };
 
@@ -308,6 +316,58 @@ const bindVerifiedParent = async (
   return { ok: true, identity: stat.identity };
 };
 
+/**
+ * Creates every missing ancestor of an approved target one level at a time,
+ * each level bound to the identity of the parent directory verified immediately
+ * before it. A recursive pathname `mkdir` would follow an ancestor swapped for
+ * a symlink and build the whole subtree outside the configured root before any
+ * later check could see it; here a swapped parent stops the invocation at that
+ * level, with the level this writer created removed again.
+ *
+ * Returns the binding of the directory the target itself will be written into.
+ */
+const ensureVerifiedDirectoryChain = async (
+  deps: TargetFolderWriterDeps,
+  targetRootRealPath: string,
+  relativePath: string,
+): Promise<ParentBinding> => {
+  const segments = relativePath.split("/");
+  let parentPath = targetRootRealPath;
+  let binding = await bindVerifiedParent(deps, parentPath, relativePath);
+  if (!binding.ok) return binding;
+
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const name = segments[index]!;
+    let outcome;
+    try {
+      outcome = await deps.fileSystem.createDirectoryIn(
+        parentPath,
+        binding.identity,
+        name,
+      );
+    } catch {
+      return {
+        ok: false,
+        issue: issueAt(ISSUE_CODES.targetWriteFailed, relativePath),
+      };
+    }
+    if (outcome.kind === "unsafe")
+      return {
+        ok: false,
+        issue: issueAt(ISSUE_CODES.unsafeTarget, relativePath),
+      };
+    if (outcome.kind === "unsupported")
+      return {
+        ok: false,
+        issue: issueAt(ISSUE_CODES.unsupportedTarget, relativePath),
+      };
+    parentPath = join(parentPath, name);
+    binding = { ok: true, identity: outcome.identity };
+  }
+
+  return bindVerifiedParent(deps, parentPath, relativePath, binding.identity);
+};
+
 /** The open temporary file must still be the entry at the path we will rename. */
 const bindOwnedTemporary = async (
   deps: TargetFolderWriterDeps,
@@ -364,9 +424,126 @@ const discardTemporary = async (
 };
 
 /**
+ * Puts a displaced entry back at the target it was moved away from. The restore
+ * is create-only, so a target claimed in the meantime is never overwritten and
+ * the displaced bytes are kept at the owned side path instead of being lost.
+ */
+const restoreDisplaced = async (
+  deps: TargetFolderWriterDeps,
+  sidePath: string,
+  sideIdentity: TargetEntryIdentity,
+  absolutePath: string,
+): Promise<void> => {
+  try {
+    if (!(await deps.fileSystem.linkInto(sidePath, absolutePath))) return;
+  } catch {
+    return;
+  }
+  await deps.fileSystem
+    .removeOwnedTemporary(sidePath, sideIdentity)
+    .catch(() => undefined);
+};
+
+/**
+ * Conditional replacement of an approved update target.
+ *
+ * Node has no compare-and-swap rename, and revalidating the pathname and then
+ * renaming over it leaves the target replaceable in between. So the entry that
+ * occupies the target is first moved aside to a name this invocation owns:
+ * nothing is destroyed by that move, the displaced entry can then be compared
+ * without any other process being able to reach it by name, and the sealed
+ * bytes are put in place with a create-only link. A competing write lands
+ * either before the move -- where the comparison rejects it and puts it back --
+ * or after it, where the create-only link refuses to overwrite it.
+ *
+ * A crash inside the swap leaves the approved prior bytes at the owned side
+ * path rather than at the target; that is the cost of making the replacement
+ * conditional, and it never loses or overwrites content.
+ */
+const swapApprovedUpdate = async (
+  deps: TargetFolderWriterDeps,
+  temporary: OwnedTemporaryFile,
+  absolutePath: string,
+  relativePath: string,
+  approvedPrior: TargetPriorState,
+  revalidatedIdentity: TargetEntryIdentity | undefined,
+): Promise<BlockerIssue | undefined> => {
+  let side: OwnedTemporaryFile;
+  try {
+    side = await deps.fileSystem.createTemporary(
+      dirname(absolutePath),
+      `${basename(absolutePath)}.prior`,
+    );
+    await side.handle.close();
+  } catch {
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+  }
+
+  try {
+    await deps.fileSystem.rename(absolutePath, side.path);
+  } catch {
+    await deps.fileSystem
+      .removeOwnedTemporary(side.path, side.identity)
+      .catch(() => undefined);
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+  }
+
+  // The displaced entry now answers only to a name this invocation owns, so
+  // this comparison cannot be raced the way the pathname check could be.
+  const displaced = await readLivePriorState(deps, side.path, relativePath);
+  if (!displaced.ok) {
+    await restoreDisplaced(deps, side.path, side.identity, absolutePath);
+    await discardTemporary(deps, temporary);
+    return displaced.issue;
+  }
+  const displacedIdentity = displaced.identity;
+  if (
+    !priorStatesEqual(displaced.prior, approvedPrior) ||
+    displacedIdentity === undefined ||
+    revalidatedIdentity === undefined ||
+    !identitiesEqual(displacedIdentity, revalidatedIdentity)
+  ) {
+    await restoreDisplaced(
+      deps,
+      side.path,
+      displacedIdentity ?? side.identity,
+      absolutePath,
+    );
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetChanged, relativePath);
+  }
+
+  let linked;
+  try {
+    linked = await deps.fileSystem.linkInto(temporary.path, absolutePath);
+  } catch {
+    await restoreDisplaced(deps, side.path, displacedIdentity, absolutePath);
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+  }
+  if (!linked) {
+    // Something claimed the free target name during the swap; its bytes stay.
+    await restoreDisplaced(deps, side.path, displacedIdentity, absolutePath);
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetChanged, relativePath);
+  }
+
+  await deps.fileSystem
+    .removeOwnedTemporary(temporary.path, temporary.identity)
+    .catch(() => undefined);
+  await deps.fileSystem
+    .removeOwnedTemporary(side.path, displacedIdentity)
+    .catch(() => undefined);
+  return undefined;
+};
+
+/**
  * Final replacement. The target is revalidated against the approved prior state
- * immediately before it is replaced, and a create action links rather than
- * renames so a target that appeared during staging can never be overwritten.
+ * immediately before it is replaced, and both a create and an update land their
+ * bytes with a create-only link, so a target that appeared or changed during
+ * staging can never be overwritten.
  */
 const replaceApprovedTarget = async (
   deps: TargetFolderWriterDeps,
@@ -407,30 +584,30 @@ const replaceApprovedTarget = async (
       : issueAt(ISSUE_CODES.targetChanged, relativePath);
   }
 
-  try {
-    await deps.fileSystem.rename(temporary.path, absolutePath);
-  } catch {
-    await discardTemporary(deps, temporary);
-    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-  }
-  return undefined;
+  return swapApprovedUpdate(
+    deps,
+    temporary,
+    absolutePath,
+    relativePath,
+    approvedPrior,
+    live.identity,
+  );
 };
 
 const writeOneTarget = async (
   deps: TargetFolderWriterDeps,
+  targetRootRealPath: string,
   absolutePath: string,
   relativePath: string,
   bytes: Uint8Array,
   approvedPrior: TargetPriorState,
 ): Promise<BlockerIssue | undefined> => {
   const parent = dirname(absolutePath);
-  try {
-    await deps.fileSystem.makeDirectory(parent);
-  } catch {
-    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-  }
-
-  const bound = await bindVerifiedParent(deps, parent, relativePath);
+  const bound = await ensureVerifiedDirectoryChain(
+    deps,
+    targetRootRealPath,
+    relativePath,
+  );
   if (!bound.ok) return bound.issue;
 
   let temporary: OwnedTemporaryFile;
@@ -520,6 +697,50 @@ const gateApprovalAuthority = async (
     : mismatch;
 };
 
+type OutputPreflight =
+  | { readonly ok: true; readonly bytes: ReadonlyMap<string, Uint8Array> }
+  | {
+      readonly ok: false;
+      readonly targetPath: string;
+      readonly issue: BlockerIssue;
+    };
+
+/**
+ * Content gate over every sealed output, run once before the first mutation.
+ *
+ * Each action's bytes are copied into writer-owned storage and checked against
+ * the sealed digest here, then inspected for credentials: a digest proves the
+ * bytes are the approved ones, not that they are safe to write, and ADR 0003
+ * requires credentials to be rejected even when they reach the output from
+ * approved source content. One unsafe output fails the whole invocation, so no
+ * approved sibling is written beside a rejected one.
+ */
+const preflightSealedOutputs = (
+  actions: readonly ExportAction[],
+  blobBytes: ReadonlyMap<string, Uint8Array>,
+  hash: (bytes: Uint8Array) => Sha256Digest,
+): OutputPreflight => {
+  const owned = new Map<string, Uint8Array>();
+  for (const action of actions) {
+    const relativePath = action.targetPath;
+    const bytes = materializeSealedBytes(action, blobBytes, hash);
+    if (bytes === undefined)
+      return {
+        ok: false,
+        targetPath: relativePath,
+        issue: issueAt(ISSUE_CODES.targetWriteFailed, relativePath),
+      };
+    if (containsCredentialBearingOutput(bytes))
+      return {
+        ok: false,
+        targetPath: relativePath,
+        issue: issueAt(ISSUE_CODES.credentialUrl, relativePath),
+      };
+    owned.set(action.sealedOutput.planRelativePath, bytes);
+  }
+  return { ok: true, bytes: owned };
+};
+
 const applyOneAction = async (
   deps: TargetFolderWriterDeps,
   action: ExportAction,
@@ -546,12 +767,15 @@ const applyOneAction = async (
   if (!priorStatesEqual(live.prior, action.approvedPriorTarget))
     return issueAt(ISSUE_CODES.targetChanged, relativePath);
 
-  const bytes = materializeSealedBytes(action, blobBytes, deps.hash);
+  // Preflight already copied and digest-checked these bytes; a missing entry
+  // here would mean the action set changed under us mid-invocation.
+  const bytes = blobBytes.get(action.sealedOutput.planRelativePath);
   if (bytes === undefined)
     return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
 
   return writeOneTarget(
     deps,
+    targetRootRealPath,
     absolutePath,
     relativePath,
     bytes,
@@ -625,6 +849,18 @@ export async function applyApprovedWrites(
   const completed: CompletedTargetWrite[] = [];
   const actions = plan.actions;
 
+  // Nothing is touched until every approved output has passed the content gate.
+  const preflight = preflightSealedOutputs(actions, blobBytes, deps.hash);
+  if (!preflight.ok)
+    return failure(
+      [],
+      [{ targetPath: preflight.targetPath, issue: preflight.issue }],
+      actions
+        .map((entry) => entry.targetPath)
+        .filter((targetPath) => targetPath !== preflight.targetPath),
+    );
+  const ownedBytes = preflight.bytes;
+
   for (let index = 0; index < actions.length; index += 1) {
     const action = actions[index]!;
     const remaining = () =>
@@ -632,7 +868,12 @@ export async function applyApprovedWrites(
     const relativePath = action.targetPath;
     let issue: BlockerIssue | undefined;
     try {
-      issue = await applyOneAction(deps, action, targetRootRealPath, blobBytes);
+      issue = await applyOneAction(
+        deps,
+        action,
+        targetRootRealPath,
+        ownedBytes,
+      );
     } catch {
       // No filesystem surprise may escape as a rejection: the caller is owed
       // the completed/failed/unattempted partition in every outcome.

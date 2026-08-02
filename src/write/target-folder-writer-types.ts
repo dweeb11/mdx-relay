@@ -72,6 +72,22 @@ export interface OwnedTemporaryFile {
   readonly handle: TargetFolderWriteHandle;
 }
 
+/**
+ * Result of creating one directory level inside an already-verified parent.
+ * `unsafe` means the level could not be bound beneath the verified root -- the
+ * parent stopped being the directory that was bound, or the entry that resulted
+ * does not resolve to its own contained path -- and any directory this call
+ * created has been removed again. `unsupported` means a non-directory entry
+ * already occupies the level.
+ */
+export type DirectoryCreationOutcome =
+  | {
+      readonly kind: "created" | "existing";
+      readonly identity: TargetEntryIdentity;
+    }
+  | { readonly kind: "unsafe" }
+  | { readonly kind: "unsupported" };
+
 export interface TargetFolderFileSystem {
   /**
    * Resolves the configured target root without trusting a final symlink.
@@ -91,8 +107,18 @@ export interface TargetFolderFileSystem {
    */
   realPath(entryPath: string): Promise<string>;
   readFile(filePath: string): Promise<Uint8Array>;
-  /** Creates the directory and any missing parents. */
-  makeDirectory(directoryPath: string): Promise<void>;
+  /**
+   * Creates exactly one directory level named `name` inside `parentPath`, which
+   * must still be the directory identified by `parentIdentity`. One level at a
+   * time is what keeps creation bound to the verified chain: a recursive
+   * pathname `mkdir` would build a whole subtree through an ancestor swapped
+   * for a symlink before anything could notice.
+   */
+  createDirectoryIn(
+    parentPath: string,
+    parentIdentity: TargetEntryIdentity,
+    name: string,
+  ): Promise<DirectoryCreationOutcome>;
   /**
    * Exclusively creates an empty temporary file under a unique unguessable name
    * inside `directoryPath`. Never opens an existing entry and never follows a

@@ -2,6 +2,7 @@ export type {
   ApplyApprovedWritesInput,
   ApplyApprovedWritesResult,
   CompletedTargetWrite,
+  DirectoryCreationOutcome,
   FailedTargetWrite,
   OwnedTemporaryFile,
   TargetEntryIdentity,
@@ -23,3 +24,4 @@ export {
   createNodeTargetFolderFileSystem,
   writeAllBytes,
 } from "./node-target-folder-fs";
+export { containsCredentialBearingOutput } from "./sealed-output-preflight";

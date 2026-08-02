@@ -9,11 +9,13 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import {
   TARGET_WRITE_TEMPORARY_SUFFIX,
+  type DirectoryCreationOutcome,
   type OwnedTemporaryFile,
   type TargetEntryIdentity,
   type TargetEntryStat,
@@ -77,6 +79,27 @@ export const writeAllBytes = async (
   }
 };
 
+const sameIdentity = (
+  left: TargetEntryIdentity,
+  right: TargetEntryIdentity,
+): boolean => left.deviceId === right.deviceId && left.inode === right.inode;
+
+/**
+ * True while `directoryPath` is still the exact directory that was bound: the
+ * same inode, not a symlink, and still its own real path. Node exposes no
+ * `mkdirat`, so this identity plus real-path pair is the only way to tie a
+ * pathname mutation to the directory that was actually verified.
+ */
+const isBoundDirectory = async (
+  directoryPath: string,
+  identity: TargetEntryIdentity,
+): Promise<boolean> => {
+  const stats = await lstat(directoryPath, { bigint: true });
+  if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
+  if (!sameIdentity(identityOf(stats), identity)) return false;
+  return (await realpath(directoryPath)) === directoryPath;
+};
+
 /**
  * Real Node adapter for disposable target-folder proofs. Uses `lstat` so
  * symlinked roots, parents, and targets are visible as links rather than as
@@ -105,8 +128,45 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
     },
     realPath: (entryPath) => realpath(entryPath),
     readFile: async (filePath) => new Uint8Array(await readFile(filePath)),
-    makeDirectory: async (directoryPath) => {
-      await mkdir(directoryPath, { recursive: true });
+    async createDirectoryIn(
+      parentPath,
+      parentIdentity,
+      name,
+    ): Promise<DirectoryCreationOutcome> {
+      // The parent must still be the bound directory at the moment of the
+      // mutation, not merely at the moment of the earlier segment walk.
+      if (!(await isBoundDirectory(parentPath, parentIdentity)))
+        return { kind: "unsafe" };
+
+      const childPath = join(parentPath, name);
+      let created = false;
+      try {
+        await mkdir(childPath);
+        created = true;
+      } catch (error) {
+        // Only an already-present level is tolerated; every other failure is a
+        // real write failure and must stay visible to the caller.
+        if (errorCode(error) !== "EEXIST") throw error;
+      }
+
+      const childStats = await lstat(childPath, { bigint: true });
+      if (childStats.isSymbolicLink()) return { kind: "unsafe" };
+      if (!childStats.isDirectory()) return { kind: "unsupported" };
+      if (
+        (await realpath(childPath)) !== childPath ||
+        !(await isBoundDirectory(parentPath, parentIdentity))
+      ) {
+        // The level resolved outside its verified parent, so the parent was
+        // swapped across the create. Undo this invocation's own creation --
+        // `rmdir` removes nothing but an empty directory -- and fail closed
+        // before any further level, temporary file, or sealed byte follows it.
+        if (created) await rmdir(childPath).catch(() => undefined);
+        return { kind: "unsafe" };
+      }
+      return {
+        kind: created ? "created" : "existing",
+        identity: identityOf(childStats),
+      };
     },
     async createTemporary(directoryPath, baseName) {
       for (let attempt = 0; attempt < TEMPORARY_NAME_ATTEMPTS; attempt += 1) {
