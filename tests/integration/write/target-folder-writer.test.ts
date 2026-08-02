@@ -1100,9 +1100,34 @@ describe("approved target-folder writes", () => {
     });
   });
 
-  it("writes approved output whose links merely carry query strings", async () => {
+  it("rejects a supported-scheme link carrying a query string", async () => {
+    // The canonical credential rule counts any query or fragment on a
+    // supported-scheme URL as credential-bearing, so this output is refused
+    // before any mutation rather than written.
     const linked = utf8(
       "---\ntitle: Example\n---\n\n[docs](https://example.test/search?q=1#top) alice@example.test\n",
+    );
+    const envelope = sealedPlan(targetRoot, { generatedMdxBytes: linked });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.credentialUrl);
+    await expect(lstat(join(targetRoot, "content"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("writes approved output whose links and addresses are plain", async () => {
+    const linked = utf8(
+      "---\ntitle: Example\n---\n\n[docs](https://example.test/search) alice@example.test\n",
     );
     const envelope = sealedPlan(targetRoot, { generatedMdxBytes: linked });
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
