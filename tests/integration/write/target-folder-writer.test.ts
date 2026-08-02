@@ -1,17 +1,25 @@
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import {
   chmod,
   lstat,
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -38,8 +46,10 @@ import {
   applyApprovedWrites,
   createNodeTargetFolderFileSystem,
   TARGET_WRITE_TEMPORARY_SUFFIX,
+  type ApplyApprovedWritesInput,
   type TargetFolderFileSystem,
   type TargetFolderWriterDeps,
+  type WritableExportPlan,
 } from "../../../src/write";
 
 const utf8 = (value: string) => new TextEncoder().encode(value);
@@ -144,6 +154,27 @@ const sealedPlan = (
   return sealed.value;
 };
 
+/** Only envelopes the writer will accept: verified ready, or no-changes. */
+type WritableEnvelope = Extract<
+  SealedExportPlanEnvelope,
+  { readonly plan: WritableExportPlan }
+>;
+
+/**
+ * Complete mutation-boundary input: the durable approval record, the rendered
+ * transition identity, and an independently recaptured approval fingerprint.
+ */
+const writeInput = (
+  envelope: WritableEnvelope,
+  configuredTargetRoot: string,
+  overrides: Partial<ApplyApprovedWritesInput> = {},
+): ApplyApprovedWritesInput => ({
+  plan: envelope.plan,
+  blobBytes: envelope.blobBytes,
+  configuredTargetRoot,
+  ...overrides,
+});
+
 const injectFault = (
   base: TargetFolderFileSystem,
   fail: (operation: string, entryPath: string) => void,
@@ -156,6 +187,10 @@ const injectFault = (
     fail("lstat", entryPath);
     return base.lstat(entryPath);
   },
+  realPath: async (entryPath) => {
+    fail("realPath", entryPath);
+    return base.realPath(entryPath);
+  },
   readFile: async (filePath) => {
     fail("readFile", filePath);
     return base.readFile(filePath);
@@ -164,24 +199,28 @@ const injectFault = (
     fail("makeDirectory", directoryPath);
     return base.makeDirectory(directoryPath);
   },
-  openForWrite: async (filePath) => {
-    fail("openForWrite", filePath);
-    const handle = await base.openForWrite(filePath);
+  createTemporary: async (directoryPath, baseName) => {
+    fail("createTemporary", join(directoryPath, baseName));
+    const owned = await base.createTemporary(directoryPath, baseName);
     return {
-      write: async (bytes) => {
-        fail("write", filePath);
-        return handle.write(bytes);
-      },
-      sync: async () => {
-        fail("sync", filePath);
-        return handle.sync();
-      },
-      close: async () => {
-        try {
-          fail("close", filePath);
-        } finally {
-          await handle.close().catch(() => undefined);
-        }
+      ...owned,
+      handle: {
+        write: async (bytes) => {
+          fail("write", owned.path);
+          return owned.handle.write(bytes);
+        },
+        identity: () => owned.handle.identity(),
+        sync: async () => {
+          fail("sync", owned.path);
+          return owned.handle.sync();
+        },
+        close: async () => {
+          try {
+            fail("close", owned.path);
+          } finally {
+            await owned.handle.close().catch(() => undefined);
+          }
+        },
       },
     };
   },
@@ -189,9 +228,13 @@ const injectFault = (
     fail("rename", `${fromPath}->${toPath}`);
     return base.rename(fromPath, toPath);
   },
-  removeTemporary: async (entryPath) => {
-    fail("removeTemporary", entryPath);
-    return base.removeTemporary(entryPath);
+  linkInto: async (fromPath, toPath) => {
+    fail("linkInto", `${fromPath}->${toPath}`);
+    return base.linkInto(fromPath, toPath);
+  },
+  removeOwnedTemporary: async (entryPath, identity) => {
+    fail("removeOwnedTemporary", entryPath);
+    return base.removeOwnedTemporary(entryPath, identity);
   },
   listDirectory: async (directoryPath) => {
     fail("listDirectory", directoryPath);
@@ -231,11 +274,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
 
@@ -295,11 +334,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     expect(result.ok).toBe(true);
@@ -338,11 +373,7 @@ describe("approved target-folder writes", () => {
     if (envelope.state !== "no-changes") return;
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     expect(result.ok).toBe(true);
@@ -360,11 +391,9 @@ describe("approved target-folder writes", () => {
     (plan.actions[0] as { targetPath: string }).targetPath = "../escape.mdx";
 
     const result = await applyApprovedWrites(
-      {
+      writeInput(envelope, targetRoot, {
         plan: plan as typeof envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      }),
       deps,
     );
     expect(result.ok).toBe(false);
@@ -374,6 +403,9 @@ describe("approved target-folder writes", () => {
     expect(result.report.unattempted).toContain(
       "public/posts/example/img-1.webp",
     );
+    await expect(lstat(join(root, "escape.mdx"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     await expect(
       lstat(join(targetRoot, "content/posts/example.mdx")),
     ).rejects.toMatchObject({ code: "ENOENT" });
@@ -389,11 +421,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: linked,
-      },
+      writeInput(envelope, linked),
       deps,
     );
     expect(result.ok).toBe(false);
@@ -412,11 +440,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     expect(result.ok).toBe(false);
@@ -436,11 +460,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     expect(result.ok).toBe(false);
@@ -458,11 +478,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     expect(result.ok).toBe(false);
@@ -479,17 +495,10 @@ describe("approved target-folder writes", () => {
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
       throw new Error("expected verified ready plan");
 
-    const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
-      {
-        ...deps,
-        caseSensitivity: "insensitive",
-      },
-    );
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      caseSensitivity: "insensitive",
+    });
     // Sealed plan says sensitive; live deps say insensitive => stale approval.
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -511,11 +520,7 @@ describe("approved target-folder writes", () => {
     )
       throw new Error("expected verified ready plan");
     const collision = await applyApprovedWrites(
-      {
-        plan: insensitiveEnvelope.plan,
-        blobBytes: insensitiveEnvelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(insensitiveEnvelope, targetRoot),
       { ...deps, caseSensitivity: "insensitive" },
     );
     expect(collision.ok).toBe(false);
@@ -547,11 +552,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     expect(result.ok).toBe(false);
@@ -564,7 +565,7 @@ describe("approved target-folder writes", () => {
   });
 
   it.each([
-    ["openForWrite", "openForWrite"],
+    ["createTemporary", "createTemporary"],
     ["write", "write"],
     ["sync", "sync"],
     ["close", "close"],
@@ -608,15 +609,8 @@ describe("approved target-folder writes", () => {
       const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
         if (op !== operation) return;
         if (
-          operation === "rename" &&
+          operation !== "createTemporary" &&
           !entryPath.includes(TARGET_WRITE_TEMPORARY_SUFFIX)
-        )
-          return;
-        if (
-          (operation === "openForWrite" ||
-            operation === "write" ||
-            operation === "close") &&
-          !entryPath.endsWith(TARGET_WRITE_TEMPORARY_SUFFIX)
         )
           return;
         trips += 1;
@@ -624,11 +618,7 @@ describe("approved target-folder writes", () => {
       });
 
       const result = await applyApprovedWrites(
-        {
-          plan: envelope.plan,
-          blobBytes: envelope.blobBytes,
-          configuredTargetRoot: targetRoot,
-        },
+        writeInput(envelope, targetRoot),
         { ...deps, fileSystem: faulty },
       );
       expect(result.ok).toBe(false);
@@ -669,11 +659,7 @@ describe("approved target-folder writes", () => {
       throw new Error("expected verified ready plan");
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     await chmod(join(targetRoot, "content/posts"), 0o755);
@@ -690,22 +676,22 @@ describe("approved target-folder writes", () => {
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
       throw new Error("expected verified ready plan");
 
-    let renames = 0;
+    let replacements = 0;
     const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
-      if (op !== "rename" || !entryPath.includes(TARGET_WRITE_TEMPORARY_SUFFIX))
+      if (
+        op !== "linkInto" ||
+        !entryPath.includes(TARGET_WRITE_TEMPORARY_SUFFIX)
+      )
         return;
-      renames += 1;
-      if (renames === 2) throw new Error("injected second rename failure");
+      replacements += 1;
+      if (replacements === 2)
+        throw new Error("injected second replacement failure");
     });
 
-    const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
-      { ...deps, fileSystem: faulty },
-    );
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.report.completed.map((entry) => entry.targetPath)).toEqual([
@@ -741,11 +727,7 @@ describe("approved target-folder writes", () => {
     void spy;
 
     const result = await applyApprovedWrites(
-      {
-        plan: envelope.plan,
-        blobBytes: envelope.blobBytes,
-        configuredTargetRoot: targetRoot,
-      },
+      writeInput(envelope, targetRoot),
       deps,
     );
     expect(result.ok).toBe(true);
@@ -763,5 +745,269 @@ describe("approved target-folder writes", () => {
     expect(fsSource).not.toMatch(/child_process|spawnSync|execFile/u);
     expect(writerSource).not.toMatch(/GIT_|git executable|git-runner/u);
     expect(fsSource).not.toMatch(/GIT_|git executable|git-runner/u);
+  });
+
+  it("fails closed when an ancestor is swapped for a symlink after the walk", async () => {
+    const outside = join(root, "outside");
+    await mkdir(outside);
+    const posts = join(targetRoot, "content/posts");
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    let swapped = false;
+    const stagedInto: string[] = [];
+    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (op === "write") stagedInto.push(realpathSync(dirname(entryPath)));
+      if (op !== "createTemporary" || swapped || !entryPath.startsWith(posts))
+        return;
+      swapped = true;
+      // Racing swap of an already-verified parent for a link out of the root.
+      rmSync(posts, { recursive: true });
+      symlinkSync(outside, posts);
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(swapped).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.unsafeTarget);
+    expect(result.report.unattempted).toEqual([
+      "public/posts/example/img-1.webp",
+    ]);
+    // Detection lands before staging, so no sealed byte is ever written
+    // through the swapped parent, and nothing is left behind outside the root.
+    expect(stagedInto).toEqual([]);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("never deletes an unrelated file occupying the temporary name", async () => {
+    const posts = join(targetRoot, "content/posts");
+    await mkdir(posts, { recursive: true });
+    const squatted = join(posts, `example.mdx${TARGET_WRITE_TEMPORARY_SUFFIX}`);
+    await writeFile(squatted, "unrelated-user-file");
+
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot),
+      deps,
+    );
+
+    expect(result.ok).toBe(true);
+    // The unapproved squatter survives, and the writer leaves no staging file.
+    expect(await readFile(squatted, "utf8")).toBe("unrelated-user-file");
+    expect((await readdir(posts)).sort()).toEqual(
+      ["example.mdx", `example.mdx${TARGET_WRITE_TEMPORARY_SUFFIX}`].sort(),
+    );
+  });
+
+  it("refuses to overwrite a target that appears while staging a create", async () => {
+    const mdxPath = join(targetRoot, "content/posts/example.mdx");
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (
+        op !== "sync" ||
+        !entryPath.startsWith(`${mdxPath}${TARGET_WRITE_TEMPORARY_SUFFIX}`) ||
+        existsSync(mdxPath)
+      )
+        return;
+      writeFileSync(mdxPath, "competing-bytes");
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.targetChanged);
+    expect(await readFile(mdxPath, "utf8")).toBe("competing-bytes");
+  });
+
+  it("refuses a create whose target is claimed between revalidation and link", async () => {
+    const mdxPath = join(targetRoot, "content/posts/example.mdx");
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (op !== "linkInto" || !entryPath.endsWith(mdxPath)) return;
+      if (!existsSync(mdxPath)) writeFileSync(mdxPath, "claimed-bytes");
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // Replacement is conditional: an unconditional rename would have won here.
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.targetChanged);
+    expect(await readFile(mdxPath, "utf8")).toBe("claimed-bytes");
+  });
+
+  it("refuses to overwrite an update target edited while staging", async () => {
+    const mdxPath = join(targetRoot, "content/posts/example.mdx");
+    await mkdir(join(targetRoot, "content/posts"), { recursive: true });
+    await writeFile(mdxPath, "keep-mdx");
+    const targets = targetsWith({
+      "content/posts/example.mdx": {
+        state: "regularFile",
+        contentSha256: sha256OfBytes(utf8("keep-mdx")),
+      },
+    });
+    const envelope = sealedPlan(targetRoot, {
+      generatedMdxBytes: UPDATED_MDX_BYTES,
+      priorTargets: targets,
+      finalCapture: { ...buildInput(targetRoot).finalCapture, targets },
+    });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    let edited = false;
+    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (
+        op !== "sync" ||
+        edited ||
+        !entryPath.startsWith(`${mdxPath}${TARGET_WRITE_TEMPORARY_SUFFIX}`)
+      )
+        return;
+      edited = true;
+      writeFileSync(mdxPath, "concurrent-edit");
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(edited).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.targetChanged);
+    expect(await readFile(mdxPath, "utf8")).toBe("concurrent-edit");
+  });
+
+  it("rejects a case collision in an ancestor segment, not just the filename", async () => {
+    await mkdir(join(targetRoot, "Content"));
+    const targets = targetsWith();
+    const envelope = sealedPlan(targetRoot, {
+      caseSensitivity: "insensitive",
+      priorTargets: targets,
+      finalCapture: {
+        ...buildInput(targetRoot).finalCapture,
+        caseSensitivity: "insensitive",
+        targets,
+      },
+    });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      caseSensitivity: "insensitive",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.completed).toEqual([]);
+    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.unsafeTarget);
+    expect(await readdir(join(targetRoot, "Content"))).toEqual([]);
+  });
+
+  it.each([
+    ["readFile", "readFile"],
+    ["lstat", "lstat"],
+  ] as const)(
+    "returns a structured failure when the live probe %s fails",
+    async (_label, operation) => {
+      const mdxPath = join(targetRoot, "content/posts/example.mdx");
+      await mkdir(join(targetRoot, "content/posts"), { recursive: true });
+      await writeFile(mdxPath, "keep-mdx");
+      const targets = targetsWith({
+        "content/posts/example.mdx": {
+          state: "regularFile",
+          contentSha256: sha256OfBytes(utf8("keep-mdx")),
+        },
+      });
+      const envelope = sealedPlan(targetRoot, {
+        generatedMdxBytes: UPDATED_MDX_BYTES,
+        priorTargets: targets,
+        finalCapture: { ...buildInput(targetRoot).finalCapture, targets },
+      });
+      if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+        throw new Error("expected verified ready plan");
+
+      const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+        if (op !== operation || entryPath !== mdxPath) return;
+        throw Object.assign(new Error("injected I/O failure"), { code: "EIO" });
+      });
+
+      // The promise resolves with a report; it must never reject.
+      const result = await applyApprovedWrites(
+        writeInput(envelope, targetRoot),
+        { ...deps, fileSystem: faulty },
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.report.completed).toEqual([]);
+      expect(result.report.failed).toEqual([
+        {
+          targetPath: "content/posts/example.mdx",
+          issue: result.report.failed[0]!.issue,
+        },
+      ]);
+      expect(result.report.failed[0]!.issue.code).toBe(
+        ISSUE_CODES.targetWriteFailed,
+      );
+      expect(result.report.unattempted).toEqual([
+        "public/posts/example/img-1.webp",
+      ]);
+      expect(await readFile(mdxPath, "utf8")).toBe("keep-mdx");
+    },
+  );
+
+  it("persists the sealed bytes even when the caller mutates its buffer", async () => {
+    const envelope = sealedPlan(targetRoot);
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+    const mdxAction = envelope.plan.actions[0]!;
+
+    let mutated = false;
+    const faulty = injectFault(deps.fileSystem, (op) => {
+      if (op !== "createTemporary" || mutated) return;
+      mutated = true;
+      // The caller still owns this view and overwrites it mid-flight.
+      envelope.blobBytes.get(mdxAction.sealedOutput.planRelativePath)!.fill(0);
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: faulty,
+    });
+
+    expect(mutated).toBe(true);
+    expect(result.ok).toBe(true);
+    const written = new Uint8Array(
+      await readFile(join(targetRoot, mdxAction.targetPath)),
+    );
+    // The file matches the digest the report claims, not the mutated view.
+    expect(sha256OfBytes(written)).toBe(mdxAction.sealedOutput.contentSha256);
+    expect(written.some((byte) => byte !== 0)).toBe(true);
   });
 });

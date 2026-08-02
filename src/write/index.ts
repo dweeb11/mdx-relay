@@ -3,6 +3,8 @@ export type {
   ApplyApprovedWritesResult,
   CompletedTargetWrite,
   FailedTargetWrite,
+  OwnedTemporaryFile,
+  TargetEntryIdentity,
   TargetEntryKind,
   TargetEntryStat,
   TargetFolderFileSystem,
@@ -17,4 +19,7 @@ export {
   isWritableTargetStat,
   resolveContainedTargetPath,
 } from "./target-folder-writer";
-export { createNodeTargetFolderFileSystem } from "./node-target-folder-fs";
+export {
+  createNodeTargetFolderFileSystem,
+  writeAllBytes,
+} from "./node-target-folder-fs";

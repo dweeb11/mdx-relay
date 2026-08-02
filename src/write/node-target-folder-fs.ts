@@ -1,5 +1,6 @@
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type BigIntStats } from "node:fs";
 import {
+  link,
   lstat,
   mkdir,
   open,
@@ -9,22 +10,71 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
-import type {
-  TargetEntryStat,
-  TargetFolderFileSystem,
-  TargetFolderWriteHandle,
+import {
+  TARGET_WRITE_TEMPORARY_SUFFIX,
+  type OwnedTemporaryFile,
+  type TargetEntryIdentity,
+  type TargetEntryStat,
+  type TargetFolderFileSystem,
+  type TargetFolderWriteHandle,
 } from "./target-folder-writer-types";
 
-const classifyStat = (
-  stats: Awaited<ReturnType<typeof lstat>>,
-): TargetEntryStat => {
+const identityOf = (stats: BigIntStats): TargetEntryIdentity => ({
+  deviceId: stats.dev.toString(),
+  inode: stats.ino.toString(),
+});
+
+const classifyStat = (stats: BigIntStats): TargetEntryStat => {
   const byteLength = Number(stats.size);
-  if (stats.isSymbolicLink()) return { kind: "symlink", byteLength };
-  if (stats.isFile()) return { kind: "regularFile", byteLength };
-  if (stats.isDirectory()) return { kind: "directory", byteLength };
-  return { kind: "other", byteLength };
+  const identity = identityOf(stats);
+  if (stats.isSymbolicLink()) return { kind: "symlink", byteLength, identity };
+  if (stats.isFile()) return { kind: "regularFile", byteLength, identity };
+  if (stats.isDirectory()) return { kind: "directory", byteLength, identity };
+  return { kind: "other", byteLength, identity };
+};
+
+const errorCode = (error: unknown): string | undefined =>
+  typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : undefined;
+
+/** Number of exclusive-create attempts before a unique name is given up on. */
+const TEMPORARY_NAME_ATTEMPTS = 8;
+
+const uniqueTemporaryName = (baseName: string): string =>
+  `${baseName}${TARGET_WRITE_TEMPORARY_SUFFIX}-${globalThis.crypto.randomUUID()}`;
+
+/**
+ * Writes the whole buffer. `FileHandle.write` may persist fewer bytes than
+ * requested, so the caller-visible write only resolves once every sealed byte
+ * has been accepted; a write that makes no progress fails instead of looping.
+ *
+ * Exported for unit proof of the short-write path, which no real local
+ * filesystem reproduces on demand.
+ */
+export const writeAllBytes = async (
+  handle: {
+    write(
+      buffer: Uint8Array,
+      offset: number,
+      length: number,
+    ): Promise<{ bytesWritten: number }>;
+  },
+  bytes: Uint8Array,
+): Promise<void> => {
+  let written = 0;
+  while (written < bytes.byteLength) {
+    const { bytesWritten } = await handle.write(
+      bytes,
+      written,
+      bytes.byteLength - written,
+    );
+    if (bytesWritten <= 0)
+      throw new Error("Target write stalled before all sealed bytes landed.");
+    written += bytesWritten;
+  }
 };
 
 /**
@@ -47,46 +97,76 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
     },
     async lstat(entryPath) {
       try {
-        return classifyStat(await lstat(entryPath));
+        return classifyStat(await lstat(entryPath, { bigint: true }));
       } catch (error) {
-        if (
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          error.code === "ENOENT"
-        )
-          return { kind: "absent" as const };
+        if (errorCode(error) === "ENOENT") return { kind: "absent" as const };
         throw error;
       }
     },
+    realPath: (entryPath) => realpath(entryPath),
     readFile: async (filePath) => new Uint8Array(await readFile(filePath)),
     makeDirectory: async (directoryPath) => {
       await mkdir(directoryPath, { recursive: true });
     },
-    async openForWrite(filePath) {
-      const handle = await open(
-        filePath,
-        fsConstants.O_WRONLY |
-          fsConstants.O_CREAT |
-          fsConstants.O_EXCL |
-          fsConstants.O_NOFOLLOW,
-        0o644,
-      );
-      const wrapped: TargetFolderWriteHandle = {
-        write: async (bytes) => {
-          await handle.write(bytes);
-        },
-        sync: async () => {
-          await handle.sync();
-        },
-        close: async () => {
-          await handle.close();
-        },
-      };
-      return wrapped;
+    async createTemporary(directoryPath, baseName) {
+      for (let attempt = 0; attempt < TEMPORARY_NAME_ATTEMPTS; attempt += 1) {
+        const filePath = join(directoryPath, uniqueTemporaryName(baseName));
+        let handle;
+        try {
+          handle = await open(
+            filePath,
+            fsConstants.O_WRONLY |
+              fsConstants.O_CREAT |
+              fsConstants.O_EXCL |
+              fsConstants.O_NOFOLLOW,
+            0o600,
+          );
+        } catch (error) {
+          // Only a name that is already taken is retried; every other failure
+          // is a real write failure and must stay visible.
+          if (errorCode(error) === "EEXIST") continue;
+          throw error;
+        }
+        const wrapped: TargetFolderWriteHandle = {
+          write: (bytes) => writeAllBytes(handle, bytes),
+          identity: async () => identityOf(await handle.stat({ bigint: true })),
+          sync: () => handle.sync(),
+          close: () => handle.close(),
+        };
+        const owned: OwnedTemporaryFile = {
+          path: filePath,
+          identity: identityOf(await handle.stat({ bigint: true })),
+          handle: wrapped,
+        };
+        return owned;
+      }
+      throw new Error("Could not create a unique temporary target file.");
     },
     rename: (fromPath, toPath) => rename(fromPath, toPath),
-    removeTemporary: async (entryPath) => {
+    async linkInto(fromPath, toPath) {
+      try {
+        await link(fromPath, toPath);
+      } catch (error) {
+        if (errorCode(error) === "EEXIST") return false;
+        throw error;
+      }
+      return true;
+    },
+    async removeOwnedTemporary(entryPath, identity) {
+      let stats;
+      try {
+        stats = await lstat(entryPath, { bigint: true });
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") return;
+        throw error;
+      }
+      // Never unlink a path that is no longer the file this writer created.
+      const current = identityOf(stats);
+      if (
+        current.deviceId !== identity.deviceId ||
+        current.inode !== identity.inode
+      )
+        return;
       await rm(entryPath, { force: true });
     },
     listDirectory: (directoryPath) => readdir(directoryPath),

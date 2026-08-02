@@ -16,6 +16,7 @@ import type { BlockerIssue } from "../contracts/issues";
  * Git and never deletes approved targets.
  */
 
+/** Marker embedded in every temporary name; the name itself is never reused. */
 export const TARGET_WRITE_TEMPORARY_SUFFIX = ".mdx-relay-write-tmp";
 
 export type TargetEntryKind =
@@ -25,16 +26,45 @@ export type TargetEntryKind =
   | "symlink"
   | "other";
 
+/**
+ * Filesystem identity of the entry itself. Node exposes no `openat`/`renameat`,
+ * so device and inode are how a mutation is bound to the exact directory and
+ * file that were verified rather than to a pathname another process can swap
+ * for a symlink between the check and the write.
+ */
+export interface TargetEntryIdentity {
+  readonly deviceId: string;
+  readonly inode: string;
+}
+
 export interface TargetEntryStat {
   readonly kind: Exclude<TargetEntryKind, "absent">;
   readonly byteLength: number;
+  readonly identity: TargetEntryIdentity;
 }
 
 export interface TargetFolderWriteHandle {
+  /**
+   * Writes every byte of the buffer. Short writes are retried until the whole
+   * buffer is persisted, so a completed write never means a truncated file.
+   */
   write(bytes: Uint8Array): Promise<void>;
+  /** Identity of the open file itself, used to bind the handle to its path. */
+  identity(): Promise<TargetEntryIdentity>;
   /** Flushes this temporary file's bytes and metadata to durable storage. */
   sync(): Promise<void>;
   close(): Promise<void>;
+}
+
+/**
+ * A temporary file this invocation exclusively created and therefore owns. Only
+ * this exact path and identity may be cleaned up; a pre-existing unapproved
+ * file at a guessable temporary name is never touched.
+ */
+export interface OwnedTemporaryFile {
+  readonly path: string;
+  readonly identity: TargetEntryIdentity;
+  readonly handle: TargetFolderWriteHandle;
 }
 
 export interface TargetFolderFileSystem {
@@ -50,14 +80,38 @@ export interface TargetFolderFileSystem {
   lstat(
     entryPath: string,
   ): Promise<TargetEntryStat | { readonly kind: "absent" }>;
+  /**
+   * Fully resolved real path of an existing entry. A verified directory whose
+   * real path stops matching its own pathname had an ancestor swapped.
+   */
+  realPath(entryPath: string): Promise<string>;
   readFile(filePath: string): Promise<Uint8Array>;
   /** Creates the directory and any missing parents. */
   makeDirectory(directoryPath: string): Promise<void>;
-  /** Exclusively creates a new temporary file; fails if it already exists. */
-  openForWrite(filePath: string): Promise<TargetFolderWriteHandle>;
+  /**
+   * Exclusively creates an empty temporary file under a unique unguessable name
+   * inside `directoryPath`. Never opens an existing entry and never follows a
+   * final symlink, so the returned file belongs to this invocation alone.
+   */
+  createTemporary(
+    directoryPath: string,
+    baseName: string,
+  ): Promise<OwnedTemporaryFile>;
   rename(fromPath: string, toPath: string): Promise<void>;
-  /** Removes a temporary path; succeeds when the path is already gone. */
-  removeTemporary(entryPath: string): Promise<void>;
+  /**
+   * Hard-links `fromPath` at `toPath` without ever replacing an existing entry.
+   * Resolves `false` when `toPath` already exists, which is how a create action
+   * detects a target that appeared after approval.
+   */
+  linkInto(fromPath: string, toPath: string): Promise<boolean>;
+  /**
+   * Removes an owned temporary path, and only while it is still that exact
+   * entry. Succeeds when the path is already gone.
+   */
+  removeOwnedTemporary(
+    entryPath: string,
+    identity: TargetEntryIdentity,
+  ): Promise<void>;
   listDirectory(directoryPath: string): Promise<readonly string[]>;
 }
 

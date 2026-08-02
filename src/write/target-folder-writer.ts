@@ -1,4 +1,4 @@
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import type {
   ExportAction,
@@ -15,11 +15,12 @@ import type {
   ApplyApprovedWritesResult,
   CompletedTargetWrite,
   FailedTargetWrite,
-  TargetEntryStat,
+  OwnedTemporaryFile,
+  TargetEntryIdentity,
+  TargetEntryKind,
   TargetFolderWriterDeps,
   TargetFolderWriteReport,
 } from "./target-folder-writer-types";
-import { TARGET_WRITE_TEMPORARY_SUFFIX } from "./target-folder-writer-types";
 
 const freezeReport = (
   completed: readonly CompletedTargetWrite[],
@@ -120,15 +121,46 @@ const priorStatesEqual = (
   );
 };
 
+const identitiesEqual = (
+  left: TargetEntryIdentity,
+  right: TargetEntryIdentity,
+): boolean => left.deviceId === right.deviceId && left.inode === right.inode;
+
+type LivePriorStateResult =
+  | { readonly ok: true; readonly prior: TargetPriorState }
+  | { readonly ok: false; readonly issue: BlockerIssue };
+
+const isAbsent = async (
+  deps: TargetFolderWriterDeps,
+  entryPath: string,
+): Promise<boolean> => {
+  try {
+    return (await deps.fileSystem.lstat(entryPath)).kind === "absent";
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Probes the live target. Every probe failure -- a racing unlink between the
+ * stat and the read, a permission change, a hardware error -- becomes a
+ * classified blocker instead of an escaping rejection, so the caller always
+ * receives the completed/failed/unattempted partition.
+ */
 const readLivePriorState = async (
   deps: TargetFolderWriterDeps,
   absolutePath: string,
   relativePath: string,
-): Promise<
-  | { readonly ok: true; readonly prior: TargetPriorState }
-  | { readonly ok: false; readonly issue: BlockerIssue }
-> => {
-  const stat = await deps.fileSystem.lstat(absolutePath);
+): Promise<LivePriorStateResult> => {
+  let stat;
+  try {
+    stat = await deps.fileSystem.lstat(absolutePath);
+  } catch {
+    return {
+      ok: false,
+      issue: issueAt(ISSUE_CODES.targetWriteFailed, relativePath),
+    };
+  }
   if (stat.kind === "absent") return { ok: true, prior: { state: "absent" } };
   if (stat.kind === "symlink")
     return {
@@ -140,7 +172,22 @@ const readLivePriorState = async (
       ok: false,
       issue: issueAt(ISSUE_CODES.unsupportedTarget, relativePath),
     };
-  const bytes = await deps.fileSystem.readFile(absolutePath);
+  let bytes;
+  try {
+    bytes = await deps.fileSystem.readFile(absolutePath);
+  } catch {
+    // A target that vanished between the stat and the read changed under an
+    // approval that assumed it; anything else is an unreadable target.
+    return {
+      ok: false,
+      issue: issueAt(
+        (await isAbsent(deps, absolutePath))
+          ? ISSUE_CODES.targetChanged
+          : ISSUE_CODES.targetWriteFailed,
+        relativePath,
+      ),
+    };
+  }
   if (bytes.byteLength !== stat.byteLength)
     return {
       ok: false,
@@ -155,62 +202,215 @@ const readLivePriorState = async (
   };
 };
 
-const assertAncestorSafety = async (
+const collidesByCase = (
+  entries: readonly string[],
+  segment: string,
+): boolean => {
+  const wanted = segment.toLowerCase();
+  return entries.some(
+    (entry) => entry !== segment && entry.toLowerCase() === wanted,
+  );
+};
+
+/**
+ * Walks every segment of an approved relative path from the verified root.
+ * Each existing ancestor must be a real directory, never a symlink, and on a
+ * case-insensitive volume no segment -- not just the filename -- may differ
+ * only by case from an entry that already exists in its parent.
+ */
+const assertPathSegmentsSafe = async (
   deps: TargetFolderWriterDeps,
   targetRootRealPath: string,
   relativePath: string,
 ): Promise<BlockerIssue | undefined> => {
   const segments = relativePath.split("/");
-  let current = targetRootRealPath;
-  for (let index = 0; index < segments.length - 1; index += 1) {
-    current = join(current, segments[index]!);
-    const stat = await deps.fileSystem.lstat(current);
+  let parent = targetRootRealPath;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    if (deps.caseSensitivity === "insensitive") {
+      let entries: readonly string[];
+      try {
+        entries = await deps.fileSystem.listDirectory(parent);
+      } catch {
+        return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+      }
+      if (collidesByCase(entries, segment))
+        return issueAt(ISSUE_CODES.unsafeTarget, relativePath);
+    }
+    const current = join(parent, segment);
+    let stat;
+    try {
+      stat = await deps.fileSystem.lstat(current);
+    } catch {
+      return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+    }
+    // Nothing below an absent ancestor exists, so nothing below it can collide.
     if (stat.kind === "absent") return undefined;
     if (stat.kind === "symlink")
       return issueAt(ISSUE_CODES.unsafeTarget, relativePath);
+    // The final segment's kind belongs to the prior-state probe.
+    if (index === segments.length - 1) return undefined;
     if (stat.kind !== "directory")
       return issueAt(ISSUE_CODES.unsupportedTarget, relativePath);
+    parent = current;
   }
   return undefined;
 };
 
-const detectCaseCollision = async (
+type ParentBinding =
+  | { readonly ok: true; readonly identity: TargetEntryIdentity }
+  | { readonly ok: false; readonly issue: BlockerIssue };
+
+/**
+ * Binds the mutation to the directory that was verified rather than to its
+ * pathname. Node exposes no `openat`, so the parent's own identity plus a live
+ * real-path equality check are what make an ancestor swapped for a symlink
+ * visible; either mismatch fails closed before any sealed byte is written.
+ */
+const bindVerifiedParent = async (
   deps: TargetFolderWriterDeps,
-  parentDirectory: string,
-  fileName: string,
+  parentPath: string,
+  relativePath: string,
+  expected?: TargetEntryIdentity,
+): Promise<ParentBinding> => {
+  let stat;
+  let realPath;
+  try {
+    stat = await deps.fileSystem.lstat(parentPath);
+    if (stat.kind === "absent" || stat.kind === "symlink")
+      return {
+        ok: false,
+        issue: issueAt(ISSUE_CODES.unsafeTarget, relativePath),
+      };
+    if (stat.kind !== "directory")
+      return {
+        ok: false,
+        issue: issueAt(ISSUE_CODES.unsupportedTarget, relativePath),
+      };
+    realPath = await deps.fileSystem.realPath(parentPath);
+  } catch {
+    return {
+      ok: false,
+      issue: issueAt(ISSUE_CODES.targetWriteFailed, relativePath),
+    };
+  }
+  if (
+    realPath !== parentPath ||
+    (expected !== undefined && !identitiesEqual(stat.identity, expected))
+  )
+    return {
+      ok: false,
+      issue: issueAt(ISSUE_CODES.unsafeTarget, relativePath),
+    };
+  return { ok: true, identity: stat.identity };
+};
+
+/** The open temporary file must still be the entry at the path we will rename. */
+const bindOwnedTemporary = async (
+  deps: TargetFolderWriterDeps,
+  temporary: OwnedTemporaryFile,
   relativePath: string,
 ): Promise<BlockerIssue | undefined> => {
-  if (deps.caseSensitivity === "sensitive") return undefined;
-  let entries: readonly string[];
+  let stat;
+  let openIdentity;
   try {
-    entries = await deps.fileSystem.listDirectory(parentDirectory);
+    stat = await deps.fileSystem.lstat(temporary.path);
+    openIdentity = await temporary.handle.identity();
   } catch {
-    const parentStat = await deps.fileSystem.lstat(parentDirectory);
-    if (parentStat.kind === "absent") return undefined;
     return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
   }
-  const wanted = fileName.toLowerCase();
-  for (const entry of entries) {
-    if (entry === fileName) continue;
-    if (entry.toLowerCase() === wanted)
-      return issueAt(ISSUE_CODES.unsafeTarget, relativePath);
-  }
+  if (
+    stat.kind !== "regularFile" ||
+    !identitiesEqual(stat.identity, temporary.identity) ||
+    !identitiesEqual(openIdentity, temporary.identity)
+  )
+    return issueAt(ISSUE_CODES.unsafeTarget, relativePath);
   return undefined;
 };
 
-const sealedBytesForAction = (
+/**
+ * Copies the sealed bytes into writer-owned storage and validates the digest
+ * over that copy. The caller keeps its own view: hashing what we will actually
+ * persist is what makes a later mutation of the caller's buffer unable to
+ * change the written file behind the reported digest.
+ */
+const materializeSealedBytes = (
   action: ExportAction,
   blobBytes: ReadonlyMap<string, Uint8Array>,
   hash: (bytes: Uint8Array) => Sha256Digest,
 ): Uint8Array | undefined => {
-  const bytes = blobBytes.get(action.sealedOutput.planRelativePath);
+  const shared = blobBytes.get(action.sealedOutput.planRelativePath);
+  if (shared === undefined) return undefined;
+  const owned = new Uint8Array(shared);
   if (
-    bytes === undefined ||
-    bytes.byteLength !== action.sealedOutput.byteLength ||
-    hash(bytes) !== action.sealedOutput.contentSha256
+    owned.byteLength !== action.sealedOutput.byteLength ||
+    hash(owned) !== action.sealedOutput.contentSha256
   )
     return undefined;
-  return bytes;
+  return owned;
+};
+
+const discardTemporary = async (
+  deps: TargetFolderWriterDeps,
+  temporary: OwnedTemporaryFile,
+): Promise<void> => {
+  await temporary.handle.close().catch(() => undefined);
+  await deps.fileSystem
+    .removeOwnedTemporary(temporary.path, temporary.identity)
+    .catch(() => undefined);
+};
+
+/**
+ * Final replacement. The target is revalidated against the approved prior state
+ * immediately before it is replaced, and a create action links rather than
+ * renames so a target that appeared during staging can never be overwritten.
+ */
+const replaceApprovedTarget = async (
+  deps: TargetFolderWriterDeps,
+  temporary: OwnedTemporaryFile,
+  absolutePath: string,
+  relativePath: string,
+  approvedPrior: TargetPriorState,
+): Promise<BlockerIssue | undefined> => {
+  const parent = dirname(absolutePath);
+  const stillBound = await bindVerifiedParent(deps, parent, relativePath);
+  if (!stillBound.ok) {
+    await discardTemporary(deps, temporary);
+    return stillBound.issue;
+  }
+  const live = await readLivePriorState(deps, absolutePath, relativePath);
+  if (!live.ok) {
+    await discardTemporary(deps, temporary);
+    return live.issue;
+  }
+  if (!priorStatesEqual(live.prior, approvedPrior)) {
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetChanged, relativePath);
+  }
+
+  if (approvedPrior.state === "absent") {
+    let linked;
+    try {
+      linked = await deps.fileSystem.linkInto(temporary.path, absolutePath);
+    } catch {
+      await discardTemporary(deps, temporary);
+      return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+    }
+    await deps.fileSystem
+      .removeOwnedTemporary(temporary.path, temporary.identity)
+      .catch(() => undefined);
+    return linked
+      ? undefined
+      : issueAt(ISSUE_CODES.targetChanged, relativePath);
+  }
+
+  try {
+    await deps.fileSystem.rename(temporary.path, absolutePath);
+  } catch {
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+  }
+  return undefined;
 };
 
 const writeOneTarget = async (
@@ -218,53 +418,101 @@ const writeOneTarget = async (
   absolutePath: string,
   relativePath: string,
   bytes: Uint8Array,
+  approvedPrior: TargetPriorState,
 ): Promise<BlockerIssue | undefined> => {
-  const temporaryPath = `${absolutePath}${TARGET_WRITE_TEMPORARY_SUFFIX}`;
-  await deps.fileSystem.removeTemporary(temporaryPath);
   const parent = dirname(absolutePath);
   try {
     await deps.fileSystem.makeDirectory(parent);
   } catch {
     return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
   }
-  let handle;
+
+  const bound = await bindVerifiedParent(deps, parent, relativePath);
+  if (!bound.ok) return bound.issue;
+
+  let temporary: OwnedTemporaryFile;
   try {
-    handle = await deps.fileSystem.openForWrite(temporaryPath);
+    temporary = await deps.fileSystem.createTemporary(
+      parent,
+      basename(absolutePath),
+    );
   } catch {
     return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
   }
+
+  // The temporary is still empty here. An ancestor swapped between the check
+  // above and the create is caught before a single sealed byte exists on disk.
+  const staged = await bindVerifiedParent(
+    deps,
+    parent,
+    relativePath,
+    bound.identity,
+  );
+  if (!staged.ok) {
+    await discardTemporary(deps, temporary);
+    return staged.issue;
+  }
+  const ownership = await bindOwnedTemporary(deps, temporary, relativePath);
+  if (ownership !== undefined) {
+    await discardTemporary(deps, temporary);
+    return ownership;
+  }
+
   try {
-    try {
-      await handle.write(bytes);
-      await handle.sync();
-    } catch {
-      await handle.close().catch(() => undefined);
-      await deps.fileSystem
-        .removeTemporary(temporaryPath)
-        .catch(() => undefined);
-      return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-    }
-    try {
-      await handle.close();
-    } catch {
-      await deps.fileSystem
-        .removeTemporary(temporaryPath)
-        .catch(() => undefined);
-      return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-    }
-    try {
-      await deps.fileSystem.rename(temporaryPath, absolutePath);
-    } catch {
-      await deps.fileSystem
-        .removeTemporary(temporaryPath)
-        .catch(() => undefined);
-      return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-    }
-    return undefined;
+    await temporary.handle.write(bytes);
+    await temporary.handle.sync();
+    await temporary.handle.close();
   } catch {
-    await deps.fileSystem.removeTemporary(temporaryPath).catch(() => undefined);
+    await discardTemporary(deps, temporary);
     return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
   }
+
+  return replaceApprovedTarget(
+    deps,
+    temporary,
+    absolutePath,
+    relativePath,
+    approvedPrior,
+  );
+};
+
+const applyOneAction = async (
+  deps: TargetFolderWriterDeps,
+  action: ExportAction,
+  targetRootRealPath: string,
+  blobBytes: ReadonlyMap<string, Uint8Array>,
+): Promise<BlockerIssue | undefined> => {
+  const relativePath = action.targetPath;
+  const absolutePath = resolveContainedTargetPath(
+    targetRootRealPath,
+    relativePath,
+  );
+  if (absolutePath === undefined)
+    return issueAt(ISSUE_CODES.unsafeTarget, relativePath);
+
+  const segmentIssue = await assertPathSegmentsSafe(
+    deps,
+    targetRootRealPath,
+    relativePath,
+  );
+  if (segmentIssue !== undefined) return segmentIssue;
+
+  const live = await readLivePriorState(deps, absolutePath, relativePath);
+  if (!live.ok) return live.issue;
+  if (!priorStatesEqual(live.prior, action.approvedPriorTarget))
+    return issueAt(ISSUE_CODES.targetChanged, relativePath);
+
+  const bytes = materializeSealedBytes(action, blobBytes, deps.hash);
+  if (bytes === undefined)
+    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+
+  return writeOneTarget(
+    deps,
+    absolutePath,
+    relativePath,
+    bytes,
+    action.approvedPriorTarget,
+  );
 };
 
 /**
@@ -298,7 +546,13 @@ export async function applyApprovedWrites(
     return failure([], [{ targetPath: "", issue }], []);
   }
 
-  const rootStat = await deps.fileSystem.lstat(targetRootRealPath);
+  let rootStat: { readonly kind: TargetEntryKind };
+  try {
+    rootStat = await deps.fileSystem.lstat(targetRootRealPath);
+  } catch {
+    const issue = createIssue(ISSUE_CODES.targetWriteFailed) as BlockerIssue;
+    return failure([], [{ targetPath: "", issue }], []);
+  }
   if (rootStat.kind === "symlink") {
     const issue = createIssue(ISSUE_CODES.unsafeTarget) as BlockerIssue;
     return failure([], [{ targetPath: "", issue }], []);
@@ -324,98 +578,20 @@ export async function applyApprovedWrites(
     const remaining = () =>
       actions.slice(index + 1).map((entry) => entry.targetPath);
     const relativePath = action.targetPath;
-    const absolutePath = resolveContainedTargetPath(
-      targetRootRealPath,
-      relativePath,
-    );
-    if (absolutePath === undefined) {
+    let issue: BlockerIssue | undefined;
+    try {
+      issue = await applyOneAction(deps, action, targetRootRealPath, blobBytes);
+    } catch {
+      // No filesystem surprise may escape as a rejection: the caller is owed
+      // the completed/failed/unattempted partition in every outcome.
+      issue = issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+    }
+    if (issue !== undefined)
       return failure(
         completed,
-        [
-          {
-            targetPath: relativePath,
-            issue: issueAt(ISSUE_CODES.unsafeTarget, relativePath),
-          },
-        ],
+        [{ targetPath: relativePath, issue }],
         remaining(),
       );
-    }
-
-    const ancestorIssue = await assertAncestorSafety(
-      deps,
-      targetRootRealPath,
-      relativePath,
-    );
-    if (ancestorIssue !== undefined) {
-      return failure(
-        completed,
-        [{ targetPath: relativePath, issue: ancestorIssue }],
-        remaining(),
-      );
-    }
-
-    const collisionIssue = await detectCaseCollision(
-      deps,
-      dirname(absolutePath),
-      relativePath.split("/").at(-1)!,
-      relativePath,
-    );
-    if (collisionIssue !== undefined) {
-      return failure(
-        completed,
-        [{ targetPath: relativePath, issue: collisionIssue }],
-        remaining(),
-      );
-    }
-
-    const live = await readLivePriorState(deps, absolutePath, relativePath);
-    if (!live.ok) {
-      return failure(
-        completed,
-        [{ targetPath: relativePath, issue: live.issue }],
-        remaining(),
-      );
-    }
-    if (!priorStatesEqual(live.prior, action.approvedPriorTarget)) {
-      return failure(
-        completed,
-        [
-          {
-            targetPath: relativePath,
-            issue: issueAt(ISSUE_CODES.targetChanged, relativePath),
-          },
-        ],
-        remaining(),
-      );
-    }
-
-    const bytes = sealedBytesForAction(action, blobBytes, deps.hash);
-    if (bytes === undefined) {
-      return failure(
-        completed,
-        [
-          {
-            targetPath: relativePath,
-            issue: issueAt(ISSUE_CODES.targetWriteFailed, relativePath),
-          },
-        ],
-        remaining(),
-      );
-    }
-
-    const writeIssue = await writeOneTarget(
-      deps,
-      absolutePath,
-      relativePath,
-      bytes,
-    );
-    if (writeIssue !== undefined) {
-      return failure(
-        completed,
-        [{ targetPath: relativePath, issue: writeIssue }],
-        remaining(),
-      );
-    }
 
     completed.push(
       Object.freeze({
@@ -431,6 +607,6 @@ export async function applyApprovedWrites(
 }
 
 /** Pure helper exported for unit tests: classify an lstat kind for prior checks. */
-export const isWritableTargetStat = (
-  stat: TargetEntryStat | { readonly kind: "absent" },
-): boolean => stat.kind === "absent" || stat.kind === "regularFile";
+export const isWritableTargetStat = (stat: {
+  readonly kind: TargetEntryKind;
+}): boolean => stat.kind === "absent" || stat.kind === "regularFile";
