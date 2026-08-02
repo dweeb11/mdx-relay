@@ -33,9 +33,9 @@ export type TargetEntryKind =
 
 /**
  * Filesystem identity of the entry itself. Node exposes no `openat`/`renameat`,
- * so device and inode are how a mutation is bound to the exact directory and
- * file that were verified rather than to a pathname another process can swap
- * for a symlink between the check and the write.
+ * so device and inode are how a pathname is checked against the exact directory
+ * or file that was verified. The check makes an ancestor swapped for a symlink
+ * visible; it does not make the following syscall descriptor-relative.
  */
 export interface TargetEntryIdentity {
   readonly deviceId: string;

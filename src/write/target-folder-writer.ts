@@ -132,12 +132,7 @@ const identitiesEqual = (
 ): boolean => left.deviceId === right.deviceId && left.inode === right.inode;
 
 type LivePriorStateResult =
-  | {
-      readonly ok: true;
-      readonly prior: TargetPriorState;
-      /** Identity of the entry that produced this state; absent targets have none. */
-      readonly identity?: TargetEntryIdentity;
-    }
+  | { readonly ok: true; readonly prior: TargetPriorState }
   | { readonly ok: false; readonly issue: BlockerIssue };
 
 const isAbsent = async (
@@ -209,7 +204,6 @@ const readLivePriorState = async (
       state: "regularFile",
       contentSha256: deps.hash(bytes),
     },
-    identity: stat.identity,
   };
 };
 
@@ -273,10 +267,12 @@ type ParentBinding =
   | { readonly ok: false; readonly issue: BlockerIssue };
 
 /**
- * Binds the mutation to the directory that was verified rather than to its
- * pathname. Node exposes no `openat`, so the parent's own identity plus a live
- * real-path equality check are what make an ancestor swapped for a symlink
- * visible; either mismatch fails closed before any sealed byte is written.
+ * Checks that the pathname we are about to mutate through still names the
+ * directory that was verified. Node exposes no `openat`, so this is an identity
+ * and real-path comparison rather than a descriptor-relative operation: it
+ * detects an ancestor that was swapped for a symlink and fails closed before
+ * any sealed byte is written, and it does not close the window between the
+ * comparison and the syscall that follows it.
  */
 const bindVerifiedParent = async (
   deps: TargetFolderWriterDeps,
@@ -318,13 +314,18 @@ const bindVerifiedParent = async (
 
 /**
  * Creates every missing ancestor of an approved target one level at a time,
- * each level bound to the identity of the parent directory verified immediately
+ * each level verified against the identity of the parent checked immediately
  * before it. A recursive pathname `mkdir` would follow an ancestor swapped for
  * a symlink and build the whole subtree outside the configured root before any
  * later check could see it; here a swapped parent stops the invocation at that
  * level, with the level this writer created removed again.
  *
- * Returns the binding of the directory the target itself will be written into.
+ * That is proportionate containment, not atomicity: one level of blast radius
+ * and an empty-only cleanup, verified before and after each `mkdir`. Node has
+ * no `mkdirat`, so a hostile process racing an individual syscall stays outside
+ * V1's threat model per ADR 0003.
+ *
+ * Returns the verified identity of the directory the target will be written into.
  */
 const ensureVerifiedDirectoryChain = async (
   deps: TargetFolderWriterDeps,
@@ -424,126 +425,22 @@ const discardTemporary = async (
 };
 
 /**
- * Puts a displaced entry back at the target it was moved away from. The restore
- * is create-only, so a target claimed in the meantime is never overwritten and
- * the displaced bytes are kept at the owned side path instead of being lost.
- */
-const restoreDisplaced = async (
-  deps: TargetFolderWriterDeps,
-  sidePath: string,
-  sideIdentity: TargetEntryIdentity,
-  absolutePath: string,
-): Promise<void> => {
-  try {
-    if (!(await deps.fileSystem.linkInto(sidePath, absolutePath))) return;
-  } catch {
-    return;
-  }
-  await deps.fileSystem
-    .removeOwnedTemporary(sidePath, sideIdentity)
-    .catch(() => undefined);
-};
-
-/**
- * Conditional replacement of an approved update target.
+ * Final replacement.
  *
- * Node has no compare-and-swap rename, and revalidating the pathname and then
- * renaming over it leaves the target replaceable in between. So the entry that
- * occupies the target is first moved aside to a name this invocation owns:
- * nothing is destroyed by that move, the displaced entry can then be compared
- * without any other process being able to reach it by name, and the sealed
- * bytes are put in place with a create-only link. A competing write lands
- * either before the move -- where the comparison rejects it and puts it back --
- * or after it, where the create-only link refuses to overwrite it.
+ * The verified parent binding and the live prior state are rechecked here,
+ * immediately before the bytes land, so an approval that went stale while the
+ * temporary file was staged fails instead of overwriting. A create then lands
+ * its bytes with a create-only link, which refuses a target that appeared
+ * during staging; an update lands its bytes with a same-directory `rename`,
+ * which replaces the target atomically -- a concurrent reader observes either
+ * the whole prior file or the whole approved file, never a partial write, and
+ * a crash never leaves the target truncated.
  *
- * A crash inside the swap leaves the approved prior bytes at the owned side
- * path rather than at the target; that is the cost of making the replacement
- * conditional, and it never loses or overwrites content.
- */
-const swapApprovedUpdate = async (
-  deps: TargetFolderWriterDeps,
-  temporary: OwnedTemporaryFile,
-  absolutePath: string,
-  relativePath: string,
-  approvedPrior: TargetPriorState,
-  revalidatedIdentity: TargetEntryIdentity | undefined,
-): Promise<BlockerIssue | undefined> => {
-  let side: OwnedTemporaryFile;
-  try {
-    side = await deps.fileSystem.createTemporary(
-      dirname(absolutePath),
-      `${basename(absolutePath)}.prior`,
-    );
-    await side.handle.close();
-  } catch {
-    await discardTemporary(deps, temporary);
-    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-  }
-
-  try {
-    await deps.fileSystem.rename(absolutePath, side.path);
-  } catch {
-    await deps.fileSystem
-      .removeOwnedTemporary(side.path, side.identity)
-      .catch(() => undefined);
-    await discardTemporary(deps, temporary);
-    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-  }
-
-  // The displaced entry now answers only to a name this invocation owns, so
-  // this comparison cannot be raced the way the pathname check could be.
-  const displaced = await readLivePriorState(deps, side.path, relativePath);
-  if (!displaced.ok) {
-    await restoreDisplaced(deps, side.path, side.identity, absolutePath);
-    await discardTemporary(deps, temporary);
-    return displaced.issue;
-  }
-  const displacedIdentity = displaced.identity;
-  if (
-    !priorStatesEqual(displaced.prior, approvedPrior) ||
-    displacedIdentity === undefined ||
-    revalidatedIdentity === undefined ||
-    !identitiesEqual(displacedIdentity, revalidatedIdentity)
-  ) {
-    await restoreDisplaced(
-      deps,
-      side.path,
-      displacedIdentity ?? side.identity,
-      absolutePath,
-    );
-    await discardTemporary(deps, temporary);
-    return issueAt(ISSUE_CODES.targetChanged, relativePath);
-  }
-
-  let linked;
-  try {
-    linked = await deps.fileSystem.linkInto(temporary.path, absolutePath);
-  } catch {
-    await restoreDisplaced(deps, side.path, displacedIdentity, absolutePath);
-    await discardTemporary(deps, temporary);
-    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
-  }
-  if (!linked) {
-    // Something claimed the free target name during the swap; its bytes stay.
-    await restoreDisplaced(deps, side.path, displacedIdentity, absolutePath);
-    await discardTemporary(deps, temporary);
-    return issueAt(ISSUE_CODES.targetChanged, relativePath);
-  }
-
-  await deps.fileSystem
-    .removeOwnedTemporary(temporary.path, temporary.identity)
-    .catch(() => undefined);
-  await deps.fileSystem
-    .removeOwnedTemporary(side.path, displacedIdentity)
-    .catch(() => undefined);
-  return undefined;
-};
-
-/**
- * Final replacement. The target is revalidated against the approved prior state
- * immediately before it is replaced, and both a create and an update land their
- * bytes with a create-only link, so a target that appeared or changed during
- * staging can never be overwritten.
+ * This recheck is proportionate fail-closed revalidation, not a
+ * compare-and-swap. Node offers no conditional rename, so a local process that
+ * changes the pathname inside the window between the recheck and the rename is
+ * not detected. Per ADR 0003 the target folder is not an adversarial
+ * multi-writer boundary; accidental concurrent edits are what this catches.
  */
 const replaceApprovedTarget = async (
   deps: TargetFolderWriterDeps,
@@ -584,14 +481,13 @@ const replaceApprovedTarget = async (
       : issueAt(ISSUE_CODES.targetChanged, relativePath);
   }
 
-  return swapApprovedUpdate(
-    deps,
-    temporary,
-    absolutePath,
-    relativePath,
-    approvedPrior,
-    live.identity,
-  );
+  try {
+    await deps.fileSystem.rename(temporary.path, absolutePath);
+  } catch {
+    await discardTemporary(deps, temporary);
+    return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
+  }
+  return undefined;
 };
 
 const writeOneTarget = async (

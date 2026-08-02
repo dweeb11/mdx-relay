@@ -49,6 +49,54 @@ The plugin still must:
 
 These rules protect the actual irreversible surface without rebuilding a deployment platform around it.
 
+## Threat and concurrency boundary
+
+MDX Relay is a Node-only desktop plugin. Node's filesystem API is addressed by
+pathname: it exposes no `openat`, `mkdirat`, `renameat`, or conditional rename,
+and the alternatives that would supply them — a native addon, a helper
+subprocess, `process.chdir`, or any other global-process-state trick — are
+rejected as disproportionate for a local conversion tool. That constraint sets
+the boundary below.
+
+**Protected against:**
+
+- path traversal out of the configured target root;
+- symlinked roots, symlinked ancestors, and symlinked targets;
+- unsupported target types and ambiguous case collisions in any segment;
+- stale approval state observed during the final revalidation immediately before
+  each replacement;
+- accidental concurrent changes to an approved target between planning and
+  writing; and
+- mutation of any file that is not an approved target.
+
+**Not protected against:** a hostile local process that races individual
+filesystem syscalls. Because Node's pathname APIs cannot make ancestor directory
+creation or check-then-rename descriptor-relative or conditional, a sufficiently
+precise local attacker can change what a pathname names inside the window
+between a check and the syscall that follows it. The configured target folder is
+a user-owned local directory, not an adversarial multi-writer boundary, so this
+is accepted and outside V1's threat model. A user who does not trust other
+processes on their own machine with that directory should not configure it as a
+target root.
+
+**What the writer therefore guarantees:**
+
+- Replacement stays atomic at the file level. Each approved output is written to
+  a same-directory temporary file, synced, closed, and renamed over its target,
+  so a reader or a crash sees either the whole prior file or the whole approved
+  file — never a partial or truncated one.
+- The live prior state and the parent directory are rechecked immediately before
+  that rename, so an approval that went stale while the bytes were staged fails
+  closed instead of overwriting.
+- Missing parent directories are created one level at a time. Each level is
+  created only into a parent whose identity and real path were just verified,
+  those checks are repeated after the `mkdir`, and a level that resolves outside
+  its verified parent is removed again — `rmdir`, so only an empty directory the
+  writer itself created — and the invocation fails closed before any deeper
+  level, temporary file, or sealed byte follows it. This bounds the blast radius
+  of an escape to one empty directory and makes it detectable; it does not make
+  the creation atomic.
+
 ## Consequences
 
 - T5 becomes a disposable target-folder writer proof.

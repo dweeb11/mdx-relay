@@ -85,10 +85,12 @@ const sameIdentity = (
 ): boolean => left.deviceId === right.deviceId && left.inode === right.inode;
 
 /**
- * True while `directoryPath` is still the exact directory that was bound: the
- * same inode, not a symlink, and still its own real path. Node exposes no
- * `mkdirat`, so this identity plus real-path pair is the only way to tie a
- * pathname mutation to the directory that was actually verified.
+ * True while `directoryPath` is still the exact directory that was verified:
+ * the same inode, not a symlink, and still its own real path. Node exposes no
+ * `mkdirat`, so this identity plus real-path pair is a check, not a
+ * descriptor-relative guarantee -- it is run immediately before and after each
+ * `mkdir` so that an escape is detected and undone, not so that it is
+ * impossible.
  */
 const isBoundDirectory = async (
   directoryPath: string,
@@ -133,7 +135,7 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
       parentIdentity,
       name,
     ): Promise<DirectoryCreationOutcome> {
-      // The parent must still be the bound directory at the moment of the
+      // The parent must still be the verified directory at the moment of the
       // mutation, not merely at the moment of the earlier segment walk.
       if (!(await isBoundDirectory(parentPath, parentIdentity)))
         return { kind: "unsafe" };

@@ -966,8 +966,13 @@ describe("approved target-folder writes", () => {
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
       throw new Error("expected verified ready plan");
 
+    // The edit lands after the writer's first probe and while the sealed bytes
+    // are already staged, so only the final live recheck immediately before the
+    // replacement can still catch it.
     let edited = false;
+    const renames: string[] = [];
     const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (op === "rename") renames.push(entryPath);
       if (
         op !== "sync" ||
         edited ||
@@ -987,7 +992,13 @@ describe("approved target-folder writes", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.targetChanged);
+    // Revalidation fails before the rename is ever reached, so the concurrent
+    // bytes stay and the staged temporary is discarded.
+    expect(renames).toEqual([]);
     expect(await readFile(mdxPath, "utf8")).toBe("concurrent-edit");
+    expect(await readdir(join(targetRoot, "content/posts"))).toEqual([
+      "example.mdx",
+    ]);
   });
 
   it("rejects a case collision in an ancestor segment, not just the filename", async () => {
@@ -1146,7 +1157,7 @@ describe("approved target-folder writes", () => {
     ).toEqual(linked);
   });
 
-  it("refuses an update whose target is rewritten just before replacement", async () => {
+  it("replaces an update by renaming a same-directory temporary over it", async () => {
     const mdxPath = join(targetRoot, "content/posts/example.mdx");
     await mkdir(join(targetRoot, "content/posts"), { recursive: true });
     await writeFile(mdxPath, "keep-mdx");
@@ -1164,26 +1175,27 @@ describe("approved target-folder writes", () => {
     if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
       throw new Error("expected verified ready plan");
 
-    // The race is injected inside the replacement primitive itself, after every
-    // revalidation the writer can perform and before the bytes are swapped in.
-    let raced = false;
-    const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
-      if (op !== "rename" || raced || !entryPath.includes(mdxPath)) return;
-      raced = true;
-      writeFileSync(mdxPath, "competing-bytes");
+    const renames: string[] = [];
+    const observed = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (op === "rename") renames.push(entryPath);
     });
 
     const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
       ...deps,
-      fileSystem: faulty,
+      fileSystem: observed,
     });
 
-    expect(raced).toBe(true);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.report.failed[0]!.issue.code).toBe(ISSUE_CODES.targetChanged);
-    // The competing bytes are never overwritten and never destroyed.
-    expect(await readFile(mdxPath, "utf8")).toBe("competing-bytes");
+    expect(result.ok).toBe(true);
+    // Exactly one rename, from a temporary in the target's own directory onto
+    // the target itself: the replacement is atomic at the file level, and no
+    // side copy of the prior file is ever created.
+    expect(renames).toHaveLength(1);
+    const [from, to] = renames[0]!.split("->");
+    expect(dirname(from!)).toBe(join(targetRoot, "content/posts"));
+    expect(from).toContain(TARGET_WRITE_TEMPORARY_SUFFIX);
+    expect(to).toBe(mdxPath);
+    expect(new Uint8Array(await readFile(mdxPath))).toEqual(UPDATED_MDX_BYTES);
+    // Nothing but the approved target is left in the directory afterwards.
     expect(await readdir(join(targetRoot, "content/posts"))).toEqual([
       "example.mdx",
     ]);
