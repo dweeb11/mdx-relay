@@ -10,7 +10,7 @@ Read before acting:
 
 ## Project Overview
 
-MDX Relay is a desktop Obsidian plugin written in TypeScript. It converts approved notes and supported inline images into profile-specific MDX, previews a sealed export plan, then performs narrow verified Git operations. Preserve the approved engineering plan and frozen contracts while implementation proceeds task by task.
+MDX Relay is a desktop Obsidian plugin written in TypeScript. It converts approved notes and supported inline images into profile-specific MDX, previews the exact output, then writes only approved files beneath a configured local target folder. Runtime Git integration is out of scope. ADR 0003 is the current product boundary and supersedes older Git/push language in `PITCH.md` and the first safety-slice plan.
 
 ## Conventions
 
@@ -18,7 +18,7 @@ MDX Relay is a desktop Obsidian plugin written in TypeScript. It converts approv
 - Use exact file paths from the spec; do not infer
 - Run verification before claiming any task complete
 - Never modify `PITCH.md` or `SCRATCH.md`
-- Preserve the approved sealed-plan, fail-closed, and narrow-Git boundaries
+- Preserve the approved preview/approval boundary and the proportionate local target-folder write protections in ADR 0003
 - Never commit secrets; use `.env.example` when configuration exists
 - See `WORKING_AGREEMENT.md` for spec format and testing philosophy
 

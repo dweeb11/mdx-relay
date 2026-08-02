@@ -10,6 +10,8 @@
 
 **Scope mode:** Reduced safety slice
 
+> **Scope correction, 2026-08-01:** ADR 0003 supersedes this plan's runtime Git, commit, push, remote-verification, repository-fingerprint, and Git-recovery requirements. T5–T8 now implement and verify approved writes to a configured local target folder. This historical plan remains intact below as decision provenance; do not execute its Git-specific tasks.
+
 ## Goal
 
 Prove this chain without allowing production publishing to a user repository:
