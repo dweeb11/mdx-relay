@@ -1,7 +1,7 @@
 {
   "name": "mdx-relay",
   "version": "0.1.0",
-  "description": "Review and publish Obsidian notes as repository-ready MDX.",
+  "description": "Convert approved Obsidian notes into reviewed MDX files in a local target folder.",
   "private": true,
   "type": "module",
   "engines": {

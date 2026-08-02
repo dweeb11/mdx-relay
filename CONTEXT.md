@@ -1,8 +1,8 @@
 # MDX Relay
 
 MDX Relay converts approved Obsidian notes and their inline images into
-profile-specific MDX, previews a sealed export plan, then performs narrow
-verified Git operations. Its whole safety model rests on byte-exact hashing, so
+profile-specific MDX, previews a sealed export plan, then writes only approved
+files beneath a configured local target folder. It does not automate Git. Its safety model rests on byte-exact hashing, so
 this glossary is deliberately strict about the words for bytes, hashes, and
 identity.
 
@@ -95,12 +95,11 @@ invalidates approval; it is never repaired automatically.
 ### Profiles
 
 **Portable profile**:
-The shareable, machine-independent half of a profile — what to generate and
-where it goes, relative to a repository.
+The shareable, machine-independent half of a profile — what to generate and where it goes, relative to a configured target folder.
 
 **Machine binding**:
-The machine-local half — which repository root and remote this machine resolves
-a portable profile against. Never shared, never committed.
+The machine-local half — which local target root this machine resolves a portable
+profile against. Never shared, never committed.
 
 **Plain data property graph**:
 A value made only of `null`, booleans, finite numbers, well-formed-Unicode

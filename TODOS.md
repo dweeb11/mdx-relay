@@ -1,30 +1,18 @@
 # TODOS
 
-## Publishing
+## Output profiles
 
-### Enable live publishing to configured user repositories
+### Add a second target-folder profile
 
-**What:** Connect the proven sealed-plan executor to explicitly configured real repositories.
-
-**Why:** Preview and disposable Git proof do not complete MDX Relay’s end-to-end product promise.
-
-**Context:** The first safety slice proves journaling, private-index tree construction, compare-and-swap ref updates, push classification, and recovery only in disposable repositories with local bare remotes. After every first-slice unit, fault-injection, packaged smoke, and disposable Git test passes, expose the same executor for a reviewed machine-local binding. Do not weaken any fingerprint, redaction, lock, rollback, or remote-verification rule.
-
-**Effort:** L
-**Priority:** P1
-**Depends on:** First safety slice accepted on macOS
-
-### Add a second publishing profile
-
-**What:** Add one generic profile and fixture that changes repository/output conventions without changing core code.
+**What:** Add one generic profile and fixture that changes target-folder/output conventions without changing core code.
 
 **Why:** `dpw-mind-net-v1` proves one workflow; a second profile proves the schema is genuinely portable.
 
-**Context:** Keep framework adapters and arbitrary profile code out of scope. Start only after the private baseline, sanitized public fixture, and first live publish pass. The new profile must use the same declarative schema and compatibility tests.
+**Context:** Keep framework adapters, Git settings, and arbitrary profile code out of scope. Start only after the private baseline, sanitized public fixture, and first packaged local-write smoke pass. The new profile must use the same declarative schema and compatibility tests.
 
 **Effort:** M
 **Priority:** P2
-**Depends on:** First live publish milestone
+**Depends on:** First packaged local-write milestone
 
 ## Platform and Release
 
@@ -34,7 +22,7 @@
 
 **Why:** The approved design requires both platforms before Obsidian Community Plugin submission.
 
-**Context:** macOS is the alpha proving ground. Port only after its durability and recovery contract passes. Preserve owner-only storage, path-alias rejection, exact Git modes, and release-archive inspection on every platform.
+**Context:** macOS is the alpha proving ground. Port only after its durability and recovery contract passes. Preserve owner-only storage, path-alias rejection, target-folder containment, and release-archive inspection on every platform.
 
 **Effort:** XL
 **Priority:** P1
