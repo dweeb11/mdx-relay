@@ -82,14 +82,220 @@ const isDelimiter = (character: string, splitOnBackslash: boolean): boolean => {
  */
 const SUPPORTED_SCHEME_AT = /(?:https?|ssh|git):/iuy;
 
-/** First characters of a supported scheme, upper and lower case. */
-const SCHEME_INITIALS = new Set([..."hHsSgG"]);
-
 /** True when a supported scheme starts exactly at `offset`. */
 const isSupportedSchemeAt = (text: string, offset: number): boolean => {
-  if (!SCHEME_INITIALS.has(text[offset]!)) return false;
   SUPPORTED_SCHEME_AT.lastIndex = offset;
   return SUPPORTED_SCHEME_AT.test(text);
+};
+
+/** Supported-scheme candidates cannot cross Unicode whitespace. */
+const isSupportedSchemeSegmentBoundary = (character: string): boolean =>
+  /\s/u.test(character);
+
+const MAX_SCHEMES_PER_SEGMENT = 2048;
+
+type SupportedSchemeWrapper =
+  | { readonly kind: "parenthesis" }
+  | { readonly kind: "character"; readonly closing: ">" | '"' | "'" }
+  | { readonly kind: "backticks"; readonly width: number };
+
+const isBackslashEscaped = (
+  text: string,
+  index: number,
+  candidateStart: number,
+): boolean => {
+  let backslashes = 0;
+  for (
+    let cursor = index - 1;
+    cursor >= candidateStart && text[cursor] === "\\";
+    cursor -= 1
+  )
+    backslashes += 1;
+  return backslashes % 2 === 1;
+};
+
+/** Sticky recognition of a real named HTML/MDX tag after `<`. */
+const NAMED_TAG_AT = /\/?[A-Za-z][A-Za-z0-9:._-]*(?=\s|\/?>)/uy;
+
+const isNamedTagAt = (text: string, offset: number): boolean => {
+  NAMED_TAG_AT.lastIndex = offset;
+  return NAMED_TAG_AT.test(text);
+};
+
+/**
+ * Finds one candidate's end within the locked inspection prefix. Punctuation is
+ * ordinary URL content unless the output syntax explicitly opened a wrapper
+ * immediately before the scheme. This keeps Unicode and WHATWG-normalized URL
+ * characters intact without attributing markers after a Markdown link to the
+ * link URL.
+ */
+const supportedSchemeCandidateEnd = (
+  text: string,
+  start: number,
+  segmentEnd: number,
+  wrapper: SupportedSchemeWrapper | undefined,
+): { readonly end: number; readonly wrapperClosed: boolean } => {
+  const limit = Math.min(segmentEnd, start + MAX_CANDIDATE_LENGTH);
+  if (wrapper === undefined) return { end: limit, wrapperClosed: false };
+
+  let parenthesisDepth = 0;
+  for (let index = start; index < limit; index += 1) {
+    const character = text[index]!;
+    if (wrapper.kind === "parenthesis") {
+      if (character !== "(" && character !== ")") continue;
+      if (isBackslashEscaped(text, index, start)) continue;
+      if (character === "(") parenthesisDepth += 1;
+      else if (character === ")") {
+        if (parenthesisDepth === 0) return { end: index, wrapperClosed: true };
+        parenthesisDepth -= 1;
+      }
+    } else if (
+      wrapper.kind === "character" &&
+      character === wrapper.closing &&
+      !isBackslashEscaped(text, index, start)
+    ) {
+      return { end: index, wrapperClosed: true };
+    } else if (wrapper.kind === "backticks" && character === "`") {
+      let runEnd = index + 1;
+      while (runEnd < limit && text[runEnd] === "`") runEnd += 1;
+      if (runEnd - index === wrapper.width)
+        return { end: index, wrapperClosed: true };
+      index = runEnd - 1;
+    }
+  }
+  return { end: limit, wrapperClosed: false };
+};
+
+/**
+ * Scans supported-scheme candidates independently of scheme-less run parsing.
+ * Segments are traversed once and retain every URL character through Unicode;
+ * candidate inspection is bounded, and a pathological segment with more scheme
+ * anchors than the fixed cap fails closed when it also carries a risk marker.
+ */
+const scanSupportedSchemes = (text: string): boolean => {
+  let index = 0;
+  let openBacktickWidth = 0;
+  let insideTag = false;
+  let tagQuote: '"' | "'" | undefined;
+  let expectingAttributeValue = false;
+  let insideUnquotedAttributeValue = false;
+
+  while (index < text.length) {
+    const segmentStart = index;
+    let lastMarker = -1;
+    const starts: {
+      readonly offset: number;
+      readonly wrapper: SupportedSchemeWrapper | undefined;
+    }[] = [];
+    while (
+      index < text.length &&
+      !isSupportedSchemeSegmentBoundary(text[index]!)
+    ) {
+      const character = text[index]!;
+
+      if (!insideTag && character === "`") {
+        let runEnd = index + 1;
+        while (runEnd < text.length && text[runEnd] === "`") runEnd += 1;
+        const width = runEnd - index;
+        if (
+          openBacktickWidth === 0 &&
+          !isBackslashEscaped(text, index, segmentStart)
+        )
+          openBacktickWidth = width;
+        else if (width === openBacktickWidth) openBacktickWidth = 0;
+        index = runEnd;
+        continue;
+      }
+
+      if (
+        !insideTag &&
+        openBacktickWidth === 0 &&
+        character === "<" &&
+        !isBackslashEscaped(text, index, 0) &&
+        isNamedTagAt(text, index + 1)
+      ) {
+        insideTag = true;
+        tagQuote = undefined;
+        expectingAttributeValue = false;
+        insideUnquotedAttributeValue = false;
+      } else if (insideTag) {
+        if (tagQuote !== undefined) {
+          if (character === tagQuote) tagQuote = undefined;
+        } else if (insideUnquotedAttributeValue) {
+          if (character === ">") {
+            insideTag = false;
+            insideUnquotedAttributeValue = false;
+          }
+        } else if (character === ">") {
+          insideTag = false;
+          expectingAttributeValue = false;
+        } else if (
+          expectingAttributeValue &&
+          (character === '"' || character === "'")
+        ) {
+          tagQuote = character;
+          expectingAttributeValue = false;
+        } else if (character === "=") {
+          expectingAttributeValue = true;
+        } else if (expectingAttributeValue) {
+          insideUnquotedAttributeValue = true;
+          expectingAttributeValue = false;
+        }
+      }
+
+      if (isRiskMarker(character)) lastMarker = index;
+      if (
+        starts.length <= MAX_SCHEMES_PER_SEGMENT &&
+        isSupportedSchemeAt(text, index)
+      ) {
+        let wrapper: SupportedSchemeWrapper | undefined;
+        if (openBacktickWidth > 0)
+          wrapper = { kind: "backticks", width: openBacktickWidth };
+        else {
+          if (tagQuote !== undefined)
+            wrapper = { kind: "character", closing: tagQuote };
+          else if (insideUnquotedAttributeValue)
+            wrapper = { kind: "character", closing: ">" };
+          else if (
+            text[index - 1] === "(" &&
+            !isBackslashEscaped(text, index - 1, segmentStart)
+          )
+            wrapper = { kind: "parenthesis" };
+          else if (
+            text[index - 1] === "<" &&
+            !isBackslashEscaped(text, index - 1, segmentStart)
+          )
+            wrapper = { kind: "character", closing: ">" };
+        }
+        starts.push({
+          offset: index,
+          wrapper,
+        });
+      }
+      index += 1;
+    }
+
+    if (starts.length > MAX_SCHEMES_PER_SEGMENT && lastMarker >= 0) return true;
+    for (const { offset: start, wrapper } of starts) {
+      if (lastMarker < start) continue;
+      const candidate = supportedSchemeCandidateEnd(
+        text,
+        start,
+        index,
+        wrapper,
+      );
+      if (
+        !candidate.wrapperClosed &&
+        lastMarker >= start + MAX_CANDIDATE_LENGTH
+      )
+        return true;
+      if (isCredentialBearingUrl(text.slice(start, candidate.end))) return true;
+    }
+
+    if (insideUnquotedAttributeValue) insideUnquotedAttributeValue = false;
+    index += 1;
+  }
+  return false;
 };
 
 /**
@@ -357,5 +563,7 @@ export const containsCredentialBearingOutput = (bytes: Uint8Array): boolean => {
   // never splitting alone would let a backslash glue a credential URL to
   // preceding text and hide it inside a run the canonical rule then discards
   // for containing a backslash. Neither reading is safe without the other.
-  return scanText(text, true) || scanText(text, false);
+  return (
+    scanSupportedSchemes(text) || scanText(text, true) || scanText(text, false)
+  );
 };

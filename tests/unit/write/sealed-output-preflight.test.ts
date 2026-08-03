@@ -252,6 +252,80 @@ describe("containsCredentialBearingOutput", () => {
     ).toBe(false);
   });
 
+  it("keeps URL-valid punctuation inside supported-scheme candidates", () => {
+    for (const url of [
+      "https://example.test/(private)?token=secret",
+      "https://example.test/o'clock?token=secret",
+      "https://example.test/café?token=secret",
+      'https://example.test/a"b?token=secret',
+      "https://example.test/a`b#token",
+      "https://example.test/a<b?token=secret",
+      "git://example.test/repo(name).git#token",
+    ]) {
+      expect(isCredentialBearingUrl(url), `canonical: ${url}`).toBe(true);
+      expect(containsCredentialBearingOutput(utf8(url)), url).toBe(true);
+      expect(
+        containsCredentialBearingOutput(utf8(`[link](${url})`)),
+        `markdown: ${url}`,
+      ).toBe(true);
+    }
+    expect(
+      containsCredentialBearingOutput(
+        utf8("[link](https://example.test/(public)/index.html)"),
+      ),
+    ).toBe(false);
+    expect(
+      containsCredentialBearingOutput(
+        utf8("[safe](https://example.test)[FAQ?](answer)"),
+      ),
+    ).toBe(false);
+    for (const output of [
+      "https://example.test\u00a0FAQ?",
+      "https://example.test\u2003FAQ#1",
+      "https://example.test\u2028Question?",
+    ])
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(false);
+    expect(
+      containsCredentialBearingOutput(utf8("(https://example.test/a)FAQ?")),
+    ).toBe(false);
+    for (const output of [
+      "[link](https://example.test/a\\)b?token=secret)",
+      "``https://example.test/a`b?token=secret``",
+      "```https://example.test/a``b?token=secret```",
+      "\\(https://example.test/a)b?token=secret)",
+      "\\<https://example.test/a>b?token=secret>",
+      '\\"https://example.test/a"b?token=secret"',
+      "\\`https://example.test/a`b?token=secret`",
+      '"https://safe.test"https://example.test/a"b?token=secret',
+      "x=https://example.test/a>b?token=secret",
+      'x="https://example.test/a"b?token=secret',
+      "href=https://example.test/a>b?token=secret",
+      '`< x="https://example.test/a"b?token=secret"`',
+      '`<a href="https://example.test/a"b?token=secret">`',
+      '```\n<a href="https://example.test/a"b?token=secret">\n```',
+      '\\<a href="https://example.test/a"b?token=secret">',
+      '<a title="x=https://example.test/a>b?token=secret">',
+      '<Component note="prefix=git://example.test/a>b#token" />',
+      "`x\n`https://example.test/a`b?token=secret",
+      '<a x"https://example.test/a"b?token=secret>',
+      "ſsh://example.test/x?token=secret",
+      "ſsh://example.test/x#token",
+      "ſsh://user@example.test/x",
+    ])
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(true);
+    for (const output of [
+      '<a href="https://example.test/docs">FAQ?</a>',
+      '<a href="https://example.test/docs">Section#1</a>',
+      "<a href=https://example.test/docs>FAQ?</a>",
+      '<a href = "https://example.test/docs">FAQ?</a>',
+      '<a href= "https://example.test/docs">FAQ?</a>',
+      '<IMG SRC = "https://example.test/logo.png">Section#1</IMG>',
+      "[docs](<https://example.test/docs>)FAQ?",
+      "`https://example.test/docs`FAQ?",
+    ])
+      expect(containsCredentialBearingOutput(utf8(output)), output).toBe(false);
+  });
+
   it("rejects an embedded URL whose secret sits past the bounded prefix", () => {
     // Fail-closed behaviour is measured from the candidate's own start, not
     // from the run start, so padding in front of the scheme buys nothing.
