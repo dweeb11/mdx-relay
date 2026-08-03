@@ -257,8 +257,7 @@ const failureCode = async (
   result: Promise<{ readonly ok: boolean; readonly error?: unknown }>,
 ): Promise<string | undefined> => {
   const settled = (await result) as
-    | { ok: true }
-    | { ok: false; error: readonly { code: string }[] };
+    { ok: true } | { ok: false; error: readonly { code: string }[] };
   return settled.ok ? undefined : settled.error[0]!.code;
 };
 
