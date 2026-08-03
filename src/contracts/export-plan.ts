@@ -8,7 +8,6 @@ export type {
   SourceNoteMetadata,
   SourceImageMetadata,
   SealedOutput,
-  TargetOutputAssociation,
   TargetPriorState,
   ApprovedPriorTarget,
   TargetSnapshotEntry,

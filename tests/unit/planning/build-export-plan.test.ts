@@ -324,35 +324,6 @@ describe("buildExportPlan", () => {
     expect(noChanges.actions).toEqual([]);
     expect(noChanges.targetFolderSnapshot.targets).toEqual(unchanged);
     expect(Object.keys(noChanges.blobs)).toHaveLength(3);
-    expect(
-      (
-        noChanges as unknown as {
-          targetOutputs: readonly {
-            targetPath: string;
-            sealedOutput: unknown;
-          }[];
-        }
-      ).targetOutputs,
-    ).toEqual([
-      {
-        documentOrder: 0,
-        targetPath: "content/posts/example.mdx",
-        sealedOutput: noChanges.generatedMdx,
-        sourceOccurrence: 0,
-      },
-      {
-        documentOrder: 1,
-        targetPath: "public/posts/example/img-1.webp",
-        sealedOutput: noChanges.blobs[sha256OfBytes(IMAGE_ONE_BYTES)],
-        sourceOccurrence: 1,
-      },
-      {
-        documentOrder: 2,
-        targetPath: "public/posts/example/img-2.webp",
-        sealedOutput: noChanges.blobs[sha256OfBytes(IMAGE_TWO_BYTES)],
-        sourceOccurrence: 1,
-      },
-    ]);
   });
 
   it("fails closed on unsafe slugs and colliding target paths", () => {

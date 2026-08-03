@@ -12,7 +12,6 @@ import type {
   SourceImageMetadata,
   SourceNoteMetadata,
   TargetFolderSnapshot,
-  TargetOutputAssociation,
   VerifiedReadyExportPlan,
 } from "../contracts/export-plan";
 import { createIssue, ISSUE_CODES, isMdxRelayIssue } from "../contracts/issues";
@@ -334,20 +333,6 @@ const isExportAction = (value: unknown): value is ExportAction =>
     (value.kind === "update" &&
       value.approvedPriorTarget.state === "regularFile"));
 
-const isTargetOutputAssociation = (
-  value: unknown,
-): value is TargetOutputAssociation =>
-  exactObject(value, [
-    "documentOrder",
-    "targetPath",
-    "sealedOutput",
-    "sourceOccurrence",
-  ]) &&
-  isNonnegativeInteger(value.documentOrder) &&
-  isTargetRelativePath(value.targetPath) &&
-  isSealedOutput(value.sealedOutput) &&
-  isNonnegativeInteger(value.sourceOccurrence);
-
 const isWarningIssue = (value: unknown): value is WarningIssue =>
   isMdxRelayIssue(value) && value.severity === "warning";
 
@@ -365,7 +350,6 @@ const PLAN_FIELD_KEYS = [
   "targetFolderSnapshot",
   "approvalFingerprint",
   "generatedMdx",
-  "targetOutputs",
   "actions",
   "blobs",
   "issues",
@@ -529,11 +513,6 @@ const withinLockedOutputLimits = (
     candidate.actions.length > MDX_RELAY_LIMITS.sealedOutputFiles
   )
     return false;
-  if (
-    !Array.isArray(candidate.targetOutputs) ||
-    candidate.targetOutputs.length > MDX_RELAY_LIMITS.sealedOutputFiles
-  )
-    return false;
   const snapshot = candidate.targetFolderSnapshot;
   if (
     !isRecord(snapshot) ||
@@ -624,38 +603,6 @@ const hasSharedPlanStructure = (value: Record<string, unknown>): boolean => {
   };
   if (!matchesBlob(generatedMdx)) return false;
 
-  if (
-    !Array.isArray(value.targetOutputs) ||
-    value.targetOutputs.length === 0 ||
-    !value.targetOutputs.every(isTargetOutputAssociation)
-  )
-    return false;
-  const targetOutputs = value.targetOutputs;
-  const targetPaths = new Set<string>();
-  for (const [index, targetOutput] of targetOutputs.entries()) {
-    if (
-      targetOutput.documentOrder !== index ||
-      targetPaths.has(targetOutput.targetPath) ||
-      !matchesBlob(targetOutput.sealedOutput) ||
-      (index === 0
-        ? targetOutput.sourceOccurrence !== 0 ||
-          !sameValue(targetOutput.sealedOutput, generatedMdx)
-        : targetOutput.sourceOccurrence === 0)
-    )
-      return false;
-    targetPaths.add(targetOutput.targetPath);
-  }
-
-  const snapshot = value.targetFolderSnapshot as TargetFolderSnapshot;
-  if (snapshot.targets.length !== targetOutputs.length) return false;
-  const outputByTarget = new Map(
-    targetOutputs.map((target) => [target.targetPath, target]),
-  );
-  if (
-    snapshot.targets.some((target) => !outputByTarget.has(target.relativePath))
-  )
-    return false;
-
   const orderedBlobOutputs = Object.values(blobs).sort((left, right) =>
     compareCodeUnits(left.planRelativePath, right.planRelativePath),
   );
@@ -690,23 +637,6 @@ const hasReadyPlanStructure = (value: Record<string, unknown>): boolean => {
     return blob !== undefined && sameValue(blob, sealedOutput);
   };
   if (!actions.every((action) => matchesBlob(action.sealedOutput)))
-    return false;
-
-  const targetOutputs =
-    value.targetOutputs as readonly TargetOutputAssociation[];
-  if (
-    actions.length !== targetOutputs.length ||
-    actions.some((action, index) => {
-      const targetOutput = targetOutputs[index];
-      return (
-        targetOutput === undefined ||
-        action.documentOrder !== targetOutput.documentOrder ||
-        action.targetPath !== targetOutput.targetPath ||
-        action.sourceOccurrence !== targetOutput.sourceOccurrence ||
-        !sameValue(action.sealedOutput, targetOutput.sealedOutput)
-      );
-    })
-  )
     return false;
 
   const actionOutputHashes = new Set(
@@ -752,22 +682,22 @@ const hasNoChangesPlanStructure = (value: Record<string, unknown>): boolean => {
   const snapshot = value.targetFolderSnapshot as TargetFolderSnapshot;
   if (snapshot.targets.length === 0) return false;
 
-  const targetOutputs =
-    value.targetOutputs as readonly TargetOutputAssociation[];
-  const outputByTarget = new Map(
-    targetOutputs.map((target) => [target.targetPath, target.sealedOutput]),
+  const blobs = value.blobs as Record<string, SealedOutput>;
+  const expectedDigests = new Set(
+    Object.values(blobs).map((output) => output.contentSha256),
   );
+  const observedDigests = new Set<Sha256Digest>();
   for (const target of snapshot.targets) {
-    const output = outputByTarget.get(target.relativePath);
     if (
       target.priorState.state !== "regularFile" ||
-      output === undefined ||
-      target.priorState.contentSha256 !== output.contentSha256
+      !expectedDigests.has(target.priorState.contentSha256)
     )
       return false;
+    observedDigests.add(target.priorState.contentSha256);
   }
+  if (![...expectedDigests].every((digest) => observedDigests.has(digest)))
+    return false;
 
-  const blobs = value.blobs as Record<string, SealedOutput>;
   const generatedMdx = value.generatedMdx as SealedOutput;
   const sourceImages = value.sourceImages as readonly SourceImageMetadata[];
   const imageBlobKeys = new Set(

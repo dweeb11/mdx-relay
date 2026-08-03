@@ -44,14 +44,6 @@ export interface SealedOutput {
   readonly contentSha256: Sha256Digest;
 }
 
-/** Canonical output ownership retained for every planned target in document order. */
-export interface TargetOutputAssociation {
-  readonly documentOrder: number;
-  readonly targetPath: string;
-  readonly sealedOutput: SealedOutput;
-  readonly sourceOccurrence: number;
-}
-
 /**
  * Prior state of one approved target path beneath the configured target root.
  * Symlink, containment, and file-type safety are rechecked live and are never
@@ -148,7 +140,6 @@ interface SealedExportPlanFields extends PlanIdentity {
   readonly targetFolderSnapshot: TargetFolderSnapshot;
   readonly approvalFingerprint: ApprovalFingerprint;
   readonly generatedMdx: SealedOutput;
-  readonly targetOutputs: readonly TargetOutputAssociation[];
   /** Content-addressed outputs; each record key must equal output contentSha256. */
   readonly blobs: Readonly<Record<Sha256Digest, SealedOutput>>;
   readonly createdAtUtc: string;

@@ -1192,7 +1192,6 @@ if (import.meta.vitest) {
         "SourcePoint",
         "SourceRange",
         "TargetFolderSnapshot",
-        "TargetOutputAssociation",
         "TargetPriorState",
         "TargetSnapshotEntry",
         "ValidatedPortableProfileSnapshot",
