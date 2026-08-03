@@ -7,8 +7,7 @@ import {
 } from "./issues";
 
 export type Result<T, E> =
-  | Readonly<{ ok: true; value: T }>
-  | Readonly<{ ok: false; error: E }>;
+  Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: E }>;
 
 const mdxRelayResultBrand: unique symbol = Symbol("MdxRelayResult");
 type MdxRelayResultBrand = Readonly<{

@@ -85,15 +85,13 @@ const legacyRequest = (
 ): WorkerProcessRequest => ({
   ...request(images),
   type: "process-plan",
-  images: images.map(
-    (image): WorkerImageInput => ({
-      sourceId: image.sourceId,
-      safePathLabel: image.safePathLabel,
-      contentSha256: image.contentSha256,
-      byteLength: image.byteLength,
-      bytes: image.bytes,
-    }),
-  ),
+  images: images.map((image): WorkerImageInput => ({
+    sourceId: image.sourceId,
+    safePathLabel: image.safePathLabel,
+    contentSha256: image.contentSha256,
+    byteLength: image.byteLength,
+    bytes: image.bytes,
+  })),
 });
 
 /** Occurrence list aligned with request embed sources (document order). */
