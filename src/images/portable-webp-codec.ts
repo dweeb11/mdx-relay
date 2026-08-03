@@ -130,11 +130,7 @@ export function createPortableWebpCodec(wasm: PortableCodecWasm): ImageCodec {
       let encoded: Uint8Array | null;
       try {
         encoded = codec.encode(
-          new Uint8Array(
-            resized.data.buffer,
-            resized.data.byteOffset,
-            resized.data.byteLength,
-          ),
+          new Uint8Array(resized.data),
           resized.width,
           resized.height,
           { ...webpDefaultOptions, quality: params.webpQuality },
