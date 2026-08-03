@@ -24,4 +24,3 @@ export {
   createNodeTargetFolderFileSystem,
   writeAllBytes,
 } from "./node-target-folder-fs";
-export { containsCredentialBearingOutput } from "./sealed-output-preflight";

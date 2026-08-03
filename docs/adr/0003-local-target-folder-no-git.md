@@ -69,6 +69,21 @@ the boundary below.
   writing; and
 - mutation of any file that is not an approved target.
 
+**Known gap — output credential rejection is not yet implemented.** The
+requirement above to reject credentials from written output still stands, but
+the writer does not currently enforce it: a credential reaching the output from
+approved source content is written. The first implementation was an ad hoc
+scanner over sealed bytes, and nine review rounds found nine distinct bypasses
+in it. The cause is structural rather than incidental — a delimiter-splitting
+scanner and the canonical `isCredentialBearingUrl` rule cannot be made to agree
+on where a URL begins and ends across arbitrary Markdown, MDX, and HTML
+wrappers, because the canonical rule's scheme-less path class admits the very
+characters the scanner treats as boundaries. Closing it needs a decision
+recorded here first: adopt syntax-aware Markdown/MDX tokenization for credential
+scanning, or narrow the canonical output-credential contract and state the
+accepted false-positive boundary. Until then the profile-level credential gate
+is the only one in force, and it does not cover note content.
+
 **Not protected against:** a hostile local process that races individual
 filesystem syscalls. Because Node's pathname APIs cannot make ancestor directory
 creation or check-then-rename descriptor-relative or conditional, a sufficiently

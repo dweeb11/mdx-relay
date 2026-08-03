@@ -17,7 +17,6 @@ import {
   buildPlanIdentityManifest,
   computePlanId,
 } from "../planning/plan-verification";
-import { containsCredentialBearingOutput } from "./sealed-output-preflight";
 import type {
   ApplyApprovedWritesInput,
   ApplyApprovedWritesResult,
@@ -74,8 +73,7 @@ const issueAt = (
     | typeof ISSUE_CODES.unsupportedTarget
     | typeof ISSUE_CODES.targetChanged
     | typeof ISSUE_CODES.targetWriteFailed
-    | typeof ISSUE_CODES.staleApproval
-    | typeof ISSUE_CODES.credentialUrl,
+    | typeof ISSUE_CODES.staleApproval,
   targetPath: string,
 ): BlockerIssue =>
   createIssue(code, {}, { safePathLabel: targetPath }) as BlockerIssue;
@@ -629,14 +627,18 @@ type OutputPreflight =
     };
 
 /**
- * Content gate over every sealed output, run once before the first mutation.
+ * Ownership gate over every sealed output, run once before the first mutation.
  *
  * Each action's bytes are copied into writer-owned storage and checked against
- * the sealed digest here, then inspected for credentials: a digest proves the
- * bytes are the approved ones, not that they are safe to write, and ADR 0003
- * requires credentials to be rejected even when they reach the output from
- * approved source content. One unsafe output fails the whole invocation, so no
- * approved sibling is written beside a rejected one.
+ * the sealed digest here, so no later step can be handed bytes a caller still
+ * holds a reference to. One unmaterializable output fails the whole invocation,
+ * so no approved sibling is written beside a rejected one.
+ *
+ * Note what this does NOT do: a digest proves the bytes are the approved ones,
+ * not that they are safe to write. ADR 0003 additionally requires credentials
+ * to be rejected from output even when they reach it from approved source
+ * content, and that gate is not implemented here — see the known gap recorded
+ * in ADR 0003 and tracked separately.
  */
 const preflightSealedOutputs = (
   actions: readonly ExportAction[],
@@ -652,12 +654,6 @@ const preflightSealedOutputs = (
         ok: false,
         targetPath: relativePath,
         issue: issueAt(ISSUE_CODES.targetWriteFailed, relativePath),
-      };
-    if (containsCredentialBearingOutput(bytes))
-      return {
-        ok: false,
-        targetPath: relativePath,
-        issue: issueAt(ISSUE_CODES.credentialUrl, relativePath),
       };
     owned.set(action.sealedOutput.planRelativePath, bytes);
   }
