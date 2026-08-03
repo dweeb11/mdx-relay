@@ -192,6 +192,69 @@ describe("transformMarkdown", () => {
     expect(result.value.mdx).toContain(body);
   });
 
+  it("preserves lowercase HTML that carries no URL attribute", async () => {
+    // Current behaviour: lowercase tags without href/src remain convertible
+    // (JSX-shaped attributes). This pin forbids broadening the new rule to all
+    // lowercase HTML.
+    const body = '<div className="notice">valid HTML</div>';
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(body);
+  });
+
+  it.each([
+    [
+      "credential-bearing anchor href",
+      '<a href="https://user:token@example.test/x">link</a>',
+    ],
+    ["plain anchor href", '<a href="https://example.test/x">link</a>'],
+    [
+      "credential-bearing img src",
+      '<img src="https://user:token@example.test/i.png">',
+    ],
+  ])(
+    "blocks raw HTML that carries a URL attribute: %s",
+    async (_name, body) => {
+      const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.severity).toBe("blocker");
+      expect(result.error.sourceRange).toBeDefined();
+      expect(result.error.sourceRange!.end.offset).toBeGreaterThan(
+        result.error.sourceRange!.start.offset,
+      );
+    },
+  );
+
+  it.each([
+    [
+      "decimal entity-encoded href",
+      '<a h&#114;ef="https://user:token@example.test/x">link</a>',
+    ],
+    [
+      "hex entity-encoded href",
+      '<a h&#x72;ef="https://user:token@example.test/x">link</a>',
+    ],
+    [
+      "decimal entity-encoded src",
+      '<img s&#114;c="https://user:token@example.test/i.png">',
+    ],
+  ])("refuses entity-encoded URL attribute names: %s", async (_name, body) => {
+    // Pins the Bugbot High claim that entity-encoded attribute names
+    // (h&#114;ef / h&#x72;ef / s&#114;c) bypass the credential gate into
+    // published output. They do not: MDX validation refuses them today.
+    // Assert refusal and no credential leakage only — not a specific issue
+    // code — so a future deliberate gate can change the code without this
+    // pin going green on a silent convert.
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      expect(result.value.mdx).not.toContain("user:token");
+    }
+  });
+
   it("leaves wikilink-shaped text inside Markdown destinations unchanged", async () => {
     const body = [
       "Prose [[id]] flattens beside protected destinations.",
@@ -259,6 +322,164 @@ describe("transformMarkdown", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe(ISSUE_CODES.invalidMdx);
+  });
+
+  it.each([
+    ["search with query", "[search](https://example.test/search?q=mdx)"],
+    ["section with fragment", "[section](https://example.test/page#intro)"],
+    ["query and fragment", "[both](https://example.test/a?b=c#d)"],
+    ["plain docs link", "[docs](https://example.test/search)"],
+  ])("converts an ordinary link destination: %s", async (_name, body) => {
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(body);
+  });
+
+  it("does not treat a URL-parse failure as a credential hit", async () => {
+    const result = await transformMarkdown(
+      note("[x](http://[)"),
+      DPW_MIND_NET_V1,
+    );
+    if (!result.ok) {
+      expect(result.error.code).not.toBe(ISSUE_CODES.noteCredentialUrl);
+    }
+  });
+
+  it.each([
+    ["https userinfo", "[x](https://user:token@example.test/x)"],
+    ["protocol-relative userinfo", "[x](//user:token@example.test/path)"],
+    ["bare username token", "[x](https://sometoken@github.com/owner/repo)"],
+    [
+      "backslash userinfo form",
+      String.raw`[x](https:\\writer:token@example.invalid\\site.git)`,
+    ],
+    [
+      "reference-style definition destination",
+      "[ref]: https://user:token@example.test/x\n\n[see][ref]",
+    ],
+    ["autolink destination", "<https://user:token@example.test/x>"],
+    [
+      "percent-encoded credential in destination",
+      "[x](https://%75:%70@h.test/x)",
+    ],
+    [
+      "character-referenced credential in destination",
+      "[x](https://&#x75;:&#x70;@h.test/x)",
+    ],
+    ["image source destination", "![alt](https://u:p@h.test/x.png)"],
+  ])("refuses a credential-bearing %s", async (_name, body) => {
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.noteCredentialUrl);
+    expect(result.error.severity).toBe("blocker");
+    expect(result.error.stage).toBe("markdown");
+    expect(result.error.recoveryActions).toEqual(["edit-note"]);
+    expect(result.error.code).not.toBe(ISSUE_CODES.credentialUrl);
+    expect(result.error.sourceRange).toBeDefined();
+    expect(result.error.sourceRange!.end.offset).toBeGreaterThan(
+      result.error.sourceRange!.start.offset,
+    );
+  });
+
+  // Reclassified to APP-657 (future WARNING expectations), not dropped.
+  // A userinfo-only rule cannot catch a query-string secret, and
+  // `git@example.test:owner/repo.git` has no secret at all (`git@` is an
+  // SCP-syntax username — a plain clone URL). Do not restore these as
+  // NOTE_CREDENTIAL_URL blockers:
+  //   [x](https://example.test/site.git?access_token=secret)
+  //   [x](example.test:repo?token=secret)
+  //   [x](git@example.test:owner/repo.git?token=secret)
+  //   [x](example.test:repo(v)?token=secret)
+
+  it("treats frontmatter prose as unscanned, including embedded credentials", async () => {
+    // Narrowed scope: frontmatter values are prose, and prose is not scanned.
+    const source = [
+      "---",
+      "title: Synthetic Note",
+      "date: 26.07.22",
+      "summary: See https://user:token@example.test/x",
+      "labels: [public]",
+      "topic: examples",
+      'msg: "#002"',
+      "read: 3 min",
+      "---",
+      "Plain body.",
+    ].join("\n");
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("See https://user:token@example.test/x");
+  });
+
+  it("treats a whole-value frontmatter credential URL as unscanned prose", async () => {
+    const source = [
+      "---",
+      "title: Synthetic Note",
+      "date: 26.07.22",
+      "summary: https://u:p@h.test/x",
+      "labels: [public]",
+      "topic: examples",
+      'msg: "#002"',
+      "read: 3 min",
+      "---",
+      "Plain body.",
+    ].join("\n");
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("https://u:p@h.test/x");
+  });
+
+  it("treats a credential-bearing frontmatter label as unscanned prose", async () => {
+    const source = [
+      "---",
+      "title: Synthetic Note",
+      "date: 26.07.22",
+      "summary: Public synthetic fixture",
+      "labels: [public, https://u:p@h.test/x]",
+      "topic: examples",
+      'msg: "#002"',
+      "read: 3 min",
+      "---",
+      "Plain body.",
+    ].join("\n");
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("https://u:p@h.test/x");
+  });
+
+  it("keeps ordinary prose, paths, and plain links that are not destinations", async () => {
+    const body = [
+      "Note:something? and Question:answer#1 stay prose.",
+      "alice@example.test is an address in prose.",
+      String.raw`Open C:\Users\alice\notes.md`,
+      "Clone git@example.test:owner/repo.git to start.",
+      "[docs](https://example.test/search)",
+      `https://example.test/${"a".repeat(200)}/index.html in prose.`,
+    ].join("\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+  });
+
+  it("treats generated Img src values as safe by construction", async () => {
+    const result = await transformMarkdown(
+      note("![[photo.png]]"),
+      DPW_MIND_NET_V1,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(
+      '<PostImage src="/posts/synthetic-note/img-1.webp" alt="" />',
+    );
+    expect(result.value.images).toEqual([
+      expect.objectContaining({
+        source: "photo.png",
+        destination: "img-1.webp",
+      }),
+    ]);
   });
 
   it("handles a titleless callout at end of file", async () => {
