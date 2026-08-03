@@ -29,10 +29,10 @@ const scope = self as unknown as DedicatedWorkerScope;
 // Compiled once per worker; jSquash instantiates from these precompiled modules
 // so no codec ever fetches or locates a WASM file at runtime.
 const codec = createPortableWebpCodec({
-  pngDecode: new WebAssembly.Module(pngWasm),
-  jpegDecode: new WebAssembly.Module(jpegWasm),
-  webpDecode: new WebAssembly.Module(webpDecWasm),
-  webpEncode: new WebAssembly.Module(webpEncWasm),
+  pngDecode: new WebAssembly.Module(new Uint8Array(pngWasm)),
+  jpegDecode: new WebAssembly.Module(new Uint8Array(jpegWasm)),
+  webpDecode: new WebAssembly.Module(new Uint8Array(webpDecWasm)),
+  webpEncode: new WebAssembly.Module(new Uint8Array(webpEncWasm)),
 });
 
 const post = (
