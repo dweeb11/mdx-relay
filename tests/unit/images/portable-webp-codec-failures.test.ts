@@ -33,9 +33,8 @@ vi.mock("@jsquash/webp/meta", () => ({
   defaultOptions: { quality: 75 },
 }));
 
-const { createPortableWebpCodec } = await import(
-  "../../../src/images/portable-webp-codec"
-);
+const { createPortableWebpCodec } =
+  await import("../../../src/images/portable-webp-codec");
 
 const pngMagic = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0,

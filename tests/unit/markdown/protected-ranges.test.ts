@@ -133,13 +133,15 @@ describe("findProtectedRanges", () => {
     });
   });
 
-  it("uses micromark positions for inline, image, and reference destinations", () => {
+  it("uses micromark positions for inline, image, reference, and autolink destinations", () => {
     const source = [
       "[ref](https://example.com/[[id]])",
       "![alt](https://example.com/[[id]].png)",
       "[ref][label]",
       "",
       "[label]: <https://example.com/[[id]]>",
+      "<https://example.com/path>",
+      "<alice@example.test>",
     ].join("\n");
     const result = findProtectedRanges(source);
     expect(result.ok).toBe(true);
@@ -152,6 +154,8 @@ describe("findProtectedRanges", () => {
       "https://example.com/[[id]]",
       "https://example.com/[[id]].png",
       "https://example.com/[[id]]",
+      "https://example.com/path",
+      "alice@example.test",
     ]);
     expect(Object.isFrozen(result.value.destinations)).toBe(true);
     expect(Object.isFrozen(result.value.destinations[0])).toBe(true);

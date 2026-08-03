@@ -635,10 +635,10 @@ type OutputPreflight =
  * so no approved sibling is written beside a rejected one.
  *
  * Note what this does NOT do: a digest proves the bytes are the approved ones,
- * not that they are safe to write. ADR 0003 additionally requires credentials
- * to be rejected from output even when they reach it from approved source
- * content, and that gate is not implemented here — see the known gap recorded
- * in ADR 0003 and tracked separately.
+ * not that they are safe to write. Credential rejection for parsed link
+ * destinations, image sources, and autolinks is enforced earlier in the pure
+ * transform core (ADR 0003); this preflight only asserts sealed-byte identity
+ * before mutation begins.
  */
 const preflightSealedOutputs = (
   actions: readonly ExportAction[],
