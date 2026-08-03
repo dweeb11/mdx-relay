@@ -45,6 +45,8 @@ const supportedImage = /\.(?:jpe?g|png|webp)$/iu;
 const externalSchemes = new Set(["http", "https", "mailto", "tel"]);
 const explicitScheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u;
 const unsupportedHtml = /<(?:\/?[A-Z]|>|\/>)/u;
+/** Structural: the tag names a URL attribute. Does not read the attribute value. */
+const htmlUrlAttribute = /\s(?:href|src)\s*=/iu;
 
 /**
  * Decode character references and percent-escapes in a micromark destination
@@ -471,7 +473,7 @@ const firstUnsupported = (
         isLocalAttachmentDestination(text);
       const isUnsupportedHtml =
         (token.type === "htmlText" || token.type === "htmlFlow") &&
-        unsupportedHtml.test(text.trimStart());
+        (unsupportedHtml.test(text.trimStart()) || htmlUrlAttribute.test(text));
       if (
         token.type === "image" ||
         isAttachmentDestination ||

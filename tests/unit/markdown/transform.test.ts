@@ -192,6 +192,42 @@ describe("transformMarkdown", () => {
     expect(result.value.mdx).toContain(body);
   });
 
+  it("preserves lowercase HTML that carries no URL attribute", async () => {
+    // Current behaviour: lowercase tags without href/src remain convertible
+    // (JSX-shaped attributes). This pin forbids broadening the new rule to all
+    // lowercase HTML.
+    const body = '<div className="notice">valid HTML</div>';
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(body);
+  });
+
+  it.each([
+    [
+      "credential-bearing anchor href",
+      '<a href="https://user:token@example.test/x">link</a>',
+    ],
+    ["plain anchor href", '<a href="https://example.test/x">link</a>'],
+    [
+      "credential-bearing img src",
+      '<img src="https://user:token@example.test/i.png">',
+    ],
+  ])(
+    "blocks raw HTML that carries a URL attribute: %s",
+    async (_name, body) => {
+      const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe(ISSUE_CODES.unsupportedMarkdown);
+      expect(result.error.severity).toBe("blocker");
+      expect(result.error.sourceRange).toBeDefined();
+      expect(result.error.sourceRange!.end.offset).toBeGreaterThan(
+        result.error.sourceRange!.start.offset,
+      );
+    },
+  );
+
   it("leaves wikilink-shaped text inside Markdown destinations unchanged", async () => {
     const body = [
       "Prose [[id]] flattens beside protected destinations.",

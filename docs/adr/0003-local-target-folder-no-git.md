@@ -146,10 +146,14 @@ autolinks, and typed frontmatter metadata values — never over undifferentiated
 output bytes. Destination text is decoded for character references and
 percent-escapes, then checked with the canonical `isCredentialBearingUrl`
 predicate; a hit is a transform-time blocker and surfaces as a Blocked preview.
-Prose text and image binaries are deliberately not scanned, because the
-approval preview shows the exact bytes and the published-link path is where a
-credential travels without the user seeing it. The writer does not re-check
-credentials: sealed bytes have already passed this structural gate.
+Raw HTML that carries a URL attribute (`href` or `src`) is refused as
+unsupported markdown rather than scanned: notes should use Markdown links,
+which the destination gate already covers, and blocking on the attribute name
+avoids any attribute-value parsing surface. Prose text and image binaries are
+deliberately not scanned, because the approval preview shows the exact bytes
+and the published-link path is where a credential travels without the user
+seeing it. The writer does not re-check credentials: sealed bytes have already
+passed this structural gate.
 
 **Not protected against — filesystem races.** A hostile local process that races
 individual filesystem syscalls. Because Node's pathname APIs cannot make
