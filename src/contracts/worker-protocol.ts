@@ -73,8 +73,7 @@ export interface WorkerProcessRequestV2 extends WorkerProcessRequestFields {
 }
 
 export type AnyWorkerProcessRequest =
-  | WorkerProcessRequest
-  | WorkerProcessRequestV2;
+  WorkerProcessRequest | WorkerProcessRequestV2;
 
 export interface WorkerCancelRequest {
   readonly type: "cancel-generation";

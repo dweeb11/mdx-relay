@@ -25,11 +25,7 @@ import type { MdxRelayResult } from "../contracts/result";
 export const TARGET_WRITE_TEMPORARY_SUFFIX = ".mdx-relay-write-tmp";
 
 export type TargetEntryKind =
-  | "absent"
-  | "regularFile"
-  | "directory"
-  | "symlink"
-  | "other";
+  "absent" | "regularFile" | "directory" | "symlink" | "other";
 
 /**
  * Filesystem identity of the entry itself. Node exposes no `openat`/`renameat`,

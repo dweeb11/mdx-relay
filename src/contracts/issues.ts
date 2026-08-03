@@ -41,6 +41,7 @@ export const ISSUE_CODES = Object.freeze({
   invalidProfile: "INVALID_PROFILE",
   unsafePath: "UNSAFE_PATH",
   credentialUrl: "CREDENTIAL_URL",
+  noteCredentialUrl: "NOTE_CREDENTIAL_URL",
   noteTooLarge: "NOTE_TOO_LARGE",
   sourceImageTooLarge: "SOURCE_IMAGE_TOO_LARGE",
   decodedImageTooLarge: "DECODED_IMAGE_TOO_LARGE",
@@ -133,6 +134,12 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     stage: "profile",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "A repository URL contains embedded credentials.",
+  },
+  [ISSUE_CODES.noteCredentialUrl]: {
+    severity: "blocker",
+    stage: "markdown",
+    recoveryActions: editNote,
+    summary: "The note contains a credential-bearing URL.",
   },
   [ISSUE_CODES.noteTooLarge]: {
     severity: "blocker",
@@ -660,14 +667,14 @@ if (import.meta.vitest) {
           definition.summary,
         ]);
       expect(snapshotHash([...codes].sort())).toBe(
-        "24dada48581efe230a3b28b83c645e6436801a485db22057a8a1f5170e6e02f3",
+        "fb9e49c9eae3d7462321b12be069c70f59e08956c0458edcebd746ae5ce7ac15",
       );
       expect(snapshotHash(Object.values(RECOVERY_ACTIONS).sort())).toBe(
         "235a3f3eb94625c1087d70b1687d03e3ed54725c88c57a23de77aec4faa36a1d",
       );
       // Intentional approval gate: fixed summaries are part of the exact policy snapshot.
       expect(snapshotHash(policy)).toBe(
-        "25dc81952a4192357e06c64abf834be51f4018f89acbb4bca5f2d16319c60189",
+        "1a673d10654147e4b1b9c636b18c9782ef237307153f01d1297701f781854432",
       );
     });
 

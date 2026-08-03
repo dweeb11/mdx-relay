@@ -5,7 +5,7 @@
 **Decision source:** Dave's APP-623 Triage Council ruling and product-scope correction  
 **Issues:** APP-475, APP-565, APP-566, APP-567, APP-568, APP-592, APP-623, APP-646, APP-651, APP-652
 
-**Amended:** 2026-08-03 — threat model recorded as a first-class section; stored-plan reseal (APP-651) accepted; output credential gate decided (APP-652, implementation pending)
+**Amended:** 2026-08-03 — threat model recorded as a first-class section; stored-plan reseal (APP-651) accepted; output credential gate decided and implemented in the transform core (APP-652)
 
 ## Context
 
@@ -47,7 +47,7 @@ The plugin still must:
 - use same-directory temporary files and atomic file-level landing for each output — a conditional hard link plus owned-temporary cleanup for a create, a `rename` for an update;
 - preserve unrelated files and report partial multi-file failure truthfully;
 - prevent private source content from leaking through profiles, plans, logs, errors, snapshots, or any destination outside the sealed approved outputs; and
-- reject credentials from written output even when they appear in approved source content, enforced at parsed link destinations, image sources, autolinks, and frontmatter values — see the threat model and the credential gap recorded below for the scope this deliberately excludes.
+- reject credentials from written output even when they appear in approved source content, enforced at parsed link destinations, image sources, and autolinks — see the threat model and the output credential guarantee below for the scope this deliberately excludes.
 
 These rules protect the actual irreversible surface without rebuilding a deployment platform around it.
 
@@ -79,7 +79,7 @@ being private.
 That asymmetry, not a generic hardening instinct, decides where effort belongs.
 
 **In scope — data safety.** Every guarantee in the "Proportionate safety
-boundary" above defends against *defects*, not adversaries: a malformed note
+boundary" above defends against _defects_, not adversaries: a malformed note
 title producing a bad path, a crash mid-write, an approval applied after the
 target changed, a partial multi-file write misreported as success. Containment
 of a bug is worth its cost even when no attacker exists, and the traversal,
@@ -90,10 +90,10 @@ basis rather than as security controls.
 credentials reaching a link destination and private source content escaping
 through profiles, plans, logs, errors, or snapshots are real harms. The adversary
 there is ordinary inattention, not a hostile process. Credential-bearing parsed
-link destinations, image sources, autolinks, and frontmatter values must be
+link destinations, image sources, and autolinks must be
 blocked in the transform core before output is sealed; approval cannot override
-that block. This is a structural guard over those parsed output-bearing fields,
-not an exhaustive scan of prose or binary content.
+that block. This is a structural guard over those parsed URL positions, not an
+exhaustive scan of prose — in the body or in frontmatter — or of binary content.
 
 **Out of scope — resisting a local adversary.** MDX Relay does not claim generic
 tamper-resistance against hostile local processes. The capabilities required by
@@ -139,27 +139,24 @@ the boundary below.
   writing; and
 - mutation of any file that is not an approved target.
 
-**Known gap — output credential rejection is decided but not yet implemented.**
-The requirement above to reject credentials from written output still stands,
-and the writer does not currently enforce it: a credential reaching the output
-from approved source content is written. The first implementation was an ad hoc
-scanner over sealed bytes, and nine review rounds found nine distinct bypasses
-in it. The cause was structural rather than incidental — a delimiter-splitting
-scanner and the canonical `isCredentialBearingUrl` rule cannot be made to agree
-on where a URL begins and ends across arbitrary Markdown, MDX, and HTML
-wrappers, because the canonical rule's scheme-less path class admits the very
-characters the scanner treats as boundaries.
-
-The architecture decision that gap was waiting on has since been made: the gate
-is enforced **structurally in the pure transform core**, at parsed generated-MDX
-link destinations, image sources, autolinks, and frontmatter values, before
-bytes are sealed — not by scanning sealed output bytes in the writer. Prose text
-and image binaries are deliberately not scanned, because the approval preview
-shows the exact bytes and the published-link path is where a credential travels
-without the user seeing it. Implementation is tracked in APP-652, and this
-paragraph is replaced by the resulting guarantee when it lands. Until then the
-profile-level credential gate is the only one in force, and it does not cover
-note content.
+**Output credential rejection.** Credentials reaching a published link are
+refused in the pure transform core before bytes are sealed. The gate runs over
+micromark-parsed URL positions only — link destinations, image sources, and
+autolinks — never over undifferentiated output bytes or free-text fields.
+Destination text is decoded for character references and percent-escapes, then
+checked for URL userinfo only (`username` or `password` non-empty after
+`URL` parse against an opaque placeholder base). A hit is a transform-time
+blocker (`NOTE_CREDENTIAL_URL`) and surfaces as a Blocked preview with
+`edit-note` recovery. This tier is certain and heuristic-free: ordinary links
+with query strings or fragments are not refused. A query-string secret in a
+note link (for example `?access_token=…`) is NOT refused today — that tier,
+together with converting unscanned raw-HTML URL attributes from unsupported
+blockers into warnings, is tracked as future WARNINGS in APP-657. Prose is not
+scanned, in the body or in frontmatter. Raw HTML that carries a URL attribute
+(`href` or `src`) is still refused as unsupported markdown as an interim
+measure (APP-657 will soften that). Image binaries are likewise not scanned.
+The writer does not re-check credentials: sealed bytes have already passed this
+structural gate.
 
 **Not protected against — filesystem races.** A hostile local process that races
 individual filesystem syscalls. Because Node's pathname APIs cannot make
@@ -179,7 +176,7 @@ target path carries no source identity, and `sourceOccurrence` is a per-source
 counter that reads `[1, 1]` for two distinct images embedded once each —
 identical under swap. An actor who rewrites the stored plan to exchange two
 image outputs, mirrors the change into the approval fingerprint, recomputes the
-plan ID, *and* swaps the corresponding live vault images will have approval and
+plan ID, _and_ swaps the corresponding live vault images will have approval and
 the write proceed against the exchanged mapping.
 
 This is accepted, and no further self-asserted plan field will close it.
