@@ -228,6 +228,33 @@ describe("transformMarkdown", () => {
     },
   );
 
+  it.each([
+    [
+      "decimal entity-encoded href",
+      '<a h&#114;ef="https://user:token@example.test/x">link</a>',
+    ],
+    [
+      "hex entity-encoded href",
+      '<a h&#x72;ef="https://user:token@example.test/x">link</a>',
+    ],
+    [
+      "decimal entity-encoded src",
+      '<img s&#114;c="https://user:token@example.test/i.png">',
+    ],
+  ])("refuses entity-encoded URL attribute names: %s", async (_name, body) => {
+    // Pins the Bugbot High claim that entity-encoded attribute names
+    // (h&#114;ef / h&#x72;ef / s&#114;c) bypass the credential gate into
+    // published output. They do not: MDX validation refuses them today.
+    // Assert refusal and no credential leakage only — not a specific issue
+    // code — so a future deliberate gate can change the code without this
+    // pin going green on a silent convert.
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      expect(result.value.mdx).not.toContain("user:token");
+    }
+  });
+
   it("leaves wikilink-shaped text inside Markdown destinations unchanged", async () => {
     const body = [
       "Prose [[id]] flattens beside protected destinations.",
