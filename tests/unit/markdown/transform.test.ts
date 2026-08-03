@@ -261,6 +261,132 @@ describe("transformMarkdown", () => {
     expect(result.error.code).toBe(ISSUE_CODES.invalidMdx);
   });
 
+  it.each([
+    [
+      "credential not at destination offset zero",
+      "[x](https://example.test/path?https://u:p@h.test/x)",
+    ],
+    [
+      "backslash truncation form",
+      String.raw`[x](https:\\writer:token@example.invalid\\site.git)`,
+    ],
+    [
+      "scheme-less authority boundary",
+      "[x](writer:token@example.invalid/site.git)",
+    ],
+    [
+      "scheme-less query remote without userinfo",
+      "[x](git@example.test:owner/repo.git?token=secret)",
+    ],
+    ["single-label query remote", "[x](example.test:repo?token=secret)"],
+    [
+      "supported-scheme query punctuation",
+      "[x](https://example.test/site.git?access_token=secret)",
+    ],
+    [
+      "scheme-less remote with parenthetical path",
+      "[x](example.test:repo(v)?token=secret)",
+    ],
+    [
+      "reference-style definition destination",
+      "[ref]: https://u:p@h.test/x\n\n[see][ref]",
+    ],
+    ["autolink destination", "<https://u:p@h.test/x>"],
+    [
+      "percent-encoded credential in destination",
+      "[x](https://%75:%70@h.test/x)",
+    ],
+    [
+      "character-referenced credential in destination",
+      "[x](https://&#x75;:&#x70;@h.test/x)",
+    ],
+    [
+      "percent-encoded query marker on scheme-less remote",
+      "[x](example.test:repo(v)%3Ftoken=secret)",
+    ],
+    ["image source destination", "![alt](https://u:p@h.test/x.png)"],
+  ])("refuses a credential-bearing %s", async (_name, body) => {
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.credentialUrl);
+    expect(result.error.severity).toBe("blocker");
+    expect(result.error.sourceRange).toBeDefined();
+    expect(result.error.sourceRange!.end.offset).toBeGreaterThan(
+      result.error.sourceRange!.start.offset,
+    );
+  });
+
+  it("refuses a credential-bearing frontmatter metadata value", async () => {
+    const source = [
+      "---",
+      "title: Synthetic Note",
+      "date: 26.07.22",
+      "summary: https://u:p@h.test/x",
+      "labels: [public]",
+      "topic: examples",
+      'msg: "#002"',
+      "read: 3 min",
+      "---",
+      "Plain body.",
+    ].join("\n");
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.credentialUrl);
+    expect(result.error.sourceRange?.start.offset).toBe(0);
+  });
+
+  it("refuses a credential-bearing frontmatter label", async () => {
+    const source = [
+      "---",
+      "title: Synthetic Note",
+      "date: 26.07.22",
+      "summary: Public synthetic fixture",
+      "labels: [public, https://u:p@h.test/x]",
+      "topic: examples",
+      'msg: "#002"',
+      "read: 3 min",
+      "---",
+      "Plain body.",
+    ].join("\n");
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ISSUE_CODES.credentialUrl);
+  });
+
+  it("keeps ordinary prose, paths, and plain links that are not destinations", async () => {
+    const body = [
+      "Note:something? and Question:answer#1 stay prose.",
+      "alice@example.test is an address in prose.",
+      String.raw`Open C:\Users\alice\notes.md`,
+      "Clone git@example.test:owner/repo.git to start.",
+      "[docs](https://example.test/search)",
+      `https://example.test/${"a".repeat(200)}/index.html in prose.`,
+    ].join("\n");
+    const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+  });
+
+  it("treats generated Img src values as safe by construction", async () => {
+    const result = await transformMarkdown(
+      note("![[photo.png]]"),
+      DPW_MIND_NET_V1,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain(
+      '<PostImage src="/posts/synthetic-note/img-1.webp" alt="" />',
+    );
+    expect(result.value.images).toEqual([
+      expect.objectContaining({
+        source: "photo.png",
+        destination: "img-1.webp",
+      }),
+    ]);
+  });
+
   it("handles a titleless callout at end of file", async () => {
     const result = await transformMarkdown(note("> [!note]"), DPW_MIND_NET_V1);
     expect(result.ok).toBe(true);

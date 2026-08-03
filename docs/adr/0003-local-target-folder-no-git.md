@@ -5,7 +5,7 @@
 **Decision source:** Dave's APP-623 Triage Council ruling and product-scope correction  
 **Issues:** APP-475, APP-565, APP-566, APP-567, APP-568, APP-592, APP-623, APP-646, APP-651, APP-652
 
-**Amended:** 2026-08-03 — threat model recorded as a first-class section; stored-plan reseal (APP-651) accepted; output credential gate decided (APP-652, implementation pending)
+**Amended:** 2026-08-03 — threat model recorded as a first-class section; stored-plan reseal (APP-651) accepted; output credential gate decided and implemented in the transform core (APP-652)
 
 ## Context
 
@@ -47,7 +47,7 @@ The plugin still must:
 - use same-directory temporary files and atomic file-level landing for each output — a conditional hard link plus owned-temporary cleanup for a create, a `rename` for an update;
 - preserve unrelated files and report partial multi-file failure truthfully;
 - prevent private source content from leaking through profiles, plans, logs, errors, snapshots, or any destination outside the sealed approved outputs; and
-- reject credentials from written output even when they appear in approved source content, enforced at parsed link destinations, image sources, autolinks, and frontmatter values — see the threat model and the credential gap recorded below for the scope this deliberately excludes.
+- reject credentials from written output even when they appear in approved source content, enforced at parsed link destinations, image sources, autolinks, and frontmatter values — see the threat model and the output credential guarantee below for the scope this deliberately excludes.
 
 These rules protect the actual irreversible surface without rebuilding a deployment platform around it.
 
@@ -139,27 +139,17 @@ the boundary below.
   writing; and
 - mutation of any file that is not an approved target.
 
-**Known gap — output credential rejection is decided but not yet implemented.**
-The requirement above to reject credentials from written output still stands,
-and the writer does not currently enforce it: a credential reaching the output
-from approved source content is written. The first implementation was an ad hoc
-scanner over sealed bytes, and nine review rounds found nine distinct bypasses
-in it. The cause was structural rather than incidental — a delimiter-splitting
-scanner and the canonical `isCredentialBearingUrl` rule cannot be made to agree
-on where a URL begins and ends across arbitrary Markdown, MDX, and HTML
-wrappers, because the canonical rule's scheme-less path class admits the very
-characters the scanner treats as boundaries.
-
-The architecture decision that gap was waiting on has since been made: the gate
-is enforced **structurally in the pure transform core**, at parsed generated-MDX
-link destinations, image sources, autolinks, and frontmatter values, before
-bytes are sealed — not by scanning sealed output bytes in the writer. Prose text
-and image binaries are deliberately not scanned, because the approval preview
-shows the exact bytes and the published-link path is where a credential travels
-without the user seeing it. Implementation is tracked in APP-652, and this
-paragraph is replaced by the resulting guarantee when it lands. Until then the
-profile-level credential gate is the only one in force, and it does not cover
-note content.
+**Output credential rejection.** Credentials reaching a published link are
+refused in the pure transform core before bytes are sealed. The gate runs over
+micromark-parsed source destinations — link destinations, image sources,
+autolinks, and typed frontmatter metadata values — never over undifferentiated
+output bytes. Destination text is decoded for character references and
+percent-escapes, then checked with the canonical `isCredentialBearingUrl`
+predicate; a hit is a transform-time blocker and surfaces as a Blocked preview.
+Prose text and image binaries are deliberately not scanned, because the
+approval preview shows the exact bytes and the published-link path is where a
+credential travels without the user seeing it. The writer does not re-check
+credentials: sealed bytes have already passed this structural gate.
 
 **Not protected against — filesystem races.** A hostile local process that races
 individual filesystem syscalls. Because Node's pathname APIs cannot make

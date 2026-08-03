@@ -9,8 +9,13 @@ import {
   type SourceRange,
 } from "../contracts/issues";
 import { err, ok, type Result } from "../contracts/result";
+import { isCredentialBearingUrl } from "../profiles/credential-url";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
-import { parseFrontmatter, type FrontmatterOptions } from "./frontmatter";
+import {
+  parseFrontmatter,
+  type FrontmatterOptions,
+  type ParsedFrontmatter,
+} from "./frontmatter";
 import { findProtectedRanges, mergeSourceRanges } from "./protected-ranges";
 import { validateMdx } from "./validate-mdx";
 
@@ -40,6 +45,30 @@ const supportedImage = /\.(?:jpe?g|png|webp)$/iu;
 const externalSchemes = new Set(["http", "https", "mailto", "tel"]);
 const explicitScheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u;
 const unsupportedHtml = /<(?:\/?[A-Z]|>|\/>)/u;
+
+/**
+ * Decode character references and percent-escapes in a micromark destination
+ * slice without normalizing path separators. The credential predicate must see
+ * the same authority shape CommonMark leaves in the source after entity/%
+ * decoding; collapsing `\` would change that rule's truncation/backslash class.
+ */
+const decodeDestinationText = (value: string): string => {
+  let decoded = decodeString(value.trim());
+  try {
+    for (;;) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    }
+  } catch {
+    // Keep the character-reference decode when percent-decoding fails.
+  }
+  return decoded;
+};
+
+const destinationHoldsCredential = (raw: string): boolean =>
+  isCredentialBearingUrl(raw) ||
+  isCredentialBearingUrl(decodeDestinationText(raw));
 
 const normalizeDestination = (value: string): string | undefined => {
   let decoded = decodeString(value.trim());
@@ -113,6 +142,36 @@ const unsupported = (
       },
     ),
   );
+
+const credentialUrlAt = (
+  source: string,
+  start: number,
+  end: number,
+): Result<never, MdxRelayIssue> =>
+  err(
+    createIssue(
+      ISSUE_CODES.credentialUrl,
+      {},
+      {
+        sourceRange: rangeAt(source, start, end),
+      },
+    ),
+  );
+
+const frontmatterHoldsCredential = (
+  metadata: ParsedFrontmatter["metadata"],
+): boolean => {
+  const values: readonly string[] = [
+    metadata.title,
+    metadata.date,
+    metadata.summary,
+    metadata.topic,
+    metadata.msg,
+    metadata.read,
+    ...metadata.labels,
+  ];
+  return values.some((value) => destinationHoldsCredential(value));
+};
 
 const overlapsProtected = (
   edit: Edit,
@@ -502,6 +561,10 @@ export async function transformMarkdown(
   const parsed = parseFrontmatter(source, options);
   if (!parsed.ok) return parsed;
 
+  if (frontmatterHoldsCredential(parsed.value.metadata)) {
+    return credentialUrlAt(source, 0, parsed.value.bodyOffset);
+  }
+
   const body = parsed.value.body;
   const protectedResult = findProtectedRanges(body);
   if (!protectedResult.ok) {
@@ -514,6 +577,18 @@ export async function transformMarkdown(
       parsed.value.bodyOffset + range.end.offset,
     );
   }
+
+  for (const range of protectedResult.value.destinations) {
+    const raw = body.slice(range.start.offset, range.end.offset);
+    if (destinationHoldsCredential(raw)) {
+      return credentialUrlAt(
+        source,
+        parsed.value.bodyOffset + range.start.offset,
+        parsed.value.bodyOffset + range.end.offset,
+      );
+    }
+  }
+
   const ranges = protectedResult.value.code;
   const wikilinkExcludedRanges = mergeSourceRanges(
     ranges,
