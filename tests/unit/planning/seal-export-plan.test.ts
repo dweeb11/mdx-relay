@@ -172,6 +172,14 @@ const expandSharedImageActions = (
     });
   }
   plan.actions = expanded;
+  plan.targetOutputs = expanded.map(
+    ({ documentOrder, targetPath, sealedOutput, sourceOccurrence }) => ({
+      documentOrder,
+      targetPath,
+      sealedOutput,
+      sourceOccurrence,
+    }),
+  );
   const targets = expanded
     .map((action) => ({
       relativePath: action.targetPath as string,

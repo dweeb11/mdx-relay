@@ -9,6 +9,7 @@ import type {
   SourceImageMetadata,
   SourceNoteMetadata,
   TargetFolderSnapshot,
+  TargetOutputAssociation,
   TargetSnapshotEntry,
   ValidatedPortableProfileSnapshot,
 } from "../contracts/export-plan";
@@ -141,6 +142,7 @@ export interface UnsealedExportPlan {
   readonly targetFolderSnapshot: TargetFolderSnapshot;
   readonly approvalFingerprint: ApprovalFingerprint;
   readonly generatedMdx: SealedOutput;
+  readonly targetOutputs: readonly TargetOutputAssociation[];
   readonly actions: readonly ExportAction[];
   readonly blobs: Readonly<Record<string, SealedOutput>>;
   readonly issues: readonly WarningIssue[];
@@ -474,6 +476,17 @@ export function buildExportPlan(
       })
     : [];
 
+  const targetOutputs = Object.freeze(
+    planned.map((target) =>
+      Object.freeze({
+        documentOrder: target.documentOrder,
+        targetPath: target.relativePath,
+        sealedOutput: target.sealedOutput,
+        sourceOccurrence: target.sourceOccurrence,
+      }),
+    ),
+  );
+
   const planTargets = orderedTargets(
     planned.map((target) => priorByPath.get(target.relativePath)!),
   );
@@ -576,6 +589,7 @@ export function buildExportPlan(
     targetFolderSnapshot,
     approvalFingerprint,
     generatedMdx,
+    targetOutputs,
     actions: Object.freeze(actions),
     blobs: Object.freeze(blobs),
     issues: Object.freeze([...input.warnings]),

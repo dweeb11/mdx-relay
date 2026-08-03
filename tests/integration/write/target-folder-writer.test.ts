@@ -40,6 +40,10 @@ import {
   type PlanSourceBytes,
 } from "../../../src/planning/build-export-plan";
 import {
+  buildPlanIdentityManifest,
+  computePlanId,
+} from "../../../src/planning/plan-verification";
+import {
   sealExportPlan,
   type SealedExportPlanEnvelope,
 } from "../../../src/planning/seal-export-plan";
@@ -396,6 +400,72 @@ describe("approved target-folder writes", () => {
     expect(result.report.completed).toEqual([]);
     expect(await readFile(sentinel, "utf8")).toBe("sentinel");
     expect(new Uint8Array(await readFile(mdxPath))).toEqual(MDX_BYTES);
+  });
+
+  it("rejects a resealed no-change target/output digest swap", async () => {
+    const mdxPath = join(targetRoot, "content/posts/example.mdx");
+    const imagePath = join(targetRoot, "public/posts/example/img-1.webp");
+    await mkdir(dirname(mdxPath), { recursive: true });
+    await mkdir(dirname(imagePath), { recursive: true });
+    await writeFile(mdxPath, MDX_BYTES);
+    await writeFile(imagePath, IMAGE_BYTES);
+    const targets = targetsWith({
+      "content/posts/example.mdx": {
+        state: "regularFile",
+        contentSha256: sha256OfBytes(MDX_BYTES),
+      },
+      "public/posts/example/img-1.webp": {
+        state: "regularFile",
+        contentSha256: sha256OfBytes(IMAGE_BYTES),
+      },
+    });
+    const envelope = sealedPlan(targetRoot, {
+      priorTargets: targets,
+      finalCapture: { ...buildInput(targetRoot).finalCapture, targets },
+    });
+    if (envelope.state !== "no-changes")
+      throw new Error("expected a no-changes plan");
+
+    const forged = structuredClone(envelope.plan);
+    const forgedTargets = forged.targetFolderSnapshot.targets as unknown as {
+      priorState: { contentSha256: string };
+    }[];
+    const first = forgedTargets[0]!.priorState.contentSha256;
+    forgedTargets[0]!.priorState.contentSha256 =
+      forgedTargets[1]!.priorState.contentSha256;
+    forgedTargets[1]!.priorState.contentSha256 = first;
+    (
+      forged.approvalFingerprint.targetFolderSnapshot as unknown as {
+        targets: unknown[];
+      }
+    ).targets = forgedTargets;
+    (forged as { planId: PlanId }).planId = computePlanId(
+      buildPlanIdentityManifest(forged),
+    );
+
+    // Make live files agree with the forged snapshot. Digest-set validation
+    // alone accepts this swap even though each path now has the wrong output.
+    await writeFile(mdxPath, IMAGE_BYTES);
+    await writeFile(imagePath, MDX_BYTES);
+    const result = await applyApprovedWrites(
+      writeInput(envelope, targetRoot, {
+        plan: forged,
+        approval: { planId: forged.planId },
+        approvalTransition: {
+          generationToken: forged.generationToken,
+          planId: forged.planId,
+        },
+        currentApprovalFingerprint: structuredClone(forged.approvalFingerprint),
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.report.failed[0]).toMatchObject({
+      targetPath: "",
+      issue: { code: ISSUE_CODES.staleApproval },
+    });
   });
 
   it.each(["edited", "deleted"] as const)(

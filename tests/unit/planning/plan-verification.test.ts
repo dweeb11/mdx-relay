@@ -203,6 +203,14 @@ const expandSharedImageActions = (
     });
   }
   plan.actions = expanded;
+  plan.targetOutputs = expanded.map(
+    ({ documentOrder, targetPath, sealedOutput, sourceOccurrence }) => ({
+      documentOrder,
+      targetPath,
+      sealedOutput,
+      sourceOccurrence,
+    }),
+  );
   const targets = expanded
     .map((action) => ({
       relativePath: action.targetPath as string,
@@ -271,6 +279,14 @@ const expandDistinctActionOutputBlobs = (
     });
   }
   plan.actions = expanded;
+  plan.targetOutputs = expanded.map(
+    ({ documentOrder, targetPath, sealedOutput, sourceOccurrence }) => ({
+      documentOrder,
+      targetPath,
+      sealedOutput,
+      sourceOccurrence,
+    }),
+  );
   plan.blobs = blobs;
   const orderedOutputs = Object.values(blobs).sort((left, right) => {
     const leftPath = (left as { planRelativePath: string }).planRelativePath;
@@ -1085,6 +1101,78 @@ describe("verifyStoredExportPlan", () => {
         envelope.blobBytes,
       ),
     ).toBeUndefined();
+  });
+
+  it("rejects resealed no-change plans that swap target output digests", () => {
+    const targets = unchangedTargets();
+    const envelope = sealOrThrow({
+      priorTargets: targets,
+      finalCapture: { ...buildInput().finalCapture, targets },
+    });
+    expect(envelope.state).toBe("no-changes");
+
+    const swapped = reseal(envelope, (plan) => {
+      const snapshot = plan.targetFolderSnapshot as {
+        targets: { priorState: { contentSha256: string } }[];
+      };
+      const first = snapshot.targets[0]!.priorState.contentSha256;
+      snapshot.targets[0]!.priorState.contentSha256 =
+        snapshot.targets[1]!.priorState.contentSha256;
+      snapshot.targets[1]!.priorState.contentSha256 = first;
+      (
+        plan.approvalFingerprint as { targetFolderSnapshot: unknown }
+      ).targetFolderSnapshot = snapshot;
+    });
+
+    expect(structuralCode(swapped, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(tamperCode(swapped, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+  });
+
+  it("rejects resealed no-change plans that omit a target sharing a digest", () => {
+    const targets: readonly TargetSnapshotEntry[] = [
+      {
+        relativePath: "content/posts/example.mdx",
+        priorState: {
+          state: "regularFile",
+          contentSha256: sha256OfBytes(MDX_BYTES),
+        },
+      },
+      ...["img-1.webp", "img-2.webp"].map((fileName) => ({
+        relativePath: `public/posts/example/${fileName}`,
+        priorState: {
+          state: "regularFile" as const,
+          contentSha256: sha256OfBytes(IMAGE_BYTES),
+        },
+      })),
+    ];
+    const envelope = sealOrThrow({
+      imageEmbeds: [
+        { sourceId: "image-a", assetFileName: "img-1.webp" },
+        { sourceId: "image-a", assetFileName: "img-2.webp" },
+      ],
+      priorTargets: targets,
+      finalCapture: { ...buildInput().finalCapture, targets },
+    });
+    expect(envelope.state).toBe("no-changes");
+
+    const omitted = reseal(envelope, (plan) => {
+      const snapshot = plan.targetFolderSnapshot as { targets: unknown[] };
+      snapshot.targets.splice(2, 1);
+      (
+        plan.approvalFingerprint as { targetFolderSnapshot: unknown }
+      ).targetFolderSnapshot = snapshot;
+    });
+
+    expect(structuralCode(omitted, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
+    expect(tamperCode(omitted, envelope.blobBytes)).toBe(
+      ISSUE_CODES.storageTampered,
+    );
   });
 
   it("separates elapsed plans from tampering and rejects unusable clocks", () => {

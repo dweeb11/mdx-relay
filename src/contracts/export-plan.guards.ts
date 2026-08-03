@@ -17,6 +17,7 @@ import type {
   SourceImageMetadata,
   SourceNoteMetadata,
   TargetFolderSnapshot,
+  TargetOutputAssociation,
   VerifiedReadyExportPlan,
 } from "./export-plan.types";
 
@@ -258,6 +259,20 @@ const isExportAction = (value: unknown): value is ExportAction =>
     (value.kind === "update" &&
       value.approvedPriorTarget.state === "regularFile"));
 
+const isTargetOutputAssociation = (
+  value: unknown,
+): value is TargetOutputAssociation =>
+  exactObject(value, [
+    "documentOrder",
+    "targetPath",
+    "sealedOutput",
+    "sourceOccurrence",
+  ]) &&
+  isNonnegativeInteger(value.documentOrder) &&
+  isTargetRelativePath(value.targetPath) &&
+  isSealedOutput(value.sealedOutput) &&
+  isNonnegativeInteger(value.sourceOccurrence);
+
 /** Stored warning issues must equal registry-owned policy exactly. */
 const isWarningIssue = (value: unknown): value is WarningIssue =>
   isMdxRelayIssue(value) && value.severity === "warning";
@@ -290,6 +305,7 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
       "targetFolderSnapshot",
       "approvalFingerprint",
       "generatedMdx",
+      "targetOutputs",
       "actions",
       "blobs",
       "issues",
@@ -358,7 +374,14 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
     !value.actions.every(isExportAction)
   )
     return false;
+  if (
+    !Array.isArray(value.targetOutputs) ||
+    value.targetOutputs.length !== value.actions.length ||
+    !value.targetOutputs.every(isTargetOutputAssociation)
+  )
+    return false;
 
+  const targetOutputs = value.targetOutputs;
   const blobs = value.blobs as Record<string, SealedOutput>;
   const generatedMdx = value.generatedMdx as SealedOutput;
   const matchesBlob = (sealedOutput: SealedOutput): boolean => {
@@ -367,7 +390,14 @@ const hasFullReadyPlanShape = (value: unknown): value is ReadyExportPlan => {
   };
   if (
     !matchesBlob(generatedMdx) ||
-    !value.actions.every((action) => matchesBlob(action.sealedOutput))
+    !value.actions.every((action) => matchesBlob(action.sealedOutput)) ||
+    value.actions.some(
+      (action, index) =>
+        !sameValue(action.sealedOutput, targetOutputs[index]!.sealedOutput) ||
+        action.documentOrder !== targetOutputs[index]!.documentOrder ||
+        action.targetPath !== targetOutputs[index]!.targetPath ||
+        action.sourceOccurrence !== targetOutputs[index]!.sourceOccurrence,
+    )
   )
     return false;
 

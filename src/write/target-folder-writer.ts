@@ -770,19 +770,36 @@ export async function applyApprovedWrites(
   if (plan.state === "no-changes") {
     if (plan.actions.length !== 0 || snapshot.targets.length === 0)
       return globalFailure(ISSUE_CODES.staleApproval);
-    const expectedDigests = new Set(
-      Object.values(plan.blobs).map((output) => output.contentSha256),
+    if (plan.targetOutputs.length !== snapshot.targets.length)
+      return globalFailure(ISSUE_CODES.staleApproval);
+    const outputByTarget = new Map(
+      plan.targetOutputs.map((target) => [
+        target.targetPath,
+        target.sealedOutput,
+      ]),
     );
-    const observedDigests = new Set<Sha256Digest>();
     for (const target of snapshot.targets) {
+      const output = outputByTarget.get(target.relativePath);
+      const blob = output && plan.blobs[output.contentSha256];
       if (
         target.priorState.state !== "regularFile" ||
-        !expectedDigests.has(target.priorState.contentSha256)
+        output === undefined ||
+        blob === undefined ||
+        target.priorState.contentSha256 !== output.contentSha256 ||
+        blob.planRelativePath !== output.planRelativePath ||
+        blob.byteLength !== output.byteLength ||
+        blob.contentSha256 !== output.contentSha256
       )
         return globalFailure(ISSUE_CODES.staleApproval);
-      observedDigests.add(target.priorState.contentSha256);
     }
-    if (![...expectedDigests].every((digest) => observedDigests.has(digest)))
+    if (
+      outputByTarget.size !== snapshot.targets.length ||
+      !Object.keys(plan.blobs).every((digest) =>
+        plan.targetOutputs.some(
+          (target) => target.sealedOutput.contentSha256 === digest,
+        ),
+      )
+    )
       return globalFailure(ISSUE_CODES.staleApproval);
     for (let index = 0; index < snapshot.targets.length; index += 1) {
       const target = snapshot.targets[index]!;

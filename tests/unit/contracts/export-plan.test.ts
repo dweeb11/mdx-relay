@@ -135,6 +135,20 @@ const completeReadyPlan = (): VerifiedReadyExportPlan => {
     targetFolderSnapshot: targetFolderSnapshot(),
     approvalFingerprint: approvalFingerprint(),
     generatedMdx,
+    targetOutputs: [
+      {
+        documentOrder: 0,
+        targetPath: "content/post.mdx",
+        sealedOutput: generatedMdx,
+        sourceOccurrence: 0,
+      },
+      {
+        documentOrder: 1,
+        targetPath: "public/post/img-1.webp",
+        sealedOutput: image,
+        sourceOccurrence: 1,
+      },
+    ],
     actions: [
       {
         kind: "create",
@@ -327,6 +341,8 @@ describe("ExportPlan contract", () => {
         compareCodeUnitStrings(left.relativePath, right.relativePath),
       );
       (plan.actions[1] as unknown as { targetPath: string }).targetPath =
+        "Content/Post.mdx";
+      (plan.targetOutputs[1] as unknown as { targetPath: string }).targetPath =
         "Content/Post.mdx";
       (
         plan.approvalFingerprint as unknown as {
@@ -645,6 +661,7 @@ describe("ExportPlan contract", () => {
       "targetFolderSnapshot",
       "approvalFingerprint",
       "generatedMdx",
+      "targetOutputs",
       "actions",
       "blobs",
       "issues",
@@ -667,6 +684,7 @@ describe("ExportPlan contract", () => {
       { ...plan, sourceNote: {} },
       { ...plan, sourceImages: [{}] },
       { ...plan, generatedMdx: {} },
+      { ...plan, targetOutputs: [{}] },
       { ...plan, actions: [{}] },
       {
         ...plan,
@@ -1128,6 +1146,10 @@ describe("ExportPlan contract", () => {
     const ordered = {
       ...plan,
       generatedMdx,
+      targetOutputs: [
+        { ...plan.targetOutputs[0]!, sealedOutput: generatedMdx },
+        { ...plan.targetOutputs[1]!, sealedOutput: imageOutput },
+      ],
       actions: [
         { ...plan.actions[0]!, sealedOutput: generatedMdx },
         { ...plan.actions[1]!, sealedOutput: imageOutput },
