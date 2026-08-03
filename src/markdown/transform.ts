@@ -40,6 +40,48 @@ const supportedImage = /\.(?:jpe?g|png|webp)$/iu;
 const externalSchemes = new Set(["http", "https", "mailto", "tel"]);
 const explicitScheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u;
 const unsupportedHtml = /<(?:\/?[A-Z]|>|\/>)/u;
+/** Structural: the tag names a URL attribute. Does not read the attribute value. */
+const htmlUrlAttribute = /\s(?:href|src)\s*=/iu;
+
+/**
+ * Decode character references and percent-escapes in a micromark destination
+ * slice without normalizing path separators. The userinfo check must see the
+ * destination after entity/% decoding; collapsing `\` would invent structure
+ * the note did not write.
+ */
+const decodeDestinationText = (value: string): string => {
+  let decoded = decodeString(value.trim());
+  try {
+    for (;;) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    }
+  } catch {
+    // Keep the character-reference decode when percent-decoding fails.
+  }
+  return decoded;
+};
+
+/**
+ * Note-link credential predicate: refuse only when URL userinfo is present.
+ * Resolve against an opaque placeholder so protocol-relative and relative
+ * destinations parse; read only username/password. Parse failure is not a hit.
+ * Profile Git-remote heuristics (`isCredentialBearingUrl`) are deliberately
+ * not used here — see APP-652 / APP-657.
+ */
+const destinationHasUserinfo = (value: string): boolean => {
+  try {
+    const parsed = new URL(value, "https://placeholder.invalid");
+    return parsed.username.length > 0 || parsed.password.length > 0;
+  } catch {
+    return false;
+  }
+};
+
+const destinationHoldsCredential = (raw: string): boolean =>
+  destinationHasUserinfo(raw) ||
+  destinationHasUserinfo(decodeDestinationText(raw));
 
 const normalizeDestination = (value: string): string | undefined => {
   let decoded = decodeString(value.trim());
@@ -107,6 +149,21 @@ const unsupported = (
   err(
     createIssue(
       ISSUE_CODES.unsupportedMarkdown,
+      {},
+      {
+        sourceRange: rangeAt(source, start, end),
+      },
+    ),
+  );
+
+const credentialUrlAt = (
+  source: string,
+  start: number,
+  end: number,
+): Result<never, MdxRelayIssue> =>
+  err(
+    createIssue(
+      ISSUE_CODES.noteCredentialUrl,
       {},
       {
         sourceRange: rangeAt(source, start, end),
@@ -412,7 +469,7 @@ const firstUnsupported = (
         isLocalAttachmentDestination(text);
       const isUnsupportedHtml =
         (token.type === "htmlText" || token.type === "htmlFlow") &&
-        unsupportedHtml.test(text.trimStart());
+        (unsupportedHtml.test(text.trimStart()) || htmlUrlAttribute.test(text));
       if (
         token.type === "image" ||
         isAttachmentDestination ||
@@ -514,6 +571,18 @@ export async function transformMarkdown(
       parsed.value.bodyOffset + range.end.offset,
     );
   }
+
+  for (const range of protectedResult.value.destinations) {
+    const raw = body.slice(range.start.offset, range.end.offset);
+    if (destinationHoldsCredential(raw)) {
+      return credentialUrlAt(
+        source,
+        parsed.value.bodyOffset + range.start.offset,
+        parsed.value.bodyOffset + range.end.offset,
+      );
+    }
+  }
+
   const ranges = protectedResult.value.code;
   const wikilinkExcludedRanges = mergeSourceRanges(
     ranges,
