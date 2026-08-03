@@ -372,15 +372,38 @@ describe("transformMarkdown", () => {
     const result = await transformMarkdown(note(body), DPW_MIND_NET_V1);
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.code).toBe(ISSUE_CODES.credentialUrl);
+    expect(result.error.code).toBe(ISSUE_CODES.noteCredentialUrl);
     expect(result.error.severity).toBe("blocker");
+    expect(result.error.stage).toBe("markdown");
+    expect(result.error.recoveryActions).toEqual(["edit-note"]);
+    expect(result.error.code).not.toBe(ISSUE_CODES.credentialUrl);
     expect(result.error.sourceRange).toBeDefined();
     expect(result.error.sourceRange!.end.offset).toBeGreaterThan(
       result.error.sourceRange!.start.offset,
     );
   });
 
-  it("refuses a credential-bearing frontmatter metadata value", async () => {
+  it("treats frontmatter prose as unscanned, including embedded credentials", async () => {
+    // Narrowed scope: frontmatter values are prose, and prose is not scanned.
+    const source = [
+      "---",
+      "title: Synthetic Note",
+      "date: 26.07.22",
+      "summary: See https://user:token@example.test/x",
+      "labels: [public]",
+      "topic: examples",
+      'msg: "#002"',
+      "read: 3 min",
+      "---",
+      "Plain body.",
+    ].join("\n");
+    const result = await transformMarkdown(source, DPW_MIND_NET_V1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("See https://user:token@example.test/x");
+  });
+
+  it("treats a whole-value frontmatter credential URL as unscanned prose", async () => {
     const source = [
       "---",
       "title: Synthetic Note",
@@ -394,13 +417,12 @@ describe("transformMarkdown", () => {
       "Plain body.",
     ].join("\n");
     const result = await transformMarkdown(source, DPW_MIND_NET_V1);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe(ISSUE_CODES.credentialUrl);
-    expect(result.error.sourceRange?.start.offset).toBe(0);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("https://u:p@h.test/x");
   });
 
-  it("refuses a credential-bearing frontmatter label", async () => {
+  it("treats a credential-bearing frontmatter label as unscanned prose", async () => {
     const source = [
       "---",
       "title: Synthetic Note",
@@ -414,9 +436,9 @@ describe("transformMarkdown", () => {
       "Plain body.",
     ].join("\n");
     const result = await transformMarkdown(source, DPW_MIND_NET_V1);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe(ISSUE_CODES.credentialUrl);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mdx).toContain("https://u:p@h.test/x");
   });
 
   it("keeps ordinary prose, paths, and plain links that are not destinations", async () => {

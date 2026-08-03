@@ -636,9 +636,9 @@ type OutputPreflight =
  *
  * Note what this does NOT do: a digest proves the bytes are the approved ones,
  * not that they are safe to write. Credential rejection for parsed link
- * destinations, image sources, autolinks, and frontmatter values is enforced
- * earlier in the pure transform core (ADR 0003); this preflight only asserts
- * sealed-byte identity before mutation begins.
+ * destinations, image sources, and autolinks is enforced earlier in the pure
+ * transform core (ADR 0003); this preflight only asserts sealed-byte identity
+ * before mutation begins.
  */
 const preflightSealedOutputs = (
   actions: readonly ExportAction[],

@@ -11,11 +11,7 @@ import {
 import { err, ok, type Result } from "../contracts/result";
 import { isCredentialBearingUrl } from "../profiles/credential-url";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
-import {
-  parseFrontmatter,
-  type FrontmatterOptions,
-  type ParsedFrontmatter,
-} from "./frontmatter";
+import { parseFrontmatter, type FrontmatterOptions } from "./frontmatter";
 import { findProtectedRanges, mergeSourceRanges } from "./protected-ranges";
 import { validateMdx } from "./validate-mdx";
 
@@ -152,28 +148,13 @@ const credentialUrlAt = (
 ): Result<never, MdxRelayIssue> =>
   err(
     createIssue(
-      ISSUE_CODES.credentialUrl,
+      ISSUE_CODES.noteCredentialUrl,
       {},
       {
         sourceRange: rangeAt(source, start, end),
       },
     ),
   );
-
-const frontmatterHoldsCredential = (
-  metadata: ParsedFrontmatter["metadata"],
-): boolean => {
-  const values: readonly string[] = [
-    metadata.title,
-    metadata.date,
-    metadata.summary,
-    metadata.topic,
-    metadata.msg,
-    metadata.read,
-    ...metadata.labels,
-  ];
-  return values.some((value) => destinationHoldsCredential(value));
-};
 
 const overlapsProtected = (
   edit: Edit,
@@ -562,10 +543,6 @@ export async function transformMarkdown(
 ): Promise<Result<MarkdownTransformResult, MdxRelayIssue>> {
   const parsed = parseFrontmatter(source, options);
   if (!parsed.ok) return parsed;
-
-  if (frontmatterHoldsCredential(parsed.value.metadata)) {
-    return credentialUrlAt(source, 0, parsed.value.bodyOffset);
-  }
 
   const body = parsed.value.body;
   const protectedResult = findProtectedRanges(body);
