@@ -23,6 +23,10 @@ const packageJson = JSON.parse(
 const packageLock = JSON.parse(
   readFileSync(new URL("../../../package-lock.json", import.meta.url), "utf8"),
 ) as PackageLock;
+const dependabotConfig = readFileSync(
+  new URL("../../../.github/dependabot.yml", import.meta.url),
+  "utf8",
+);
 
 describe("Node type definitions", () => {
   it("stay on the single Node major supported at runtime", () => {
@@ -47,5 +51,11 @@ describe("Node type definitions", () => {
     );
     expect(rootPackage.devDependencies?.["@types/node"]).toBe(declaredVersion);
     expect(nodeTypesPackage.version).toBe(declaredVersion);
+  });
+
+  it("blocks Dependabot from crossing the runtime Node major", () => {
+    expect(dependabotConfig).toMatch(
+      /dependency-name: ["']@types\/node["'][\s\S]*?update-types:\s*\n\s*- version-update:semver-major/,
+    );
   });
 });
