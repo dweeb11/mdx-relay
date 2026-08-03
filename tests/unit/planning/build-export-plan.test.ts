@@ -322,7 +322,7 @@ describe("buildExportPlan", () => {
     }).plan;
     expect(noChanges.state).toBe("no-changes");
     expect(noChanges.actions).toEqual([]);
-    expect(noChanges.targetFolderSnapshot.targets).toEqual([]);
+    expect(noChanges.targetFolderSnapshot.targets).toEqual(unchanged);
     expect(Object.keys(noChanges.blobs)).toHaveLength(3);
   });
 

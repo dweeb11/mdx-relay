@@ -175,17 +175,6 @@ describe("ExportPlan contract", () => {
       ...ready,
       state: "no-changes",
       actions: [] as const,
-      targetFolderSnapshot: {
-        ...ready.targetFolderSnapshot,
-        targets: [],
-      },
-      approvalFingerprint: {
-        ...ready.approvalFingerprint,
-        targetFolderSnapshot: {
-          ...ready.targetFolderSnapshot,
-          targets: [],
-        },
-      },
     } satisfies NoChangesExportPlan;
     const blocked = {
       state: "blocked",
@@ -206,7 +195,9 @@ describe("ExportPlan contract", () => {
     void invalidNoChanges;
     expect(ready.actions).toHaveLength(2);
     expect(noChanges.actions).toEqual([]);
-    expect(noChanges.targetFolderSnapshot.targets).toEqual([]);
+    expect(noChanges.targetFolderSnapshot.targets).toEqual(
+      ready.targetFolderSnapshot.targets,
+    );
     expect("planId" in blocked).toBe(false);
     expect("generatedMdx" in blocked).toBe(false);
   });

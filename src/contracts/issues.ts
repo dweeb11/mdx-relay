@@ -33,6 +33,7 @@ export type IssueStage =
   | "approval"
   | "repository"
   | "git"
+  | "write"
   | "recovery"
   | "remote";
 
@@ -76,6 +77,9 @@ export const ISSUE_CODES = Object.freeze({
   unsupportedRepository: "UNSUPPORTED_REPOSITORY",
   hostileGitConfig: "HOSTILE_GIT_CONFIG",
   targetChanged: "TARGET_CHANGED",
+  unsafeTarget: "UNSAFE_TARGET",
+  unsupportedTarget: "UNSUPPORTED_TARGET",
+  targetWriteFailed: "TARGET_WRITE_FAILED",
   gitExecutionFailed: "GIT_EXECUTION_FAILED",
   rollbackFailed: "ROLLBACK_FAILED",
   recoveryRequired: "RECOVERY_REQUIRED",
@@ -348,6 +352,24 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     stage: "git",
     recoveryActions: previewAgain,
     summary: "A planned target changed after preview.",
+  },
+  [ISSUE_CODES.unsafeTarget]: {
+    severity: "blocker",
+    stage: "write",
+    recoveryActions: previewAgain,
+    summary: "A write target path is unsafe or escapes the configured root.",
+  },
+  [ISSUE_CODES.unsupportedTarget]: {
+    severity: "blocker",
+    stage: "write",
+    recoveryActions: previewAgain,
+    summary: "A write target has an unsupported file type.",
+  },
+  [ISSUE_CODES.targetWriteFailed]: {
+    severity: "blocker",
+    stage: "write",
+    recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
+    summary: "An approved target file could not be written safely.",
   },
   [ISSUE_CODES.gitExecutionFailed]: {
     severity: "blocker",
@@ -638,14 +660,14 @@ if (import.meta.vitest) {
           definition.summary,
         ]);
       expect(snapshotHash([...codes].sort())).toBe(
-        "35d1dac7ff51deb44300e383837787cddc82df329f75956dc8cf02e5c2bc11db",
+        "24dada48581efe230a3b28b83c645e6436801a485db22057a8a1f5170e6e02f3",
       );
       expect(snapshotHash(Object.values(RECOVERY_ACTIONS).sort())).toBe(
         "235a3f3eb94625c1087d70b1687d03e3ed54725c88c57a23de77aec4faa36a1d",
       );
       // Intentional approval gate: fixed summaries are part of the exact policy snapshot.
       expect(snapshotHash(policy)).toBe(
-        "dd0833b00016a6d0efee16bdf348a9c8c6348026b209e0add6b993ce3e9fe019",
+        "25dc81952a4192357e06c64abf834be51f4018f89acbb4bca5f2d16319c60189",
       );
     });
 

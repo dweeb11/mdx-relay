@@ -512,7 +512,7 @@ describe("private plan storage", () => {
     );
   });
 
-  it("stores approval as the exact plan ID and only for the pinned ready plan", async () => {
+  it("stores approval as the exact plan ID for pinned writable plans", async () => {
     const envelope = sealedPlan();
     await publishSealedPlan(deps, envelope);
 
@@ -540,10 +540,12 @@ describe("private plan storage", () => {
     const noChanges = unchangedPlan();
     await publishSealedPlan(deps, noChanges);
     expect(
-      await failureCode(
-        recordPlanApproval(deps, noChanges.planId, sourceBytes()),
-      ),
-    ).toBe(ISSUE_CODES.approvalMismatch);
+      (await recordPlanApproval(deps, noChanges.planId, sourceBytes())).ok,
+    ).toBe(true);
+    const noChangesApproval = await readPlanApproval(deps, noChanges.planId);
+    expect(noChangesApproval.ok && noChangesApproval.value).toBe(
+      noChanges.planId,
+    );
   });
 
   it("reports missing plans and approvals rather than guessing", async () => {

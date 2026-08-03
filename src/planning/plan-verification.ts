@@ -671,18 +671,33 @@ const hasReadyPlanStructure = (value: Record<string, unknown>): boolean => {
 };
 
 /**
- * No-changes plans keep reviewable blobs (MDX and images) but leave actions
- * and target-folder snapshot entries genuinely empty. Image transforms may
- * name only image blobs — never the MDX digest.
+ * No-changes plans keep reviewable blobs (MDX and images), no actions, and the
+ * non-empty target snapshot that proved those outputs already existed. Image
+ * transforms may name only image blobs — never the MDX digest.
  */
 const hasNoChangesPlanStructure = (value: Record<string, unknown>): boolean => {
   if (value.state !== "no-changes" || !hasSharedPlanStructure(value))
     return false;
   if (!Array.isArray(value.actions) || value.actions.length !== 0) return false;
   const snapshot = value.targetFolderSnapshot as TargetFolderSnapshot;
-  if (snapshot.targets.length !== 0) return false;
+  if (snapshot.targets.length === 0) return false;
 
   const blobs = value.blobs as Record<string, SealedOutput>;
+  const expectedDigests = new Set(
+    Object.values(blobs).map((output) => output.contentSha256),
+  );
+  const observedDigests = new Set<Sha256Digest>();
+  for (const target of snapshot.targets) {
+    if (
+      target.priorState.state !== "regularFile" ||
+      !expectedDigests.has(target.priorState.contentSha256)
+    )
+      return false;
+    observedDigests.add(target.priorState.contentSha256);
+  }
+  if (![...expectedDigests].every((digest) => observedDigests.has(digest)))
+    return false;
+
   const generatedMdx = value.generatedMdx as SealedOutput;
   const sourceImages = value.sourceImages as readonly SourceImageMetadata[];
   const imageBlobKeys = new Set(
