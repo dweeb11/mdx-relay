@@ -9,7 +9,6 @@ import {
   type SourceRange,
 } from "../contracts/issues";
 import { err, ok, type Result } from "../contracts/result";
-import { isCredentialBearingUrl } from "../profiles/credential-url";
 import type { PortableProfileV1 } from "../profiles/profile-schema";
 import { parseFrontmatter, type FrontmatterOptions } from "./frontmatter";
 import { findProtectedRanges, mergeSourceRanges } from "./protected-ranges";
@@ -46,9 +45,9 @@ const htmlUrlAttribute = /\s(?:href|src)\s*=/iu;
 
 /**
  * Decode character references and percent-escapes in a micromark destination
- * slice without normalizing path separators. The credential predicate must see
- * the same authority shape CommonMark leaves in the source after entity/%
- * decoding; collapsing `\` would change that rule's truncation/backslash class.
+ * slice without normalizing path separators. The userinfo check must see the
+ * destination after entity/% decoding; collapsing `\` would invent structure
+ * the note did not write.
  */
 const decodeDestinationText = (value: string): string => {
   let decoded = decodeString(value.trim());
@@ -64,9 +63,25 @@ const decodeDestinationText = (value: string): string => {
   return decoded;
 };
 
+/**
+ * Note-link credential predicate: refuse only when URL userinfo is present.
+ * Resolve against an opaque placeholder so protocol-relative and relative
+ * destinations parse; read only username/password. Parse failure is not a hit.
+ * Profile Git-remote heuristics (`isCredentialBearingUrl`) are deliberately
+ * not used here — see APP-652 / APP-657.
+ */
+const destinationHasUserinfo = (value: string): boolean => {
+  try {
+    const parsed = new URL(value, "https://placeholder.invalid");
+    return parsed.username.length > 0 || parsed.password.length > 0;
+  } catch {
+    return false;
+  }
+};
+
 const destinationHoldsCredential = (raw: string): boolean =>
-  isCredentialBearingUrl(raw) ||
-  isCredentialBearingUrl(decodeDestinationText(raw));
+  destinationHasUserinfo(raw) ||
+  destinationHasUserinfo(decodeDestinationText(raw));
 
 const normalizeDestination = (value: string): string | undefined => {
   let decoded = decodeString(value.trim());

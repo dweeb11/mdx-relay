@@ -144,15 +144,19 @@ refused in the pure transform core before bytes are sealed. The gate runs over
 micromark-parsed URL positions only — link destinations, image sources, and
 autolinks — never over undifferentiated output bytes or free-text fields.
 Destination text is decoded for character references and percent-escapes, then
-checked with the canonical `isCredentialBearingUrl` predicate; a hit is a
-transform-time blocker (`NOTE_CREDENTIAL_URL`) and surfaces as a Blocked
-preview with `edit-note` recovery. Prose is not scanned, in the body or in
-frontmatter. Raw HTML that carries a URL attribute (`href` or `src`) is refused
-as unsupported markdown rather than scanned: notes should use Markdown links,
-which the destination gate already covers, and blocking on the attribute name
-avoids any attribute-value parsing surface. Image binaries are likewise not
-scanned. The writer does not re-check credentials: sealed bytes have already
-passed this structural gate.
+checked for URL userinfo only (`username` or `password` non-empty after
+`URL` parse against an opaque placeholder base). A hit is a transform-time
+blocker (`NOTE_CREDENTIAL_URL`) and surfaces as a Blocked preview with
+`edit-note` recovery. This tier is certain and heuristic-free: ordinary links
+with query strings or fragments are not refused. A query-string secret in a
+note link (for example `?access_token=…`) is NOT refused today — that tier,
+together with converting unscanned raw-HTML URL attributes from unsupported
+blockers into warnings, is tracked as future WARNINGS in APP-657. Prose is not
+scanned, in the body or in frontmatter. Raw HTML that carries a URL attribute
+(`href` or `src`) is still refused as unsupported markdown as an interim
+measure (APP-657 will soften that). Image binaries are likewise not scanned.
+The writer does not re-check credentials: sealed bytes have already passed this
+structural gate.
 
 **Not protected against — filesystem races.** A hostile local process that races
 individual filesystem syscalls. Because Node's pathname APIs cannot make
