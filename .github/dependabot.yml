@@ -20,9 +20,16 @@ updates:
           - "@eslint/*"
           - typescript-eslint
           # typescript is grouped here because typescript-eslint constrains it
-          # via peer range (">=4.8.4 <6.1.0" as of 8.66.0). Bumped separately,
+          # via peer range (">=4.8.4 <6.1.0" as of 8.65.0). Bumped separately,
           # a TypeScript major opens a PR that cannot resolve. See PR #59.
           - typescript
+    ignore:
+      # Keep compatible 6.0.x updates flowing, but do not propose versions outside
+      # typescript-eslint's declared peer range. Remove or raise this ceiling
+      # when the active typescript-eslint release accepts newer TypeScript.
+      - dependency-name: typescript
+        versions:
+          - ">=6.1.0"
     labels:
       - dependencies
 
