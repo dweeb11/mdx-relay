@@ -14,6 +14,8 @@ const protectedTokenTypes = new Set(["codeText", "codeFenced", "codeIndented"]);
 const destinationTokenTypes = new Set([
   "resourceDestinationString",
   "definitionDestinationString",
+  "autolinkProtocol",
+  "autolinkEmail",
 ]);
 
 export interface MarkdownSourceRanges {
