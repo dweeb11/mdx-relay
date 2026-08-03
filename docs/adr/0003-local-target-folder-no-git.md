@@ -65,10 +65,16 @@ untrusted submitter anywhere in the flow.
 
 **The governing rule: inputs are trusted, output leaves the trust domain.**
 
-Source notes and inline images are trusted input. An actor who can modify them
-has already achieved anything the plugin could be tricked into doing, by the
-simpler route of editing the note. Written output is different in kind: the user
-publishes it, so it leaves the machine and stops being private.
+Source notes and inline images are trusted input. Ordinary source edits still
+invalidate approval when live bytes are revalidated. MDX Relay does not,
+however, claim to preserve approval against a hostile local process that can
+jointly rewrite both those source bytes and the owner-only stored plan and
+approval state. Such a coordinated rewrite can cause bytes the user did not
+preview to be written even when the process cannot write the target folder
+directly; that bypass is accepted explicitly as local-adversary tampering below,
+not treated as equivalent to an ordinary source edit. Written output is
+different in kind: the user publishes it, so it leaves the machine and stops
+being private.
 
 That asymmetry, not a generic hardening instinct, decides where effort belongs.
 
@@ -83,23 +89,29 @@ basis rather than as security controls.
 **In scope — what leaves the trust domain.** Because output is published,
 credentials reaching a link destination and private source content escaping
 through profiles, plans, logs, errors, or snapshots are real harms. The adversary
-there is ordinary inattention, not a hostile process, and the corresponding
-guard is a guardrail the user can see and override at approval — not an
-exhaustive filter.
+there is ordinary inattention, not a hostile process. Credential-bearing parsed
+link destinations, image sources, autolinks, and frontmatter values must be
+blocked in the transform core before output is sealed; approval cannot override
+that block. This is a structural guard over those parsed output-bearing fields,
+not an exhaustive scan of prose or binary content.
 
-**Out of scope — resisting a local adversary.** MDX Relay does not claim
-tamper-resistance against a process already able to write the user's vault, plan
-store, or target folder. Such a process can edit the source note directly, so
-defenses that assume it can rewrite stored state but not source content protect
-nothing real. Two consequences are recorded concretely below: filesystem races,
-and coordinated stored-plan reseal.
+**Out of scope — resisting a local adversary.** MDX Relay does not claim generic
+tamper-resistance against hostile local processes. The capabilities required by
+each accepted case are stated separately rather than collapsed into one actor:
+the filesystem-race case requires access to the configured target path, while
+the coordinated stored-plan reseal requires write access to both vault source
+bytes and the distinct owner-only plan store. Write access to only one of those
+locations is not assumed to imply access to the other and is insufficient for
+the reseal described below.
 
-**When this expires.** The trusted-input half rests on the vault and plan store
-sharing one trust domain that the user controls. Revisit this section, and every
-decision resting on it, if any of the following becomes true:
+**When this expires.** The vault and plan store are distinct locations: the plan
+store is deliberately outside the vault, repository, and known sync roots. The
+decision rests on both remaining local, owner-controlled inputs, not on their
+being co-located. Revisit this section, and every decision resting on it, if any
+of the following becomes true:
 
-- the plan store is relocated outside the vault's owner-only plugin storage, so
-  that write access to one no longer implies write access to the other;
+- the plan store stops being local owner-only private storage, or becomes
+  writable by a principal that cannot also write the vault;
 - vault content arrives from a source the user does not control, including
   sync from an untrusted peer or import of third-party notes; or
 - MDX Relay gains a non-local input, a second writer, or any multi-user mode.
@@ -170,17 +182,18 @@ image outputs, mirrors the change into the approval fingerprint, recomputes the
 plan ID, *and* swaps the corresponding live vault images will have approval and
 the write proceed against the exchanged mapping.
 
-This is accepted, and no further plan field will close it. `planId` is a plain
-hash over plan content, so any self-asserted binding is restated by the same
-reseal; only a secret the actor lacks or a check against state outside the plan
-survives, and both fail here. A keyed MAC would keep its key on the same
-single-user desktop the actor already controls. The out-of-plan check already
-exists — approval re-verifies live source bytes — which is precisely why the
-attack must also swap the live vault images, and an actor who can do that can
-edit the note directly. The exploit's entire payoff is exchanging two of the
-user's own images with each other. Per the threat model above this is declined
-rather than deferred; APP-651 carries the regression asserting this documented
-behavior.
+This is accepted, and no further self-asserted plan field will close it.
+`planId` is a plain hash over plan content, so any such binding is restated by
+the same reseal. Non-forgeable authority such as a keyed MAC would be a different
+contract with key-management requirements; that option was considered and was
+not chosen. The out-of-plan check already exists — approval re-verifies live
+source bytes — which is precisely why the attack must also swap the live vault
+images. An ordinary image edit still fails that check; jointly rewriting the
+images and stored approval state bypasses it and can write an exchanged mapping
+the user did not preview. That exact approval bypass is the accepted local-
+adversary behavior, and its payoff is limited to exchanging two of the user's
+own images. Per the threat model above it is declined rather than deferred;
+APP-651 carries the regression asserting this documented behavior.
 
 **What the writer therefore guarantees:**
 
