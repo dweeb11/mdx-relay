@@ -5,9 +5,14 @@ import type {
   PlanId,
 } from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
-import { mdxRelayErr, mdxRelayOk } from "../../../src/contracts/result";
+import {
+  mdxRelayErr,
+  mdxRelayOk,
+  type MdxRelayResult,
+} from "../../../src/contracts/result";
 import {
   PreviewCommand,
+  type ApprovalRecapture,
   type BuiltPreview,
   type PreviewCommandDeps,
 } from "../../../src/obsidian/preview-command";
@@ -239,6 +244,154 @@ describe("PreviewCommand", () => {
     unloaded.unload();
     unloaded.execute();
     expect(host2.modalElements).toHaveLength(1);
+  });
+
+  it("blocks an approval that expires mid-review without changing visible identity", async () => {
+    const recapture = deferred<MdxRelayResult<ApprovalRecapture>>();
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    const recordApproval = vi.fn(async (planId: PlanId) => mdxRelayOk(planId));
+    const deps = makeDeps(host, {
+      recaptureApproval: vi.fn(() => recapture.promise),
+      recordApproval,
+    });
+    const command = new PreviewCommand(deps);
+    command.execute();
+    await flush();
+    const modal = host.latestModal();
+    const visibleIdentity = {
+      generationToken: modal.dataset.generationToken,
+      planId: modal.dataset.planId,
+    };
+
+    approve(modal);
+    expect(modal.textContent).toContain("Writing");
+    recapture.resolve(mdxRelayErr([createIssue(ISSUE_CODES.planExpired)]));
+    await flush();
+
+    expect(modal.dataset).toMatchObject(visibleIdentity);
+    expect(modal.querySelector("[data-preview-status]")?.textContent).toBe(
+      "Write failed",
+    );
+    expect(modal.textContent).toContain("PLAN_EXPIRED");
+    expect(recordApproval).not.toHaveBeenCalled();
+    expect(deps.applyApprovedWrites).not.toHaveBeenCalled();
+  });
+
+  it("drops a build resolution that arrives after plugin unload", async () => {
+    const build = deferred<MdxRelayResult<BuiltPreview>>();
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    const deps = makeDeps(host, {
+      buildPreview: vi.fn(() => build.promise),
+    });
+    const command = new PreviewCommand(deps);
+    command.execute();
+    await flush();
+    const tornDownModal = host.latestModal();
+    const beforeUnload = tornDownModal.innerHTML;
+
+    command.unload();
+    build.resolve(mdxRelayOk(buildFakePreview(token(1))));
+    await flush();
+
+    expect(tornDownModal.isConnected).toBe(false);
+    expect(tornDownModal.innerHTML).toBe(beforeUnload);
+    expect(tornDownModal.dataset.planId).toBeUndefined();
+    expect(deps.applyApprovedWrites).not.toHaveBeenCalled();
+    expect(deps.cancelGeneration).toHaveBeenCalledWith(token(1));
+  });
+
+  it("drops a real Close-path build after reopening a new modal", async () => {
+    const firstBuild = deferred<MdxRelayResult<BuiltPreview>>();
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    host.queueCapture(mdxRelayOk(fakeCapture(token(2))));
+    const deps = makeDeps(host, {
+      buildPreview: vi
+        .fn()
+        .mockReturnValueOnce(firstBuild.promise)
+        .mockResolvedValueOnce(
+          mdxRelayOk(buildFakePreview(token(2), "no-changes")),
+        ),
+    });
+    const command = new PreviewCommand(deps);
+    command.execute();
+    await flush();
+    const closedModal = host.latestModal();
+    const closedHtml = closedModal.innerHTML;
+    closedModal
+      .querySelector<HTMLButtonElement>('[data-action="cancel"]')!
+      .click();
+
+    command.execute();
+    await flush();
+    const reopenedModal = host.latestModal();
+    const reopenedIdentity = {
+      generationToken: reopenedModal.dataset.generationToken,
+      planId: reopenedModal.dataset.planId,
+    };
+    expect(reopenedModal.textContent).toContain("No Changes");
+
+    firstBuild.resolve(mdxRelayOk(buildFakePreview(token(1))));
+    await flush();
+
+    expect(closedModal.innerHTML).toBe(closedHtml);
+    expect(reopenedModal.dataset).toMatchObject(reopenedIdentity);
+    expect(reopenedModal.dataset.generationToken).toBe(token(2));
+    expect(reopenedModal.textContent).toContain("No Changes");
+    expect(deps.cancelGeneration).toHaveBeenCalledWith(token(1));
+  });
+
+  it("drops plan A approval recapture after plan B supersedes its identity", async () => {
+    const firstRecapture = deferred<MdxRelayResult<ApprovalRecapture>>();
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    host.queueCapture(mdxRelayOk(fakeCapture(token(2))));
+    const recordApproval = vi.fn(async (planId: PlanId) => mdxRelayOk(planId));
+    const deps = makeDeps(host, {
+      buildPreview: vi
+        .fn()
+        .mockResolvedValueOnce(mdxRelayOk(buildFakePreview(token(1))))
+        .mockResolvedValueOnce(
+          mdxRelayOk(buildFakePreview(token(2), "no-changes")),
+        ),
+      recaptureApproval: vi.fn().mockReturnValueOnce(firstRecapture.promise),
+      recordApproval,
+    });
+    const command = new PreviewCommand(deps);
+    command.execute();
+    await flush();
+    const planAModal = host.latestModal();
+    approve(planAModal);
+    expect(deps.recaptureApproval).toHaveBeenCalledTimes(1);
+
+    command.execute();
+    await flush();
+    const planBModal = host.latestModal();
+    const planBIdentity = {
+      generationToken: planBModal.dataset.generationToken,
+      planId: planBModal.dataset.planId,
+    };
+    expect(planBModal.textContent).toContain("No Changes");
+    expect(planBIdentity.planId).not.toBe(planAModal.dataset.planId);
+
+    const planA = buildFakePreview(token(1)).envelope.plan;
+    firstRecapture.resolve(
+      mdxRelayOk({
+        sourceBytes: {
+          note: FAKE_NOTE_BYTES,
+          images: new Map([["image-1", FAKE_IMAGE_BYTES]]),
+        },
+        fingerprint: planA.approvalFingerprint,
+      }),
+    );
+    await flush();
+
+    expect(recordApproval).not.toHaveBeenCalled();
+    expect(deps.applyApprovedWrites).not.toHaveBeenCalled();
+    expect(planBModal.dataset).toMatchObject(planBIdentity);
+    expect(planBModal.textContent).toContain("No Changes");
   });
 
   it("preserves truthful partial failure and exact plan ID", async () => {
