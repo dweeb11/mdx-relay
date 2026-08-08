@@ -1,55 +1,34 @@
 import { Plugin } from "obsidian";
 
-import type { GenerationToken } from "./contracts/export-plan";
-import { createIssue, ISSUE_CODES } from "./contracts/issues";
-import { mdxRelayErr } from "./contracts/result";
-import {
-  ObsidianHostAdapter,
-  registerPreviewCommand,
-} from "./obsidian/host-adapter";
 import {
   PreviewCommand,
   type PreviewCommandDeps,
 } from "./obsidian/preview-command";
 
 /**
- * T6 installs the capture/preview shell. A configured pipeline supplies these
- * collaborators; until configuration exists, the command fails closed in the
- * modal and cannot create approval or write authority.
+ * The single composition seam for a fully configured preview pipeline.
+ * Registration owns command disposal through Obsidian's plugin lifecycle.
  */
-export const createUnconfiguredPreviewDeps = (
-  host: ObsidianHostAdapter,
-): PreviewCommandDeps => ({
-  host,
-  createGenerationToken: () =>
-    `generation-${crypto.randomUUID()}` as GenerationToken,
-  buildPreview: async () =>
-    mdxRelayErr([createIssue(ISSUE_CODES.invalidProfile)]),
-  cancelGeneration: () => undefined,
-  recaptureApproval: async () =>
-    mdxRelayErr([createIssue(ISSUE_CODES.staleApproval)]),
-  recordApproval: async () =>
-    mdxRelayErr([createIssue(ISSUE_CODES.approvalMismatch)]),
-  applyApprovedWrites: async () => ({
-    ok: false,
-    report: { completed: [], failed: [], unattempted: [] },
-    error: [createIssue(ISSUE_CODES.approvalMismatch)],
-  }),
-});
+export function registerConfiguredPreviewCommand(
+  plugin: Pick<Plugin, "addCommand" | "register">,
+  deps: PreviewCommandDeps,
+): PreviewCommand {
+  const command = new PreviewCommand(deps);
+  plugin.addCommand({
+    id: "preview-export",
+    name: "Preview MDX export",
+    callback: () => command.execute(),
+  });
+  plugin.register(() => command.unload());
+  return command;
+}
 
 export default class MdxRelayPlugin extends Plugin {
-  private previewCommand: PreviewCommand | undefined;
-
   override onload(): void {
-    const host = new ObsidianHostAdapter(this.app);
-    this.previewCommand = new PreviewCommand(
-      createUnconfiguredPreviewDeps(host),
-    );
-    registerPreviewCommand(this, () => this.previewCommand?.execute());
+    // Hidden until a later wiring slice supplies fully configured dependencies.
   }
 
   override onunload(): void {
-    this.previewCommand?.unload();
-    this.previewCommand = undefined;
+    // Configured commands register their own idempotent lifecycle disposer.
   }
 }

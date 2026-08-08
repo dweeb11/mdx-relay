@@ -1,10 +1,4 @@
-import {
-  FileSystemAdapter,
-  Modal,
-  TFile,
-  type App,
-  type Plugin,
-} from "obsidian";
+import { FileSystemAdapter, Modal, TFile, type App } from "obsidian";
 
 import type {
   ExportPlan,
@@ -151,16 +145,5 @@ export class ObsidianHostAdapter implements ObsidianHost {
     };
   }
 }
-
-export const registerPreviewCommand = (
-  plugin: Plugin,
-  callback: () => void,
-): void => {
-  plugin.addCommand({
-    id: "preview-export",
-    name: "Preview MDX export",
-    callback,
-  });
-};
 
 export type HostHash = (bytes: Uint8Array) => Sha256Digest;
