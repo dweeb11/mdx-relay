@@ -3,7 +3,7 @@
   "name": "MDX Relay",
   "version": "0.1.0",
   "minAppVersion": "1.13.2",
-  "description": "Review and publish Obsidian notes as repository-ready MDX.",
+  "description": "Convert approved Obsidian notes into reviewed MDX files in a configured local target folder.",
   "author": "Critterhaus",
   "isDesktopOnly": true
 }
