@@ -40,14 +40,20 @@ export const fakeCapture = (
 export const buildFakePreview = (
   generationToken: GenerationToken,
   state: "ready" | "no-changes" = "ready",
+  repeatImage = false,
 ): BuiltPreview => {
   const profileSnapshot = JSON.stringify(DPW_MIND_NET_V1);
   const dependencySnapshot = '{"images":["assets/example.png"]}';
   const paths = [
     "content/posts/example.mdx",
     "public/posts/example/img-1.webp",
+    ...(repeatImage ? ["public/posts/example/img-2.webp"] : []),
   ];
-  const outputs = [MDX_BYTES, OUTPUT_IMAGE_BYTES];
+  const outputs = [
+    MDX_BYTES,
+    OUTPUT_IMAGE_BYTES,
+    ...(repeatImage ? [OUTPUT_IMAGE_BYTES] : []),
+  ];
   const targets: readonly TargetSnapshotEntry[] = paths.map(
     (relativePath, index) => ({
       relativePath,
@@ -86,7 +92,12 @@ export const buildFakePreview = (
     documentSlug: "example",
     generatedMdxBytes: MDX_BYTES,
     transformedImages: [{ sourceId: "image-1", bytes: OUTPUT_IMAGE_BYTES }],
-    imageEmbeds: [{ sourceId: "image-1", assetFileName: "img-1.webp" }],
+    imageEmbeds: [
+      { sourceId: "image-1", assetFileName: "img-1.webp" },
+      ...(repeatImage
+        ? [{ sourceId: "image-1", assetFileName: "img-2.webp" }]
+        : []),
+    ],
     targetRootRealPath: "/target/site",
     caseSensitivity: "sensitive",
     priorTargets: targets,
@@ -112,7 +123,7 @@ export const buildFakePreview = (
   if (!built.ok) throw new Error(built.error[0].code);
   const sealed = sealExportPlan(built.value);
   if (!sealed.ok) throw new Error(sealed.error[0].code);
-  return { envelope: sealed.value, mdxDiff: "- old\n+ new" };
+  return { envelope: sealed.value, generatedMdxBytes: MDX_BYTES };
 };
 
 export class FakeObsidianHost implements ObsidianHost {

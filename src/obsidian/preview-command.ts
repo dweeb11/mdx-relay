@@ -18,6 +18,7 @@ import type {
   ApplyApprovedWritesInput,
   ApplyApprovedWritesResult,
 } from "../write";
+import { sha256OfBytes } from "../canonical/hash";
 import type {
   ActiveMarkdownCapture,
   ObsidianHost,
@@ -33,7 +34,8 @@ import {
 
 export interface BuiltPreview {
   readonly envelope: SealedExportPlanEnvelope;
-  readonly mdxDiff: string;
+  /** Exact worker output bytes; verified against plan.generatedMdx before use. */
+  readonly generatedMdxBytes: Uint8Array;
 }
 
 export interface ApprovalRecapture {
@@ -86,40 +88,87 @@ const blockers = (
     : [createIssue(ISSUE_CODES.staleApproval) as BlockerIssue];
 };
 
-const documentFor = (built: BuiltPreview): PreviewDocument => {
+const deriveMdxDiff = (
+  sourceNoteBytes: Uint8Array,
+  generatedMdxBytes: Uint8Array,
+): string | undefined => {
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const source = decoder.decode(sourceNoteBytes);
+    const generated = decoder.decode(generatedMdxBytes);
+    const removed = source.split("\n").map((line) => `- ${line}`);
+    const added = generated.split("\n").map((line) => `+ ${line}`);
+    return ["--- source note", "+++ generated MDX", ...removed, ...added].join(
+      "\n",
+    );
+  } catch {
+    return undefined;
+  }
+};
+
+const documentFor = (
+  built: BuiltPreview,
+  capture: ActiveMarkdownCapture,
+): PreviewDocument | undefined => {
   const { plan } = built.envelope;
-  const targetByDigest = new Map<string, string>();
+  if (
+    capture.bytes.byteLength !== plan.sourceNote.byteLength ||
+    sha256OfBytes(capture.bytes) !== plan.sourceNote.contentSha256 ||
+    built.generatedMdxBytes.byteLength !== plan.generatedMdx.byteLength ||
+    sha256OfBytes(built.generatedMdxBytes) !== plan.generatedMdx.contentSha256
+  )
+    return undefined;
+  const mdxDiff = deriveMdxDiff(capture.bytes, built.generatedMdxBytes);
+  if (mdxDiff === undefined) return undefined;
+
+  const sourceByDigest = new Map(
+    plan.sourceImages.map((image) => [
+      image.transformedOutputSha256,
+      image.sourceId,
+    ]),
+  );
+  const assets: Array<PreviewDocument["assets"][number]> = [];
   if (plan.state === "ready") {
-    for (const action of plan.actions)
-      if (action.documentOrder > 0)
-        targetByDigest.set(
-          action.sealedOutput.contentSha256,
-          action.targetPath,
-        );
+    for (const action of plan.actions) {
+      if (action.documentOrder === 0) continue;
+      assets.push(
+        Object.freeze({
+          sourceId:
+            sourceByDigest.get(action.sealedOutput.contentSha256) ??
+            `document-order-${action.documentOrder}`,
+          targetPath: action.targetPath,
+          contentSha256: action.sealedOutput.contentSha256,
+          byteLength: action.sealedOutput.byteLength,
+        }),
+      );
+    }
   } else {
-    for (const target of plan.targetFolderSnapshot.targets)
-      if (target.priorState.state === "regularFile")
-        targetByDigest.set(
-          target.priorState.contentSha256,
-          target.relativePath,
-        );
+    const imageDigests = new Set(
+      plan.sourceImages.map((image) => image.transformedOutputSha256),
+    );
+    for (const target of plan.targetFolderSnapshot.targets) {
+      if (
+        target.priorState.state !== "regularFile" ||
+        !imageDigests.has(target.priorState.contentSha256)
+      )
+        continue;
+      const output = plan.blobs[target.priorState.contentSha256];
+      assets.push(
+        Object.freeze({
+          sourceId:
+            sourceByDigest.get(target.priorState.contentSha256) ??
+            target.relativePath,
+          targetPath: target.relativePath,
+          contentSha256: target.priorState.contentSha256,
+          byteLength: output?.byteLength ?? 0,
+        }),
+      );
+    }
   }
   return Object.freeze({
     plan,
-    mdxDiff: built.mdxDiff,
-    assets: Object.freeze(
-      plan.sourceImages.map((image) => {
-        const output = plan.blobs[image.transformedOutputSha256];
-        return Object.freeze({
-          sourceId: image.sourceId,
-          targetPath:
-            targetByDigest.get(image.transformedOutputSha256) ??
-            "(not targeted)",
-          contentSha256: image.transformedOutputSha256,
-          byteLength: output?.byteLength ?? 0,
-        });
-      }),
-    ),
+    mdxDiff,
+    assets: Object.freeze(assets),
   });
 };
 
@@ -279,13 +328,27 @@ export class PreviewCommand {
       );
       return;
     }
+    const document = documentFor(built.value, captured.value);
+    if (document === undefined) {
+      this.update(
+        session,
+        reducePreviewState(session.state, {
+          type: "blocked",
+          generationToken: session.generationToken,
+          issues: [
+            createIssue(ISSUE_CODES.previewContentMismatch) as BlockerIssue,
+          ],
+        }),
+      );
+      return;
+    }
     session.envelope = envelope;
     this.update(
       session,
       reducePreviewState(session.state, {
         type: "plan",
         generationToken: session.generationToken,
-        document: documentFor(built.value),
+        document,
       }),
     );
   }

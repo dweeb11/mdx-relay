@@ -66,6 +66,7 @@ export const ISSUE_CODES = Object.freeze({
   malformedWorkerResponse: "MALFORMED_WORKER_RESPONSE",
   planBudgetExhausted: "PLAN_BUDGET_EXHAUSTED",
   staleDuringPlanning: "STALE_DURING_PLANNING",
+  previewContentMismatch: "PREVIEW_CONTENT_MISMATCH",
   staleOutputsPresent: "STALE_OUTPUTS_PRESENT",
   planNotFound: "PLAN_NOT_FOUND",
   planExpired: "PLAN_EXPIRED",
@@ -284,6 +285,12 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     stage: "planning",
     recoveryActions: previewAgain,
     summary: "Captured input changed while the plan was being built.",
+  },
+  [ISSUE_CODES.previewContentMismatch]: {
+    severity: "blocker",
+    stage: "planning",
+    recoveryActions: previewAgain,
+    summary: "The displayed preview does not match the sealed output.",
   },
   [ISSUE_CODES.staleOutputsPresent]: {
     severity: "warning",
@@ -667,14 +674,14 @@ if (import.meta.vitest) {
           definition.summary,
         ]);
       expect(snapshotHash([...codes].sort())).toBe(
-        "fb9e49c9eae3d7462321b12be069c70f59e08956c0458edcebd746ae5ce7ac15",
+        "75575ffcae3dc6d1c163f6a9b754945aed0d7654fd02c3d8b181f804cb42f699",
       );
       expect(snapshotHash(Object.values(RECOVERY_ACTIONS).sort())).toBe(
         "235a3f3eb94625c1087d70b1687d03e3ed54725c88c57a23de77aec4faa36a1d",
       );
       // Intentional approval gate: fixed summaries are part of the exact policy snapshot.
       expect(snapshotHash(policy)).toBe(
-        "1a673d10654147e4b1b9c636b18c9782ef237307153f01d1297701f781854432",
+        "1a0e1b3f04f2e67890bcb23f5d69b31c26dbf79a00c0aeb3fce9fc6f8f6d0df4",
       );
     });
 

@@ -108,7 +108,8 @@ describe("PreviewCommand", () => {
     expect(modal.textContent).toContain("/target/site");
     expect(modal.textContent).toContain("content/posts/example.mdx");
     expect(modal.textContent).toContain("sha256:");
-    expect(modal.textContent).toContain("- old");
+    expect(modal.textContent).toContain("+++ generated MDX");
+    expect(modal.textContent).toContain("+ title: Example");
     expect(host.captures).toEqual([token(1)]);
     expect(deps.applyApprovedWrites).not.toHaveBeenCalled();
     expect(
@@ -128,6 +129,62 @@ describe("PreviewCommand", () => {
     expect(modal.querySelector("[data-preview-status]")?.textContent).toBe(
       "Write completed successfully",
     );
+  });
+
+  it("blocks a generated MDX byte mismatch before approval is reachable", async () => {
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    const sealed = buildFakePreview(token(1));
+    const recordApproval = vi.fn(async (planId: PlanId) => mdxRelayOk(planId));
+    const deps = makeDeps(host, {
+      buildPreview: async () =>
+        mdxRelayOk({
+          ...sealed,
+          generatedMdxBytes: new TextEncoder().encode("mismatched MDX"),
+        }),
+      recordApproval,
+    });
+    const command = new PreviewCommand(deps);
+    command.execute();
+    await flush();
+
+    const modal = host.latestModal();
+    expect(modal.querySelector("[data-preview-status]")?.textContent).toBe(
+      "Blocked",
+    );
+    expect(modal.textContent).toContain("PREVIEW_CONTENT_MISMATCH");
+    expect(modal.dataset.planId).toBeUndefined();
+    expect(modal.querySelector('[data-action="approve"]')).toBeNull();
+    expect(recordApproval).not.toHaveBeenCalled();
+    expect(deps.applyApprovedWrites).not.toHaveBeenCalled();
+  });
+
+  it("renders one exact target row per repeated image embed", async () => {
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    const deps = makeDeps(host, {
+      buildPreview: async () =>
+        mdxRelayOk(buildFakePreview(token(1), "ready", true)),
+    });
+    const command = new PreviewCommand(deps);
+    command.execute();
+    await flush();
+
+    const modal = host.latestModal();
+    expect(modal.querySelector("[data-preview-status]")?.textContent).toBe(
+      "Ready",
+    );
+    const assetRows = [...modal.querySelectorAll('[data-preview="assets"] li')]
+      .map((row) => row.textContent ?? "")
+      .filter((text) => text.includes("public/posts/example/img-"));
+    expect(assetRows).toHaveLength(2);
+    expect(assetRows.filter((row) => row.includes("img-1.webp"))).toHaveLength(
+      1,
+    );
+    expect(assetRows.filter((row) => row.includes("img-2.webp"))).toHaveLength(
+      1,
+    );
+    expect(modal.textContent).not.toContain("(not targeted)");
   });
 
   it("renders No Changes and Blocked deterministically", async () => {

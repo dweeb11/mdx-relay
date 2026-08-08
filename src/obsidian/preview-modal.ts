@@ -61,6 +61,7 @@ const renderPlan = (root: HTMLElement, state: PreviewState): void => {
   if (assets.length > 0) {
     add(root, "h3", "Assets");
     const list = add(root, "ul");
+    list.dataset.preview = "assets";
     for (const asset of assets)
       add(
         list,
