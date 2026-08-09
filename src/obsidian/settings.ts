@@ -53,7 +53,7 @@ export class LiveSettings {
     try {
       await this.persistence.saveData(value);
     } catch (error) {
-      this.value = previous;
+      if (this.value === value) this.value = previous;
       throw error;
     }
   }
