@@ -10,3 +10,7 @@ styles.css
 coverage/
 .tmp/
 .obsidian/
+.private-baseline/
+private-fixtures/
+tests/fixtures/private-baseline/
+tests/fixtures/private-*/
