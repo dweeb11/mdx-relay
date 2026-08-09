@@ -106,7 +106,7 @@ const deriveMdxDiff = (
   }
 };
 
-const documentFor = (
+export const buildVerifiedPreviewDocument = (
   built: BuiltPreview,
   capture: ActiveMarkdownCapture,
 ): PreviewDocument | undefined => {
@@ -328,7 +328,7 @@ export class PreviewCommand {
       );
       return;
     }
-    const document = documentFor(built.value, captured.value);
+    const document = buildVerifiedPreviewDocument(built.value, captured.value);
     if (document === undefined) {
       this.update(
         session,
