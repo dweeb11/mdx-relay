@@ -15,11 +15,16 @@ import {
   FAKE_NOTE_BYTES,
 } from "../../helpers/fake-obsidian-host";
 
+const configureMdxRelayPlugin = vi.hoisted(() => vi.fn());
+
 vi.mock("obsidian", () => ({
   Plugin: class {
     addCommand = vi.fn();
     register = vi.fn();
   },
+}));
+vi.mock("../../../src/obsidian/plugin-composition", () => ({
+  configureMdxRelayPlugin,
 }));
 
 const generationToken = "generation-main" as GenerationToken;
@@ -54,16 +59,23 @@ const configuredDeps = (
 });
 
 describe("plugin preview composition", () => {
-  beforeEach(() => document.body.replaceChildren());
+  beforeEach(() => {
+    document.body.replaceChildren();
+    vi.clearAllMocks();
+  });
 
-  it("registers no preview command when production has no configured pipeline", () => {
+  it("delegates onload composition without constructing the pipeline", async () => {
     const plugin = new MdxRelayPlugin({} as App, {} as PluginManifest);
     const addCommand = vi.spyOn(plugin, "addCommand");
     const register = vi.spyOn(plugin, "register");
 
-    plugin.onload();
+    await plugin.onload();
     plugin.onunload();
 
+    expect(configureMdxRelayPlugin).toHaveBeenCalledWith(
+      plugin,
+      registerConfiguredPreviewCommand,
+    );
     expect(addCommand).not.toHaveBeenCalled();
     expect(register).not.toHaveBeenCalled();
   });

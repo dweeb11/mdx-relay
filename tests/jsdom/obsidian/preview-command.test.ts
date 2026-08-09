@@ -16,6 +16,7 @@ import {
   type BuiltPreview,
   type PreviewCommandDeps,
 } from "../../../src/obsidian/preview-command";
+import { LiveSettings } from "../../../src/obsidian/settings";
 import type {
   ApplyApprovedWritesInput,
   ApplyApprovedWritesResult,
@@ -90,6 +91,31 @@ const makeDeps = (
   };
 };
 
+const withTargetRoot = (
+  built: BuiltPreview,
+  targetRootRealPath: string,
+): BuiltPreview =>
+  ({
+    ...built,
+    envelope: {
+      ...built.envelope,
+      plan: {
+        ...built.envelope.plan,
+        targetFolderSnapshot: {
+          ...built.envelope.plan.targetFolderSnapshot,
+          targetRootRealPath,
+        },
+        approvalFingerprint: {
+          ...built.envelope.plan.approvalFingerprint,
+          targetFolderSnapshot: {
+            ...built.envelope.plan.approvalFingerprint.targetFolderSnapshot,
+            targetRootRealPath,
+          },
+        },
+      },
+    },
+  }) as BuiltPreview;
+
 describe("PreviewCommand", () => {
   beforeEach(() => document.body.replaceChildren());
 
@@ -129,6 +155,115 @@ describe("PreviewCommand", () => {
     expect(modal.querySelector("[data-preview-status]")?.textContent).toBe(
       "Write completed successfully",
     );
+  });
+
+  it("uses a saved target change on the next preview without reload", async () => {
+    let persisted = {
+      profileId: "dpw-mind-net-v1" as const,
+      targetRoot: "/target/one",
+    };
+    const settings = new LiveSettings({
+      loadData: async () => persisted,
+      saveData: async (value) => void (persisted = value),
+    });
+    await settings.load();
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    host.queueCapture(mdxRelayOk(fakeCapture(token(2))));
+    const deps = makeDeps(host, {
+      buildPreview: async (capture) =>
+        mdxRelayOk(
+          withTargetRoot(
+            buildFakePreview(capture.generationToken),
+            settings.current().targetRoot,
+          ),
+        ),
+    });
+    const command = new PreviewCommand(deps);
+
+    command.execute();
+    await flush();
+    expect(host.latestModal().textContent).toContain("/target/one");
+
+    await settings.update({
+      profileId: "dpw-mind-net-v1",
+      targetRoot: "/target/two",
+    });
+    command.execute();
+    await flush();
+    expect(host.latestModal().textContent).toContain("/target/two");
+  });
+
+  it("fails closed when settings change after the plan is visible", async () => {
+    let persisted = {
+      profileId: "dpw-mind-net-v1" as const,
+      targetRoot: "/target/one",
+    };
+    const settings = new LiveSettings({
+      loadData: async () => persisted,
+      saveData: async (value) => void (persisted = value),
+    });
+    await settings.load();
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(token(1))));
+    const apply = vi.fn(
+      async (
+        input: ApplyApprovedWritesInput,
+      ): Promise<ApplyApprovedWritesResult> =>
+        input.currentApprovalFingerprint.targetFolderSnapshot
+          .targetRootRealPath ===
+        input.plan.approvalFingerprint.targetFolderSnapshot.targetRootRealPath
+          ? {
+              ok: true,
+              report: { completed: [], failed: [], unattempted: [] },
+            }
+          : {
+              ok: false,
+              report: { completed: [], failed: [], unattempted: [] },
+              error: [createIssue(ISSUE_CODES.approvalMismatch)],
+            },
+    );
+    const deps = makeDeps(host, {
+      buildPreview: async (capture) =>
+        mdxRelayOk(
+          withTargetRoot(
+            buildFakePreview(capture.generationToken),
+            settings.current().targetRoot,
+          ),
+        ),
+      recaptureApproval: async (plan) =>
+        mdxRelayOk({
+          sourceBytes: {
+            note: FAKE_NOTE_BYTES,
+            images: new Map([["image-1", FAKE_IMAGE_BYTES]]),
+          },
+          fingerprint: {
+            ...plan.approvalFingerprint,
+            targetFolderSnapshot: {
+              ...plan.approvalFingerprint.targetFolderSnapshot,
+              targetRootRealPath: settings.current().targetRoot,
+            },
+          },
+        }),
+      applyApprovedWrites: apply,
+    });
+    const command = new PreviewCommand(deps);
+    command.execute();
+    await flush();
+    const modal = host.latestModal();
+
+    await settings.update({
+      profileId: "dpw-mind-net-v1",
+      targetRoot: "/target/two",
+    });
+    approve(modal);
+    await flush();
+
+    expect(apply).toHaveBeenCalledOnce();
+    expect(modal.querySelector("[data-preview-status]")?.textContent).toBe(
+      "Write failed",
+    );
+    expect(modal.textContent).toContain(ISSUE_CODES.approvalMismatch);
   });
 
   it("blocks a generated MDX byte mismatch before approval is reachable", async () => {

@@ -142,4 +142,30 @@ describe("MDX Relay settings", () => {
     });
     expect(settings.current().targetRoot).toBe("/target/two");
   });
+
+  it("publishes the live value before persistence completes", async () => {
+    let finishSave: () => void = () => undefined;
+    const saveData = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const settings = new LiveSettings({
+      loadData: async () => ({
+        profileId: DPW_MIND_NET_V1.id,
+        targetRoot: "/target/one",
+      }),
+      saveData,
+    });
+    await settings.load();
+
+    const updating = settings.update({
+      profileId: DPW_MIND_NET_V1.id,
+      targetRoot: "/target/two",
+    });
+    expect(settings.current().targetRoot).toBe("/target/two");
+    finishSave();
+    await updating;
+  });
 });

@@ -48,8 +48,14 @@ export class LiveSettings {
 
   async update(next: MdxRelaySettings): Promise<void> {
     const value = Object.freeze({ ...next });
-    await this.persistence.saveData(value);
+    const previous = this.value;
     this.value = value;
+    try {
+      await this.persistence.saveData(value);
+    } catch (error) {
+      this.value = previous;
+      throw error;
+    }
   }
 }
 

@@ -32,8 +32,10 @@ export function registerConfiguredPreviewCommand(
 }
 
 export default class MdxRelayPlugin extends Plugin {
-  override onload(): void {
-    // Hidden until a later wiring slice supplies fully configured dependencies.
+  override async onload(): Promise<void> {
+    const { configureMdxRelayPlugin } =
+      await import("./obsidian/plugin-composition");
+    await configureMdxRelayPlugin(this, registerConfiguredPreviewCommand);
   }
 
   override onunload(): void {
