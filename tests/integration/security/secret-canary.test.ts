@@ -7,7 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative } from "node:path";
+import { join, relative } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -78,7 +78,7 @@ afterEach(async () => {
 describe("full-pipeline secret canaries", () => {
   it("keeps canaries out of every artifact except required identity and approved output", async () => {
     const canaries = {
-      profile: "T7-PROFILE-A91",
+      profile: "t7-profile-a91",
       note: "T7-NOTE-B82",
       imageMetadata: "T7-IMAGE-C73",
       targetIdentity: "T7-TARGET-D64",
@@ -102,6 +102,10 @@ describe("full-pipeline secret canaries", () => {
     const profile = {
       ...DPW_MIND_NET_V1,
       name: canaries.profile,
+      output: {
+        ...DPW_MIND_NET_V1.output,
+        contentRoot: `content/${canaries.profile}`,
+      },
     };
     const built = await buildWorkerBackedEnvelope({
       targetRoot,
@@ -208,19 +212,38 @@ describe("full-pipeline secret canaries", () => {
     for (const [kind, canary] of Object.entries(canaries)) {
       const locations: string[] = [];
       for (const [name, bytes] of artifacts) {
-        const text = new TextDecoder("latin1").decode(bytes);
-        if (encodedForms(canary).some((form) => text.includes(form)))
-          locations.push(name);
+        const searchable = `${name}\n${new TextDecoder("latin1").decode(bytes)}`;
+        const forms = encodedForms(canary);
+        for (const encoded of forms.filter((form) => form !== canary))
+          expect(searchable, `${name} leaked encoded canary`).not.toContain(
+            encoded,
+          );
+        if (searchable.includes(canary)) locations.push(name);
       }
       hits.set(kind, locations.sort());
     }
 
     const planDocument = `store/plans/${built.envelope.planId}/plan.json`;
     const previewDocument = "memory/preview-document.json";
+    const mdxAction = built.envelope.plan.actions.find(
+      (action) => action.documentOrder === 0,
+    )!;
+    const mdxBlob = `store/plans/${built.envelope.planId}/blobs/${mdxAction.sealedOutput.planRelativePath}`;
+    const writtenMdx = `target/${mdxAction.targetPath}`;
     // Profile, source-path, and target-root values are deliberate plan identity,
-    // not private source content. Their only permitted copies are plan.json and
-    // the exact preview object that embeds that authenticated plan.
-    expect(hits.get("profile")).toEqual([previewDocument, planDocument].sort());
+    // not private source content. Their permitted copies are plan.json and the
+    // exact preview object. This fixture also puts the profile canary in the
+    // approved content target path (and therefore write reports that name that
+    // path) so pathname scanning is mutation-sensitive.
+    expect(hits.get("profile")).toEqual(
+      [
+        previewDocument,
+        planDocument,
+        writtenMdx,
+        "memory/stale-error.json",
+        "memory/write-report.json",
+      ].sort(),
+    );
     expect(hits.get("imageMetadata")).toEqual(
       [previewDocument, planDocument].sort(),
     );
@@ -228,29 +251,11 @@ describe("full-pipeline secret canaries", () => {
       [previewDocument, planDocument].sort(),
     );
 
-    const mdxAction = built.envelope.plan.actions.find(
-      (action) => action.documentOrder === 0,
-    )!;
-    const mdxBlob = `store/plans/${built.envelope.planId}/blobs/${mdxAction.sealedOutput.planRelativePath}`;
     // The note canary is intentionally ordinary approved prose. It may exist
     // only in the sealed MDX blob, its exact written target, and the MDX diff
     // shown for approval; those are the approved-output exception in ADR 0003.
     expect(hits.get("note")).toEqual(
-      [mdxBlob, `target/${mdxAction.targetPath}`, previewDocument].sort(),
+      [mdxBlob, writtenMdx, previewDocument].sort(),
     );
-
-    for (const [name, bytes] of artifacts) {
-      if (
-        name === planDocument ||
-        name === previewDocument ||
-        name === mdxBlob ||
-        name === `target/${mdxAction.targetPath}`
-      )
-        continue;
-      const text = new TextDecoder("latin1").decode(bytes);
-      for (const canary of Object.values(canaries))
-        for (const form of encodedForms(canary))
-          expect(text, `${basename(name)} leaked ${form}`).not.toContain(form);
-    }
   }, 15_000);
 });

@@ -22,6 +22,7 @@ import { createPortableWebpCodec } from "../../src/images/portable-webp-codec";
 import { transformMarkdown } from "../../src/markdown/transform";
 import {
   buildExportPlan,
+  type FinalCaptureBarrier,
   type PlanSourceBytes,
 } from "../../src/planning/build-export-plan";
 import { sealExportPlan } from "../../src/planning/seal-export-plan";
@@ -93,6 +94,7 @@ export interface PublicPipelineInput {
   readonly generationToken?: GenerationToken;
   readonly createdAtUtc?: string;
   readonly expiresAtUtc?: string;
+  readonly finalCaptureOverride?: Partial<FinalCaptureBarrier>;
 }
 
 export interface BuiltPipelineEnvelope {
@@ -274,6 +276,7 @@ export async function buildWorkerBackedEnvelope(
       targetRootRealPath: input.targetRoot,
       caseSensitivity: "sensitive",
       targets: priorTargets,
+      ...input.finalCaptureOverride,
     },
     createdAtUtc: input.createdAtUtc ?? "2026-08-08T00:00:00.000Z",
     expiresAtUtc: input.expiresAtUtc ?? "2026-08-09T00:00:00.000Z",

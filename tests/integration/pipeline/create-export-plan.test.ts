@@ -13,6 +13,7 @@ import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { sha256OfBytes } from "../../../src/canonical/hash";
+import { ISSUE_CODES } from "../../../src/contracts/issues";
 import {
   loadActivePlan,
   publishSealedPlan,
@@ -62,6 +63,36 @@ afterEach(async () => {
 });
 
 describe("complete local export pipeline", () => {
+  it("blocks when the final source capture changes during planning", async () => {
+    const targetRoot = await makeRoot("stale-target");
+    const sourceNote = await readFile(
+      new URL("../../fixtures/public-baseline/source-note.md", import.meta.url),
+      "utf8",
+    );
+    const noteBytes = utf8(
+      sourceNote.replace("sample-image.PNG", "gradient.png"),
+    );
+    const changedNoteBytes = utf8(
+      `${new TextDecoder().decode(noteBytes)}\nchanged during planning`,
+    );
+    const imageBytes = new Uint8Array(await imageFixture("gradient.png"));
+
+    await expect(
+      buildWorkerBackedEnvelope({
+        targetRoot,
+        noteBytes,
+        imageBytes,
+        finalCaptureOverride: {
+          sourceNote: {
+            byteLength: changedNoteBytes.byteLength,
+            contentSha256: sha256OfBytes(changedNoteBytes),
+          },
+        },
+      }),
+    ).rejects.toThrow(ISSUE_CODES.staleDuringPlanning);
+    expect(await filesBelow(targetRoot)).toEqual([]);
+  }, 15_000);
+
   it("crosses worker, store, preview, approval, and exact-write boundaries", async () => {
     const targetRoot = await makeRoot("target");
     const storeRoot = await makeRoot("store");
