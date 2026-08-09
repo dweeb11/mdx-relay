@@ -39,6 +39,10 @@ const renderPlan = (root: HTMLElement, state: PreviewState): void => {
   add(root, "h3", "Target folder");
   add(root, "code", plan.targetFolderSnapshot.targetRootRealPath);
 
+  add(root, "h3", "Profile");
+  const profileIdentity = add(root, "code", plan.profileSnapshotSha256);
+  profileIdentity.dataset.preview = "profile-identity";
+
   add(root, "h3", "Exact files");
   const files = add(root, "ul");
   const entries =
