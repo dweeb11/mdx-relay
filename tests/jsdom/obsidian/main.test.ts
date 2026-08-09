@@ -5,8 +5,8 @@ import type { GenerationToken } from "../../../src/contracts/export-plan";
 import { mdxRelayOk } from "../../../src/contracts/result";
 import MdxRelayPlugin, {
   registerConfiguredPreviewCommand,
+  type ConfiguredPreviewCommandDeps,
 } from "../../../src/main";
-import type { PreviewCommandDeps } from "../../../src/obsidian/preview-command";
 import {
   buildFakePreview,
   fakeCapture,
@@ -30,8 +30,11 @@ const flush = async (): Promise<void> => {
   await Promise.resolve();
 };
 
-const configuredDeps = (host: FakeObsidianHost): PreviewCommandDeps => ({
+const configuredDeps = (
+  host: FakeObsidianHost,
+): ConfiguredPreviewCommandDeps => ({
   host,
+  isConfigured: () => true,
   createGenerationToken: () => generationToken,
   buildPreview: async () => mdxRelayOk(buildFakePreview(generationToken)),
   cancelGeneration: vi.fn(),
@@ -68,12 +71,12 @@ describe("plugin preview composition", () => {
   it("registers a working configured command and disposes it on unload", async () => {
     const host = new FakeObsidianHost();
     host.queueCapture(mdxRelayOk(fakeCapture(generationToken)));
-    let callback: (() => void) | undefined;
+    let checkCallback: ((checking: boolean) => boolean | void) | undefined;
     let dispose: (() => void) | undefined;
     const plugin = {
       addCommand: vi.fn(
-        (command: { callback: () => void }) =>
-          void (callback = command.callback),
+        (command: { checkCallback: (checking: boolean) => boolean | void }) =>
+          void (checkCallback = command.checkCallback),
       ),
       register: vi.fn((registered: () => void) => void (dispose = registered)),
     };
@@ -85,14 +88,43 @@ describe("plugin preview composition", () => {
     );
     expect(plugin.register).toHaveBeenCalledTimes(1);
 
-    callback!();
+    expect(checkCallback!(true)).toBe(true);
+    checkCallback!(false);
     await flush();
     expect(host.latestModal().textContent).toContain("Ready");
     expect(host.modalElements).toHaveLength(1);
 
     dispose!();
-    callback!();
+    checkCallback!(false);
     expect(host.modalElements).toHaveLength(1);
     expect(deps.cancelGeneration).toHaveBeenCalledWith(generationToken);
+  });
+
+  it("uses current configuration for command visibility and execution", () => {
+    const host = new FakeObsidianHost();
+    host.queueCapture(mdxRelayOk(fakeCapture(generationToken)));
+    let configured = false;
+    let checkCallback: ((checking: boolean) => boolean | void) | undefined;
+    const plugin = {
+      addCommand: vi.fn(
+        (command: { checkCallback: (checking: boolean) => boolean | void }) =>
+          void (checkCallback = command.checkCallback),
+      ),
+      register: vi.fn(),
+    };
+    const deps = {
+      ...configuredDeps(host),
+      isConfigured: () => configured,
+    };
+    registerConfiguredPreviewCommand(plugin as never, deps);
+
+    expect(checkCallback!(true)).toBe(false);
+    expect(checkCallback!(false)).toBe(false);
+    expect(host.modalElements).toHaveLength(0);
+
+    configured = true;
+    expect(checkCallback!(true)).toBe(true);
+    checkCallback!(false);
+    expect(host.modalElements).toHaveLength(1);
   });
 });

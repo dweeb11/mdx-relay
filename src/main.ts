@@ -5,19 +5,27 @@ import {
   type PreviewCommandDeps,
 } from "./obsidian/preview-command";
 
+export interface ConfiguredPreviewCommandDeps extends PreviewCommandDeps {
+  readonly isConfigured: () => boolean;
+}
+
 /**
  * The single composition seam for a fully configured preview pipeline.
  * Registration owns command disposal through Obsidian's plugin lifecycle.
  */
 export function registerConfiguredPreviewCommand(
   plugin: Pick<Plugin, "addCommand" | "register">,
-  deps: PreviewCommandDeps,
+  deps: ConfiguredPreviewCommandDeps,
 ): PreviewCommand {
   const command = new PreviewCommand(deps);
   plugin.addCommand({
     id: "preview-export",
     name: "Preview MDX export",
-    callback: () => command.execute(),
+    checkCallback: (checking) => {
+      if (!deps.isConfigured()) return false;
+      if (!checking) command.execute();
+      return true;
+    },
   });
   plugin.register(() => command.unload());
   return command;
