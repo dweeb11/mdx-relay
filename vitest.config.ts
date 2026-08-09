@@ -1,6 +1,14 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      obsidian: new URL(
+        "./tests/helpers/obsidian-runtime-stub.ts",
+        import.meta.url,
+      ).pathname,
+    },
+  },
   test: {
     testTimeout: 15_000,
     projects: [

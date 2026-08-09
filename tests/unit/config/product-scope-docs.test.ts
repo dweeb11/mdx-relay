@@ -10,6 +10,24 @@ describe("product scope documentation", () => {
     ),
     "utf8",
   );
+  const manifest = JSON.parse(
+    readFileSync(new URL("../../../manifest.json", import.meta.url), "utf8"),
+  ) as { description: string };
+  const packageMetadata = JSON.parse(
+    readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
+  ) as { description: string };
+
+  it("describes metadata output as a local target-folder operation", () => {
+    const forbiddenRuntimeScope =
+      /\b(repository|repo|git|commit|push|branch|remote)\b/iu;
+    for (const description of [
+      manifest.description,
+      packageMetadata.description,
+    ]) {
+      expect(description).not.toMatch(forbiddenRuntimeScope);
+      expect(description).toMatch(/\blocal target folder\b/iu);
+    }
+  });
 
   it("allows approved source content only in sealed outputs", () => {
     expect(adr).toContain("outside the sealed approved outputs");
