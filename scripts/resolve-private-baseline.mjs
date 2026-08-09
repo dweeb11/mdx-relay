@@ -8,6 +8,11 @@ export const PRIVATE_MANIFEST_FILENAME = "manifest.json";
 
 const SHA256 = /^sha256:[0-9a-f]{64}$/u;
 
+export const hasPrivateBaselineConfiguration = (env = process.env) => {
+  const configured = env[PRIVATE_FIXTURE_ENV];
+  return typeof configured === "string" && configured.length > 0;
+};
+
 const isRecord = (value) =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -83,12 +88,12 @@ export function validatePrivateBaselineManifest(value) {
 }
 
 export async function resolvePrivateBaseline(env = process.env) {
-  const configured = env[PRIVATE_FIXTURE_ENV];
-  if (typeof configured !== "string" || configured.length === 0)
+  if (!hasPrivateBaselineConfiguration(env))
     return Object.freeze({
       kind: "unset",
       message: `Set ${PRIVATE_FIXTURE_ENV} to run the private baseline.`,
     });
+  const configured = env[PRIVATE_FIXTURE_ENV];
   const root = await realpath(configured);
   if (!(await stat(root)).isDirectory())
     throw new Error("Private baseline root is not a directory.");

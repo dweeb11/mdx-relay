@@ -31,6 +31,7 @@ type ResolverResult =
 
 interface ResolverModule {
   readonly PRIVATE_FIXTURE_ENV: string;
+  hasPrivateBaselineConfiguration(env?: NodeJS.ProcessEnv): boolean;
   resolvePrivateBaseline(env?: NodeJS.ProcessEnv): Promise<ResolverResult>;
 }
 
@@ -82,12 +83,12 @@ afterEach(async () => {
 });
 
 describe("private baseline resolver and output contract", () => {
-  const configuredRoot = process.env[resolver.PRIVATE_FIXTURE_ENV];
-  if (configuredRoot === undefined)
+  const configured = resolver.hasPrivateBaselineConfiguration(process.env);
+  if (!configured)
     console.info(
       `SKIP external private baseline: set ${resolver.PRIVATE_FIXTURE_ENV}.`,
     );
-  const external = configuredRoot === undefined ? it.skip : it;
+  const external = configured ? it : it.skip;
 
   external(
     `matches the external fixture from ${resolver.PRIVATE_FIXTURE_ENV}`,
@@ -99,6 +100,19 @@ describe("private baseline resolver and output contract", () => {
     },
     15_000,
   );
+
+  it("uses the explicit skip result for an empty fixture-root variable", async () => {
+    const emptyEnvironment = { [resolver.PRIVATE_FIXTURE_ENV]: "" };
+    expect(resolver.hasPrivateBaselineConfiguration(emptyEnvironment)).toBe(
+      false,
+    );
+    await expect(
+      resolver.resolvePrivateBaseline(emptyEnvironment),
+    ).resolves.toEqual({
+      kind: "unset",
+      message: `Set ${resolver.PRIVATE_FIXTURE_ENV} to run the private baseline.`,
+    });
+  });
 
   it("validates and compares a synthetic external-layout fixture", async () => {
     const fixtureRoot = await temporaryRoot("private-synthetic");
