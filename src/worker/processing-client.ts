@@ -163,14 +163,16 @@ export class ProcessingClient {
     let worker: WorkerLike;
     try {
       worker = this.options.createWorker();
-    } catch {
+    } catch (error) {
       // Construction is the one step that runs before any handler, timer, or
       // cancel hook exists, so a throw here -- a missing bundle, a blocked
       // worker URL -- has no worker to terminate and no run to clean up. The
       // boundary still owes a terminal event, so it fails closed on the same
-      // redacted worker-crash channel as an unpostable request. No active
-      // generation is installed, so cancel() stays a no-op and the next
-      // process() call starts from a clean client.
+      // redacted worker-crash channel as an unpostable request. Log the
+      // underlying error for diagnosability; the user-facing issue stays
+      // redacted. No active generation is installed, so cancel() stays a
+      // no-op and the next process() call starts from a clean client.
+      console.error("MDX Relay worker construction failed", error);
       return Promise.resolve(
         brand({
           type: "blocked",

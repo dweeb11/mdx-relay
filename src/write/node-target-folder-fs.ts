@@ -22,6 +22,7 @@ import {
   type TargetFolderFileSystem,
   type TargetFolderWriteHandle,
 } from "./target-folder-writer-types";
+import { TargetRootResolutionError } from "./target-root-errors";
 
 const identityOf = (stats: BigIntStats): TargetEntryIdentity => ({
   deviceId: stats.dev.toString(),
@@ -111,11 +112,18 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
   return {
     async resolveTargetRoot(configuredRoot) {
       const absolute = resolve(configuredRoot);
-      const linkStat = await lstat(absolute);
+      let linkStat;
+      try {
+        linkStat = await lstat(absolute);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT")
+          throw new TargetRootResolutionError("missing", configuredRoot);
+        throw error;
+      }
       if (linkStat.isSymbolicLink())
-        throw new Error("Target root must not be a symlink");
+        throw new TargetRootResolutionError("symlink", configuredRoot);
       if (!linkStat.isDirectory())
-        throw new Error("Target root must be a directory");
+        throw new TargetRootResolutionError("not-directory", configuredRoot);
       // realpath after refusing a final symlink collapses intermediate aliases
       // consistently with the sealed targetRootRealPath capture.
       return realpath(absolute);

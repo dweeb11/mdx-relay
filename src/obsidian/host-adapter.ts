@@ -90,8 +90,16 @@ export interface ObsidianPipelineHost extends ObsidianHost {
   ): Promise<MdxRelayResult<PlanSourceBytes>>;
 }
 
-const captureFailure = (): MdxRelayResult<never> =>
-  mdxRelayErr([createIssue(ISSUE_CODES.staleDuringPlanning) as BlockerIssue]);
+const captureBlocker = (issue: BlockerIssue): MdxRelayResult<never> =>
+  mdxRelayErr([issue]);
+
+const withDetail = (
+  code:
+    | typeof ISSUE_CODES.unresolvableImage
+    | typeof ISSUE_CODES.unsupportedImage
+    | typeof ISSUE_CODES.unsafePath,
+  detail: string,
+): BlockerIssue => createIssue(code, { detail }) as BlockerIssue;
 
 class AdapterModal extends Modal {
   private closed = false;
@@ -132,7 +140,7 @@ export class ObsidianHostAdapter implements ObsidianPipelineHost {
   ): Promise<MdxRelayResult<ActiveMarkdownCapture>> {
     const file = this.app.workspace.getActiveFile();
     if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md")
-      return captureFailure();
+      return captureBlocker(createIssue(ISSUE_CODES.noActiveMarkdown));
     try {
       const bytes = new Uint8Array(await this.app.vault.readBinary(file));
       const realPath =
@@ -150,7 +158,7 @@ export class ObsidianHostAdapter implements ObsidianPipelineHost {
         },
       });
     } catch {
-      return captureFailure();
+      return captureBlocker(createIssue(ISSUE_CODES.sourceCaptureFailed));
     }
   }
 
@@ -171,14 +179,18 @@ export class ObsidianHostAdapter implements ObsidianPipelineHost {
       const noteFile = this.app.vault.getAbstractFileByPath(
         noteMetadata.vaultRelativePath,
       );
-      if (!(noteFile instanceof TFile)) return captureFailure();
+      if (!(noteFile instanceof TFile))
+        return captureBlocker(createIssue(ISSUE_CODES.sourceCaptureFailed));
       const note = new Uint8Array(await this.app.vault.readBinary(noteFile));
       const images = new Map<string, Uint8Array>();
       for (const image of imageMetadata) {
         const file = this.app.vault.getAbstractFileByPath(
           image.vaultRelativePath,
         );
-        if (!(file instanceof TFile)) return captureFailure();
+        if (!(file instanceof TFile))
+          return captureBlocker(
+            withDetail(ISSUE_CODES.unresolvableImage, image.vaultRelativePath),
+          );
         images.set(
           image.sourceId,
           new Uint8Array(await this.app.vault.readBinary(file)),
@@ -186,7 +198,7 @@ export class ObsidianHostAdapter implements ObsidianPipelineHost {
       }
       return mdxRelayOk({ note, images });
     } catch {
-      return captureFailure();
+      return captureBlocker(createIssue(ISSUE_CODES.sourceCaptureFailed));
     }
   }
 
@@ -202,16 +214,22 @@ export class ObsidianHostAdapter implements ObsidianPipelineHost {
           reference.source,
           noteVaultRelativePath,
         );
-        if (
-          !(file instanceof TFile) ||
-          !/^(?:jpe?g|png|webp)$/iu.test(file.extension)
-        )
-          return captureFailure();
+        if (!(file instanceof TFile))
+          return captureBlocker(
+            withDetail(ISSUE_CODES.unresolvableImage, reference.source),
+          );
+        if (!/^(?:jpe?g|png|webp)$/iu.test(file.extension))
+          return captureBlocker(
+            withDetail(ISSUE_CODES.unsupportedImage, reference.source),
+          );
         let captured = byPath.get(file.path);
         if (captured === undefined) {
           const bytes = new Uint8Array(await this.app.vault.readBinary(file));
           const safePathLabel = toSafePathLabel(file.path);
-          if (safePathLabel === undefined) return captureFailure();
+          if (safePathLabel === undefined)
+            return captureBlocker(
+              withDetail(ISSUE_CODES.unsafePath, reference.source),
+            );
           captured = Object.freeze({
             sourceId: `image-${byPath.size + 1}`,
             vaultRelativePath: file.path,
@@ -253,7 +271,7 @@ export class ObsidianHostAdapter implements ObsidianPipelineHost {
         occurrences: Object.freeze(occurrences),
       });
     } catch {
-      return captureFailure();
+      return captureBlocker(createIssue(ISSUE_CODES.sourceCaptureFailed));
     }
   }
 

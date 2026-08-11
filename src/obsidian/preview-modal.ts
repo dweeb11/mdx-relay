@@ -28,7 +28,13 @@ const issueList = (
   const list = add(parent, "ul");
   for (const issue of issues) {
     const definition = ISSUE_REGISTRY[issue.code];
-    const item = add(list, "li", `${issue.code}: ${definition.summary}`);
+    const item = add(
+      list,
+      "li",
+      issue.displayDetails.detail === undefined
+        ? `${issue.code}: ${definition.summary}`
+        : `${issue.code}: ${definition.summary} (${issue.displayDetails.detail})`,
+    );
     item.dataset.issueCode = issue.code;
   }
 };

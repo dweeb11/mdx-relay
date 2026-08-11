@@ -59,6 +59,7 @@ export const ISSUE_CODES = Object.freeze({
   invalidFrontmatter: "INVALID_FRONTMATTER",
   invalidMdx: "INVALID_MDX",
   unsupportedImage: "UNSUPPORTED_IMAGE",
+  unresolvableImage: "UNRESOLVABLE_IMAGE",
   imageDecodeFailed: "IMAGE_DECODE_FAILED",
   imageEncodeFailed: "IMAGE_ENCODE_FAILED",
   workerImageTimeout: "WORKER_IMAGE_TIMEOUT",
@@ -68,6 +69,8 @@ export const ISSUE_CODES = Object.freeze({
   staleDuringPlanning: "STALE_DURING_PLANNING",
   previewContentMismatch: "PREVIEW_CONTENT_MISMATCH",
   staleOutputsPresent: "STALE_OUTPUTS_PRESENT",
+  noActiveMarkdown: "NO_ACTIVE_MARKDOWN",
+  sourceCaptureFailed: "SOURCE_CAPTURE_FAILED",
   planNotFound: "PLAN_NOT_FOUND",
   planExpired: "PLAN_EXPIRED",
   storageTampered: "STORAGE_TAMPERED",
@@ -79,6 +82,9 @@ export const ISSUE_CODES = Object.freeze({
   unsupportedRepository: "UNSUPPORTED_REPOSITORY",
   hostileGitConfig: "HOSTILE_GIT_CONFIG",
   targetChanged: "TARGET_CHANGED",
+  targetRootMissing: "TARGET_ROOT_MISSING",
+  targetRootNotDirectory: "TARGET_ROOT_NOT_DIRECTORY",
+  targetRootSymlink: "TARGET_ROOT_SYMLINK",
   unsafeTarget: "UNSAFE_TARGET",
   unsupportedTarget: "UNSUPPORTED_TARGET",
   targetWriteFailed: "TARGET_WRITE_FAILED",
@@ -244,6 +250,12 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     recoveryActions: replaceImage,
     summary: "An embedded image format is unsupported.",
   },
+  [ISSUE_CODES.unresolvableImage]: {
+    severity: "blocker",
+    stage: "image",
+    recoveryActions: replaceImage,
+    summary: "An embedded image could not be resolved in the vault.",
+  },
   [ISSUE_CODES.imageDecodeFailed]: {
     severity: "blocker",
     stage: "image",
@@ -297,6 +309,18 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     stage: "planning",
     recoveryActions: [RECOVERY_ACTIONS.openTerminal],
     summary: "Unplanned stale outputs are present in the destination.",
+  },
+  [ISSUE_CODES.noActiveMarkdown]: {
+    severity: "blocker",
+    stage: "capture",
+    recoveryActions: editNote,
+    summary: "The active file is not a Markdown note.",
+  },
+  [ISSUE_CODES.sourceCaptureFailed]: {
+    severity: "blocker",
+    stage: "capture",
+    recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
+    summary: "Source bytes could not be captured from the vault.",
   },
   [ISSUE_CODES.planNotFound]: {
     severity: "blocker",
@@ -366,6 +390,24 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     stage: "git",
     recoveryActions: previewAgain,
     summary: "A planned target changed after preview.",
+  },
+  [ISSUE_CODES.targetRootMissing]: {
+    severity: "blocker",
+    stage: "planning",
+    recoveryActions: [RECOVERY_ACTIONS.selectProfile],
+    summary: "The configured target folder does not exist.",
+  },
+  [ISSUE_CODES.targetRootNotDirectory]: {
+    severity: "blocker",
+    stage: "planning",
+    recoveryActions: [RECOVERY_ACTIONS.selectProfile],
+    summary: "The configured target folder is not a directory.",
+  },
+  [ISSUE_CODES.targetRootSymlink]: {
+    severity: "blocker",
+    stage: "planning",
+    recoveryActions: [RECOVERY_ACTIONS.selectProfile],
+    summary: "The configured target folder must not be a symlink.",
   },
   [ISSUE_CODES.unsafeTarget]: {
     severity: "blocker",
@@ -444,13 +486,19 @@ export type SafePathLabel = string & {
 };
 
 export interface IssueDisplayContext {
-  /** The only caller-controlled display detail: a finite nonnegative integer. */
+  /** Finite nonnegative integer for count-bearing warnings. */
   readonly count?: number;
+  /**
+   * Caller-controlled display label for actionable blockers: a configured
+   * target path or an embed source. Rejected when credential-like or unsafe.
+   */
+  readonly detail?: string;
 }
 
 export interface RedactedDisplayDetails {
   readonly summary: string;
   readonly count?: number;
+  readonly detail?: string;
 }
 
 export interface IssueLocation {
@@ -510,6 +558,27 @@ export function toSafePathLabel(value: unknown): SafePathLabel | undefined {
   return value as SafePathLabel;
 }
 
+/**
+ * Validates a caller-supplied display detail (configured path or embed source).
+ * Absolute paths are allowed: target-folder configuration is user-authored and
+ * must appear in actionable blockers. Credential-bearing and control-bearing
+ * strings are still refused.
+ */
+export function toIssueDetail(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  if (value.length === 0 || value.length > 4096) return undefined;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return undefined;
+  }
+  if (
+    /^[a-z][a-z0-9+.-]*:\/\/[^/]*@/iu.test(value) ||
+    /^(?:[^/@:\s]+@)?[^/@:\s]+:.+/u.test(value)
+  )
+    return undefined;
+  return value;
+}
+
 const clonePoint = (value: unknown): SourcePoint | undefined => {
   if (!isRecord(value)) return undefined;
   const { line, column, offset } = value;
@@ -549,6 +618,8 @@ export function createIssue<C extends IssueCode>(
   const count = isSafeInteger(runtimeContext.count)
     ? { count: runtimeContext.count }
     : {};
+  const detailValue = toIssueDetail(runtimeContext.detail);
+  const detail = detailValue === undefined ? {} : { detail: detailValue };
   const runtimeLocation = isRecord(location) ? location : {};
   const sourceRange = cloneRange(runtimeLocation.sourceRange);
   const safePathLabel = toSafePathLabel(runtimeLocation.safePathLabel);
@@ -556,7 +627,11 @@ export function createIssue<C extends IssueCode>(
     code: safeCode,
     severity: definition.severity,
     stage: definition.stage,
-    displayDetails: Object.freeze({ summary: definition.summary, ...count }),
+    displayDetails: Object.freeze({
+      summary: definition.summary,
+      ...count,
+      ...detail,
+    }),
     recoveryActions: definition.recoveryActions,
     ...(sourceRange ? { sourceRange } : {}),
     ...(safePathLabel ? { safePathLabel } : {}),
@@ -631,9 +706,11 @@ export function isMdxRelayIssue(value: unknown): value is MdxRelayIssue {
     !hasExactIssueKeys(details, [
       "summary",
       ...("count" in details ? ["count"] : []),
+      ...("detail" in details ? ["detail"] : []),
     ]) ||
     details.summary !== definition.summary ||
-    ("count" in details && !isSafeInteger(details.count))
+    ("count" in details && !isSafeInteger(details.count)) ||
+    ("detail" in details && toIssueDetail(details.detail) !== details.detail)
   )
     return false;
   if ("sourceRange" in value && !isStoredSourceRange(value.sourceRange))
@@ -674,14 +751,14 @@ if (import.meta.vitest) {
           definition.summary,
         ]);
       expect(snapshotHash([...codes].sort())).toBe(
-        "75575ffcae3dc6d1c163f6a9b754945aed0d7654fd02c3d8b181f804cb42f699",
+        "f5ba19a17134dc8ed20375e90d5310fb8ae01fe5194f9dc7744ed077629b065b",
       );
       expect(snapshotHash(Object.values(RECOVERY_ACTIONS).sort())).toBe(
         "235a3f3eb94625c1087d70b1687d03e3ed54725c88c57a23de77aec4faa36a1d",
       );
       // Intentional approval gate: fixed summaries are part of the exact policy snapshot.
       expect(snapshotHash(policy)).toBe(
-        "1a0e1b3f04f2e67890bcb23f5d69b31c26dbf79a00c0aeb3fce9fc6f8f6d0df4",
+        "58a3551de52903210971fb74c7789f15ac4152dc579986b7aa7b73a3a11b27de",
       );
     });
 
@@ -718,6 +795,37 @@ if (import.meta.vitest) {
       }
       expect(Object.isFrozen(warning)).toBe(true);
       expect(Object.isFrozen(warning.displayDetails)).toBe(true);
+    });
+
+    it("accepts validated display details for configured paths and embed sources", () => {
+      const withPath = createIssue(ISSUE_CODES.targetRootMissing, {
+        detail: "/home/projects/site",
+      });
+      expect(withPath.displayDetails).toEqual({
+        summary: ISSUE_REGISTRY.TARGET_ROOT_MISSING.summary,
+        detail: "/home/projects/site",
+      });
+      const withEmbed = createIssue(ISSUE_CODES.unresolvableImage, {
+        detail: "missing-image.png",
+      });
+      expect(withEmbed.displayDetails.detail).toBe("missing-image.png");
+      const canary = "https://user:token@example.test/private";
+      const rejected = createIssue(ISSUE_CODES.targetRootMissing, {
+        detail: canary,
+      });
+      expect(rejected.displayDetails).toEqual({
+        summary: ISSUE_REGISTRY.TARGET_ROOT_MISSING.summary,
+      });
+      expect(JSON.stringify(rejected)).not.toContain(canary);
+      expect(toIssueDetail("")).toBeUndefined();
+      expect(toIssueDetail("unit\u001fseparator")).toBeUndefined();
+      expect(isMdxRelayIssue(withPath)).toBe(true);
+      expect(
+        isMdxRelayIssue({
+          ...withPath,
+          displayDetails: { ...withPath.displayDetails, detail: canary },
+        }),
+      ).toBe(false);
     });
 
     it("fails closed without leaking or throwing for an unknown runtime code", () => {
@@ -1236,6 +1344,7 @@ if (import.meta.vitest) {
         "mdxRelayOk",
         "ok",
         "toSafePathLabel",
+        "toIssueDetail",
       ]);
     });
   });

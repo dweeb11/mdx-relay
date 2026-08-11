@@ -702,19 +702,36 @@ describe("ProcessingClient worker construction", () => {
   };
 
   it("returns one redacted terminal blocker when the constructor throws", async () => {
-    const { scheduler, client } = setup({ createWorker: refuse });
-    const terminal = await client.process(request());
-    expect(terminal.type).toBe("blocked");
-    if (terminal.type !== "blocked") return;
-    expect(terminal.issues).toHaveLength(1);
-    expect(terminal.issues[0].code).toBe(ISSUE_CODES.workerCrashed);
-    expect(terminal.issues[0].displayDetails).toEqual({
-      summary: terminal.issues[0].displayDetails.summary,
-    });
-    // Neither the thrown message nor its stack may reach the host.
-    expect(JSON.stringify(terminal)).not.toContain(CONSTRUCTOR_MESSAGE);
-    expect(JSON.stringify(terminal)).not.toContain("processing-client");
-    expect(scheduler.size).toBe(0);
+    const errors: unknown[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const { scheduler, client } = setup({ createWorker: refuse });
+      const terminal = await client.process(request());
+      expect(terminal.type).toBe("blocked");
+      if (terminal.type !== "blocked") return;
+      expect(terminal.issues).toHaveLength(1);
+      expect(terminal.issues[0].code).toBe(ISSUE_CODES.workerCrashed);
+      expect(terminal.issues[0].displayDetails).toEqual({
+        summary: terminal.issues[0].displayDetails.summary,
+      });
+      // Neither the thrown message nor its stack may reach the host.
+      expect(JSON.stringify(terminal)).not.toContain(CONSTRUCTOR_MESSAGE);
+      expect(JSON.stringify(terminal)).not.toContain("processing-client");
+      expect(scheduler.size).toBe(0);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toEqual([
+        "MDX Relay worker construction failed",
+        expect.any(Error),
+      ]);
+      expect((errors[0] as unknown[])[1]).toMatchObject({
+        message: CONSTRUCTOR_MESSAGE,
+      });
+    } finally {
+      console.error = originalError;
+    }
   });
 
   it("never throws or rejects when the constructor throws", async () => {
