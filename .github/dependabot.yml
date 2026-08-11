@@ -41,5 +41,12 @@ updates:
       time: "09:15"
       timezone: America/Los_Angeles
     open-pull-requests-limit: 5
+    groups:
+      codeql-action:
+        patterns:
+          # init and analyze must move together: the codeql-workflow unit
+          # test requires every codeql-action use to share one pinned SHA,
+          # so separate PRs can never pass verify. See PRs #70/#71.
+          - "github/codeql-action*"
     labels:
       - dependencies
