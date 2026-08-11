@@ -104,6 +104,11 @@ export interface IssueDefinition {
   readonly recoveryActions: readonly RecoveryAction[];
   /** Registry-owned display text. Callers cannot provide arbitrary strings. */
   readonly summary: string;
+  /**
+   * When true, a validated caller-supplied detail may appear in displayDetails.
+   * False means detail is refused fail-closed for that code.
+   */
+  readonly allowsDetail: boolean;
 }
 
 const defineIssueRegistry = <
@@ -130,210 +135,245 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     stage: "profile",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "The selected export profile is invalid.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.unsafePath]: {
     severity: "blocker",
     stage: "profile",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "The configured path is unsafe.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.credentialUrl]: {
     severity: "blocker",
     stage: "profile",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "A repository URL contains embedded credentials.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.noteCredentialUrl]: {
     severity: "blocker",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "The note contains a credential-bearing URL.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.noteTooLarge]: {
     severity: "blocker",
     stage: "capture",
     recoveryActions: editNote,
     summary: "The source note exceeds the supported size limit.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.sourceImageTooLarge]: {
     severity: "blocker",
     stage: "capture",
     recoveryActions: replaceImage,
     summary: "A source image exceeds the supported size limit.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.decodedImageTooLarge]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
     summary: "A decoded image exceeds the supported pixel limit.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.outputFileLimitExceeded]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: editNote,
     summary: "The plan exceeds the supported output file limit.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.outputTooLarge]: {
     severity: "blocker",
     stage: "sealing",
     recoveryActions: editNote,
     summary: "A sealed output exceeds the supported size limit.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.totalOutputTooLarge]: {
     severity: "blocker",
     stage: "sealing",
     recoveryActions: editNote,
     summary: "The sealed plan exceeds the total output size limit.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.decodedWorkLimitExceeded]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: editNote,
     summary: "The plan exceeds the supported decoded-work limit.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.summaryMissing]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "The source note has no summary.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.duplicateMessageField]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "The source note contains duplicate message fields.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.mdxEscaped]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "Unsafe MDX prose characters were escaped.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.wikilinksFlattened]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "Obsidian wikilinks were flattened to text.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.calloutsConverted]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "Obsidian callouts were converted to blockquotes.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.imageAltTextMissing]: {
     severity: "warning",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "An embedded image has no alt text.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.unsupportedMarkdown]: {
     severity: "blocker",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "The note contains unsupported Markdown or Obsidian syntax.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.invalidFrontmatter]: {
     severity: "blocker",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "The note frontmatter is invalid.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.invalidMdx]: {
     severity: "blocker",
     stage: "markdown",
     recoveryActions: editNote,
     summary: "The generated document is invalid MDX.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.unsupportedImage]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
     summary: "An embedded image format is unsupported.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.unresolvableImage]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
     summary: "An embedded image could not be resolved in the vault.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.imageDecodeFailed]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
     summary: "An embedded image could not be decoded.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.imageEncodeFailed]: {
     severity: "blocker",
     stage: "image",
     recoveryActions: replaceImage,
     summary: "An embedded image could not be encoded.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.workerImageTimeout]: {
     severity: "blocker",
     stage: "worker",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.replaceImage],
     summary: "Image processing exceeded its time budget.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.workerCrashed]: {
     severity: "blocker",
     stage: "worker",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
     summary: "The processing worker stopped unexpectedly.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.malformedWorkerResponse]: {
     severity: "blocker",
     stage: "worker",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
     summary: "The processing worker returned an invalid response.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.planBudgetExhausted]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: previewAgain,
     summary: "Planning exceeded its total time budget.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.staleDuringPlanning]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: previewAgain,
     summary: "Captured input changed while the plan was being built.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.previewContentMismatch]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: previewAgain,
     summary: "The displayed preview does not match the sealed output.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.staleOutputsPresent]: {
     severity: "warning",
     stage: "planning",
     recoveryActions: [RECOVERY_ACTIONS.openTerminal],
     summary: "Unplanned stale outputs are present in the destination.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.noActiveMarkdown]: {
     severity: "blocker",
     stage: "capture",
     recoveryActions: editNote,
     summary: "The active file is not a Markdown note.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.sourceCaptureFailed]: {
     severity: "blocker",
     stage: "capture",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
     summary: "Source bytes could not be captured from the vault.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.planNotFound]: {
     severity: "blocker",
     stage: "storage",
     recoveryActions: previewAgain,
     summary: "The sealed export plan could not be found.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.planExpired]: {
     severity: "blocker",
     stage: "storage",
     recoveryActions: previewAgain,
     summary: "The sealed export plan has expired.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.storageTampered]: {
     severity: "blocker",
@@ -343,102 +383,119 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.previewAgain,
     ],
     summary: "Private plan storage failed integrity or permission checks.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.storageWriteFailed]: {
     severity: "blocker",
     stage: "storage",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
     summary: "The sealed export plan could not be stored safely.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.staleApproval]: {
     severity: "blocker",
     stage: "approval",
     recoveryActions: previewAgain,
     summary: "The approval no longer matches the current preview.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.approvalMismatch]: {
     severity: "blocker",
     stage: "approval",
     recoveryActions: previewAgain,
     summary: "The approval identity does not match the sealed plan.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.repositoryPreflightFailed]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: fixRepository,
     summary: "Repository preflight could not be completed safely.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.dirtyRepository]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: fixRepository,
     summary: "The destination repository is not clean.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.unsupportedRepository]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: [RECOVERY_ACTIONS.chooseRepository],
     summary: "The destination repository form is unsupported.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.hostileGitConfig]: {
     severity: "blocker",
     stage: "repository",
     recoveryActions: fixRepository,
     summary: "Git configuration or attributes could transform reviewed bytes.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.targetChanged]: {
     severity: "blocker",
     stage: "git",
     recoveryActions: previewAgain,
     summary: "A planned target changed after preview.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.targetRootMissing]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "The configured target folder does not exist.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.targetRootNotDirectory]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "The configured target folder is not a directory.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.targetRootSymlink]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "The configured target folder must not be a symlink.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.targetRootInaccessible]: {
     severity: "blocker",
     stage: "planning",
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "The configured target folder is inaccessible.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.unsafeTarget]: {
     severity: "blocker",
     stage: "write",
     recoveryActions: previewAgain,
     summary: "A write target path is unsafe or escapes the configured root.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.unsupportedTarget]: {
     severity: "blocker",
     stage: "write",
     recoveryActions: previewAgain,
     summary: "A write target has an unsupported file type.",
+    allowsDetail: true,
   },
   [ISSUE_CODES.targetWriteFailed]: {
     severity: "blocker",
     stage: "write",
     recoveryActions: [RECOVERY_ACTIONS.retry, RECOVERY_ACTIONS.cancel],
     summary: "An approved target file could not be written safely.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.gitExecutionFailed]: {
     severity: "blocker",
     stage: "git",
     recoveryActions: inspectRecovery,
     summary: "The verified Git operation failed.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.rollbackFailed]: {
     severity: "blocker",
@@ -446,6 +503,7 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     recoveryActions: inspectRecovery,
     summary:
       "Automatic rollback could not restore the verified original state.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.recoveryRequired]: {
     severity: "blocker",
@@ -455,6 +513,7 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.openTerminal,
     ],
     summary: "A prior operation requires verified recovery.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.localCommitOnly]: {
     severity: "blocker",
@@ -465,6 +524,7 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.leaveLocalCommit,
     ],
     summary: "The approved commit exists locally but was not published.",
+    allowsDetail: false,
   },
   [ISSUE_CODES.remoteStatusUnknown]: {
     severity: "blocker",
@@ -474,6 +534,7 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
       RECOVERY_ACTIONS.openTerminal,
     ],
     summary: "The remote publication status could not be verified.",
+    allowsDetail: false,
   },
 } as const);
 
@@ -626,7 +687,9 @@ export function createIssue<C extends IssueCode>(
   const count = isSafeInteger(runtimeContext.count)
     ? { count: runtimeContext.count }
     : {};
-  const detailValue = toIssueDetail(runtimeContext.detail);
+  const detailValue = definition.allowsDetail
+    ? toIssueDetail(runtimeContext.detail)
+    : undefined;
   const detail = detailValue === undefined ? {} : { detail: detailValue };
   const runtimeLocation = isRecord(location) ? location : {};
   const sourceRange = cloneRange(runtimeLocation.sourceRange);
@@ -718,7 +781,9 @@ export function isMdxRelayIssue(value: unknown): value is MdxRelayIssue {
     ]) ||
     details.summary !== definition.summary ||
     ("count" in details && !isSafeInteger(details.count)) ||
-    ("detail" in details && toIssueDetail(details.detail) !== details.detail)
+    ("detail" in details &&
+      (!definition.allowsDetail ||
+        toIssueDetail(details.detail) !== details.detail))
   )
     return false;
   if ("sourceRange" in value && !isStoredSourceRange(value.sourceRange))
@@ -757,6 +822,7 @@ if (import.meta.vitest) {
           definition.stage,
           [...definition.recoveryActions],
           definition.summary,
+          definition.allowsDetail,
         ]);
       expect(snapshotHash([...codes].sort())).toBe(
         "5df2b8bb2a049a4cd08c8138c8dae5ce052124b97018a295d2a899b390d35c8d",
@@ -766,7 +832,7 @@ if (import.meta.vitest) {
       );
       // Intentional approval gate: fixed summaries are part of the exact policy snapshot.
       expect(snapshotHash(policy)).toBe(
-        "9455a41d8b3f93bbb9aecaad76d1223cee7577cf3bcb4320e9164609d735a392",
+        "47154307077bd8ad8eb83395c7448d298f0262cf704e9893612a53eb767ea1b6",
       );
     });
 
@@ -846,6 +912,50 @@ if (import.meta.vitest) {
           displayDetails: { ...withPath.displayDetails, detail: canary },
         }),
       ).toBe(false);
+    });
+
+    it("restricts display details to registry-eligible codes fail-closed", () => {
+      const canary = "NOTE_TEXT_CANARY_APP_673_SHOULD_NOT_LEAK";
+      const stripped = createIssue(ISSUE_CODES.summaryMissing, {
+        detail: canary,
+      });
+      expect(stripped.displayDetails).toEqual({
+        summary: ISSUE_REGISTRY.SUMMARY_MISSING.summary,
+      });
+      expect(JSON.stringify(stripped)).not.toContain(canary);
+      const smuggled = {
+        ...stripped,
+        displayDetails: {
+          summary: ISSUE_REGISTRY.SUMMARY_MISSING.summary,
+          detail: canary,
+        },
+      };
+      expect(isMdxRelayIssue(smuggled)).toBe(false);
+
+      const eligibleCodes = [
+        ISSUE_CODES.targetRootMissing,
+        ISSUE_CODES.targetRootNotDirectory,
+        ISSUE_CODES.targetRootSymlink,
+        ISSUE_CODES.targetRootInaccessible,
+        ISSUE_CODES.unresolvableImage,
+        ISSUE_CODES.unsupportedImage,
+        ISSUE_CODES.unsafePath,
+        ISSUE_CODES.unsafeTarget,
+        ISSUE_CODES.unsupportedTarget,
+      ] as const;
+      for (const code of eligibleCodes) {
+        expect(ISSUE_REGISTRY[code].allowsDetail).toBe(true);
+      }
+      for (const code of Object.values(ISSUE_CODES)) {
+        if ((eligibleCodes as readonly string[]).includes(code)) continue;
+        expect(ISSUE_REGISTRY[code].allowsDetail).toBe(false);
+      }
+      const detail = "assets/embed.png";
+      for (const code of eligibleCodes) {
+        const issue = createIssue(code, { detail });
+        expect(issue.displayDetails.detail).toBe(detail);
+        expect(isMdxRelayIssue(issue)).toBe(true);
+      }
     });
 
     it("fails closed without leaking or throwing for an unknown runtime code", () => {
