@@ -724,9 +724,10 @@ describe("ProcessingClient worker construction", () => {
       expect(errors).toHaveLength(1);
       expect(errors[0]).toEqual([
         "MDX Relay worker construction failed",
+        { generationToken: expect.any(String) },
         expect.any(Error),
       ]);
-      expect((errors[0] as unknown[])[1]).toMatchObject({
+      expect((errors[0] as unknown[])[2]).toMatchObject({
         message: CONSTRUCTOR_MESSAGE,
       });
     } finally {

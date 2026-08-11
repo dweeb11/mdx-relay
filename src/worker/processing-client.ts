@@ -172,7 +172,11 @@ export class ProcessingClient {
       // underlying error for diagnosability; the user-facing issue stays
       // redacted. No active generation is installed, so cancel() stays a
       // no-op and the next process() call starts from a clean client.
-      console.error("MDX Relay worker construction failed", error);
+      console.error(
+        "MDX Relay worker construction failed",
+        { generationToken },
+        error,
+      );
       return Promise.resolve(
         brand({
           type: "blocked",
