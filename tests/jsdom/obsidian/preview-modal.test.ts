@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GenerationToken } from "../../../src/contracts/export-plan";
+import type {
+  GenerationToken,
+  Sha256Digest,
+} from "../../../src/contracts/export-plan";
 import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
 import { renderPreviewModal } from "../../../src/obsidian/preview-modal";
 import {
@@ -74,6 +77,38 @@ describe("renderPreviewModal", () => {
       /\b(?:commit|push|remote|branch|staging)\b/iu,
     );
   });
+
+  it.each(["ready", "no-changes"] as const)(
+    "renders the sealed profile identity for %s plans",
+    (planState) => {
+      const root = document.createElement("div");
+      const built = buildFakePreview(generationToken, planState);
+      const sealedIdentity =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Sha256Digest;
+      const state = reducePreviewState(initialPreviewState(generationToken), {
+        type: "plan",
+        generationToken,
+        document: {
+          plan: {
+            ...built.envelope.plan,
+            profileSnapshotSha256: sealedIdentity,
+          },
+          mdxDiff: "-before\n+after",
+          assets: [],
+        },
+      });
+
+      renderPreviewModal(root, state, {
+        setApprovalEnabled: vi.fn(),
+        approve: vi.fn(),
+        cancel: vi.fn(),
+      });
+
+      expect(
+        root.querySelector('[data-preview="profile-identity"]')?.textContent,
+      ).toBe(sealedIdentity);
+    },
+  );
 
   it("keeps approval disabled until the checkbox changes", () => {
     const root = document.createElement("div");

@@ -45,7 +45,7 @@ const bufferCopy = (bytes: Uint8Array): ArrayBuffer =>
 
 const asBytes = (buffer: ArrayBuffer): Uint8Array => new Uint8Array(buffer);
 
-class InProcessWorker implements WorkerLike {
+export class InProcessWorker implements WorkerLike {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
   onmessageerror: ((event: unknown) => void) | null = null;
