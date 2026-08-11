@@ -19,19 +19,29 @@ export async function configureMdxRelayPlugin(
   const settings = new LiveSettings(plugin);
   await settings.load();
   plugin.addSettingTab(new MdxRelaySettingTab(plugin.app, plugin, settings));
-  const workerResource = plugin.manifest.dir
-    ? plugin.app.vault.adapter.getResourcePath(
-        `${plugin.manifest.dir}/processing.worker.js`,
-      )
-    : undefined;
+  // Obsidian serves vault resources from a per-vault app:// host while the
+  // renderer runs on app://obsidian.md, and the Worker constructor rejects a
+  // cross-origin script URL. Loading the bundle through the vault adapter and
+  // spawning from a same-origin blob URL is the only path that constructs.
+  let workerUrl: string | undefined;
+  if (plugin.manifest.dir) {
+    const bundle = await plugin.app.vault.adapter.readBinary(
+      `${plugin.manifest.dir}/processing.worker.js`,
+    );
+    const url = URL.createObjectURL(
+      new Blob([bundle], { type: "text/javascript" }),
+    );
+    plugin.register(() => URL.revokeObjectURL(url));
+    workerUrl = url;
+  }
   const deps = createLivePreviewCommandDeps({
     host: new ObsidianHostAdapter(plugin.app),
     settings,
     planStoreDeps: createPlanStoreDeps(),
     createWorker: () => {
-      if (workerResource === undefined)
+      if (workerUrl === undefined)
         throw new Error("Worker resource is unavailable.");
-      return new Worker(workerResource) as unknown as WorkerLike;
+      return new Worker(workerUrl) as unknown as WorkerLike;
     },
   });
   register(plugin, deps);
