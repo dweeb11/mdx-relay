@@ -9,6 +9,13 @@ updates:
       time: "09:00"
       timezone: America/Los_Angeles
     open-pull-requests-limit: 3
+    ignore:
+      # Runtime is intentionally pinned to Node 22. Keep its ambient types on
+      # the same major; tests/unit/toolchain/node-types-version.test.ts enforces
+      # the package and lockfile side of this contract.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
     groups:
       test-toolchain:
         patterns:
