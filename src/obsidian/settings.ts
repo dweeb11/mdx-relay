@@ -1,6 +1,10 @@
 import { PluginSettingTab, Setting, type App, type Plugin } from "obsidian";
 
 import { DPW_MIND_NET_V1 } from "../profiles/builtins/dpw-mind-net-v1";
+import {
+  probeTargetFolderConfig,
+  targetFolderConfigMessage,
+} from "./target-folder-config";
 
 export interface MdxRelaySettings {
   readonly profileId: typeof DPW_MIND_NET_V1.id;
@@ -60,6 +64,9 @@ export class LiveSettings {
 }
 
 export class MdxRelaySettingTab extends PluginSettingTab {
+  private targetFeedback: HTMLElement | undefined;
+  private targetValidationToken = 0;
+
   constructor(
     app: App,
     plugin: Plugin,
@@ -91,12 +98,30 @@ export class MdxRelaySettingTab extends PluginSettingTab {
         text
           .setPlaceholder("/absolute/path/to/site")
           .setValue(this.settings.current().targetRoot)
-          .onChange((targetRoot) =>
-            this.settings.update({
+          .onChange((targetRoot) => {
+            void this.settings.update({
               profileId: this.settings.current().profileId,
               targetRoot,
-            }),
-          );
+            });
+            void this.refreshTargetFeedback(targetRoot);
+          });
       });
+    this.targetFeedback = document.createElement("div");
+    this.targetFeedback.className = "mdx-relay-target-folder-feedback";
+    this.containerEl.append(this.targetFeedback);
+    void this.refreshTargetFeedback(this.settings.current().targetRoot);
+  }
+
+  private async refreshTargetFeedback(targetRoot: string): Promise<void> {
+    const token = ++this.targetValidationToken;
+    const status = await probeTargetFolderConfig(targetRoot);
+    if (
+      token !== this.targetValidationToken ||
+      this.targetFeedback === undefined
+    )
+      return;
+    const message = targetFolderConfigMessage(status);
+    this.targetFeedback.textContent = message ?? "";
+    this.targetFeedback.dataset.valid = status.ok ? "true" : "false";
   }
 }

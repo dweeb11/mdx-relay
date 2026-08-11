@@ -1,4 +1,12 @@
-import { mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -310,5 +318,110 @@ describe("configured preview pipeline", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error[0].code).toBe(ISSUE_CODES.staleDuringPlanning);
+  }, 15_000);
+
+  it("names a missing target folder instead of reporting staleness", async () => {
+    const vault = await mutableVault();
+    const missingRoot = join(
+      await temporaryRoot("missing-parent"),
+      "does-not-exist",
+    );
+    const storeRoot = await temporaryRoot("missing-store");
+    const settings = await liveSettings(missingRoot);
+    const deps = await pipeline(vault, settings, storeRoot);
+    const result = await deps.buildPreview(
+      await capture(deps, "generation-missing-root"),
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error[0].code).toBe(ISSUE_CODES.targetRootMissing);
+    expect(result.error[0].displayDetails.detail).toBe(missingRoot);
+  }, 15_000);
+
+  it("names a non-directory target folder instead of reporting staleness", async () => {
+    const vault = await mutableVault();
+    const parent = await temporaryRoot("file-root-parent");
+    const fileRoot = join(parent, "not-a-directory");
+    await writeFile(fileRoot, "file");
+    const storeRoot = await temporaryRoot("file-root-store");
+    const settings = await liveSettings(fileRoot);
+    const deps = await pipeline(vault, settings, storeRoot);
+    const result = await deps.buildPreview(
+      await capture(deps, "generation-file-root"),
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error[0].code).toBe(ISSUE_CODES.targetRootNotDirectory);
+    expect(result.error[0].displayDetails.detail).toBe(fileRoot);
+  }, 15_000);
+
+  it("names a file-ancestor target root as not-directory instead of inaccessible", async () => {
+    const vault = await mutableVault();
+    const parent = await temporaryRoot("file-ancestor-parent");
+    const fileAncestor = join(parent, "somefile");
+    await writeFile(fileAncestor, "file");
+    const fileAncestorRoot = join(fileAncestor, "child");
+    const storeRoot = await temporaryRoot("file-ancestor-store");
+    const settings = await liveSettings(fileAncestorRoot);
+    const deps = await pipeline(vault, settings, storeRoot);
+    const result = await deps.buildPreview(
+      await capture(deps, "generation-file-ancestor-root"),
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error[0].code).toBe(ISSUE_CODES.targetRootNotDirectory);
+    expect(result.error[0].displayDetails.detail).toBe(fileAncestorRoot);
+  }, 15_000);
+
+  it("names a symlink target folder instead of reporting staleness", async () => {
+    const vault = await mutableVault();
+    const realRoot = await temporaryRoot("symlink-real");
+    const parent = await temporaryRoot("symlink-parent");
+    const linkedRoot = join(parent, "linked-root");
+    await symlink(realRoot, linkedRoot);
+    const storeRoot = await temporaryRoot("symlink-store");
+    const settings = await liveSettings(linkedRoot);
+    const deps = await pipeline(vault, settings, storeRoot);
+    const result = await deps.buildPreview(
+      await capture(deps, "generation-symlink-root"),
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error[0].code).toBe(ISSUE_CODES.targetRootSymlink);
+    expect(result.error[0].displayDetails.detail).toBe(linkedRoot);
+  }, 15_000);
+
+  it("names an unresolvable image embed instead of reporting staleness", async () => {
+    const vault = await mutableVault();
+    const targetRoot = await temporaryRoot("image-target");
+    const storeRoot = await temporaryRoot("image-store");
+    const settings = await liveSettings(targetRoot);
+    const prior = vault.bytes.get(vault.note.path)!;
+    vault.bytes.set(
+      vault.note.path,
+      new TextEncoder().encode(
+        new TextDecoder()
+          .decode(prior)
+          .replace("gradient.png", "missing-image.png"),
+      ),
+    );
+    const deps = await pipeline(vault, settings, storeRoot);
+    const result = await deps.buildPreview(
+      await capture(deps, "generation-missing-image"),
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error[0].code).toBe(ISSUE_CODES.unresolvableImage);
+    expect(result.error[0].displayDetails.detail).toBe("missing-image.png");
   }, 15_000);
 });

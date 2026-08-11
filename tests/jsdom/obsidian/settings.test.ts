@@ -84,6 +84,7 @@ import {
 const flush = async (): Promise<void> => {
   await Promise.resolve();
   await Promise.resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 };
 
 describe("MDX Relay settings", () => {
@@ -127,10 +128,16 @@ describe("MDX Relay settings", () => {
       settings,
     ) as MdxRelaySettingTab & { containerEl: HTMLElement };
     tab.display();
+    await flush();
     const input = tab.containerEl.querySelector("input")!;
     const select = tab.containerEl.querySelector("select")!;
+    const feedback = tab.containerEl.querySelector(
+      ".mdx-relay-target-folder-feedback",
+    ) as HTMLElement;
     expect(input.value).toBe("/target/one");
     expect(select.value).toBe(DPW_MIND_NET_V1.id);
+    expect(feedback.dataset.valid).toBe("false");
+    expect(feedback.textContent).toBe("Target folder does not exist.");
 
     input.value = "/target/two";
     input.dispatchEvent(new Event("change"));
@@ -141,6 +148,37 @@ describe("MDX Relay settings", () => {
       targetRoot: "/target/two",
     });
     expect(settings.current().targetRoot).toBe("/target/two");
+  });
+
+  it("flags tilde and relative target folders inline", async () => {
+    const settings = new LiveSettings({
+      loadData: async () => ({
+        profileId: DPW_MIND_NET_V1.id,
+        targetRoot: "~/projects/site",
+      }),
+      saveData: vi.fn(async () => undefined),
+    });
+    await settings.load();
+    const tab = new MdxRelaySettingTab(
+      {} as never,
+      {} as never,
+      settings,
+    ) as MdxRelaySettingTab & { containerEl: HTMLElement };
+    tab.display();
+    await flush();
+    const feedback = tab.containerEl.querySelector(
+      ".mdx-relay-target-folder-feedback",
+    ) as HTMLElement;
+    expect(feedback.dataset.valid).toBe("false");
+    expect(feedback.textContent).toContain("~ is not expanded");
+
+    const input = tab.containerEl.querySelector("input")!;
+    input.value = "relative/path";
+    input.dispatchEvent(new Event("change"));
+    await flush();
+    expect(feedback.textContent).toBe(
+      "Target folder must be an absolute path.",
+    );
   });
 
   it("publishes the live value before persistence completes", async () => {

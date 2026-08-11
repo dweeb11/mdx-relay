@@ -47,6 +47,7 @@ import {
 import {
   applyApprovedWrites,
   createNodeTargetFolderFileSystem,
+  isTargetRootResolutionError,
   resolveContainedTargetPath,
   type TargetFolderFileSystem,
 } from "../write";
@@ -85,10 +86,68 @@ interface TargetProbe {
   readonly snapshot: TargetFolderSnapshot;
 }
 
-const blocker = (
+const staleBlocker = (
   code:
     typeof ISSUE_CODES.staleDuringPlanning | typeof ISSUE_CODES.staleApproval,
 ): MdxRelayResult<never> => mdxRelayErr([createIssue(code) as BlockerIssue]);
+
+const planningBlocker = (
+  code:
+    | typeof ISSUE_CODES.unsafePath
+    | typeof ISSUE_CODES.unsafeTarget
+    | typeof ISSUE_CODES.unsupportedTarget
+    | typeof ISSUE_CODES.workerCrashed
+    | typeof ISSUE_CODES.malformedWorkerResponse
+    | typeof ISSUE_CODES.unsupportedImage
+    | typeof ISSUE_CODES.invalidMdx
+    | typeof ISSUE_CODES.targetRootMissing
+    | typeof ISSUE_CODES.targetRootNotDirectory
+    | typeof ISSUE_CODES.targetRootSymlink
+    | typeof ISSUE_CODES.targetRootInaccessible,
+  detail?: string,
+): MdxRelayResult<never> =>
+  mdxRelayErr([
+    createIssue(code, detail === undefined ? {} : { detail }) as BlockerIssue,
+  ]);
+
+const targetRootBlocker = (
+  error: unknown,
+  configuredRoot: string,
+): MdxRelayResult<never> => {
+  if (isTargetRootResolutionError(error)) {
+    switch (error.kind) {
+      case "missing":
+        return planningBlocker(
+          ISSUE_CODES.targetRootMissing,
+          error.configuredRoot,
+        );
+      case "not-directory":
+        return planningBlocker(
+          ISSUE_CODES.targetRootNotDirectory,
+          error.configuredRoot,
+        );
+      case "symlink":
+        return planningBlocker(
+          ISSUE_CODES.targetRootSymlink,
+          error.configuredRoot,
+        );
+      case "inaccessible":
+        return planningBlocker(
+          ISSUE_CODES.targetRootInaccessible,
+          error.configuredRoot,
+        );
+      default: {
+        const _exhaustive: never = error.kind;
+        void _exhaustive;
+        return planningBlocker(
+          ISSUE_CODES.targetRootInaccessible,
+          error.configuredRoot,
+        );
+      }
+    }
+  }
+  return planningBlocker(ISSUE_CODES.targetRootInaccessible, configuredRoot);
+};
 
 const profileFor = (
   settings: MdxRelaySettings,
@@ -115,27 +174,34 @@ const probeTargets = async (
   configuredRoot: string,
   caseSensitivity: CaseSensitivity,
   relativePaths: readonly string[],
-  failureCode:
+  inconsistencyCode:
     typeof ISSUE_CODES.staleDuringPlanning | typeof ISSUE_CODES.staleApproval,
 ): Promise<MdxRelayResult<TargetProbe>> => {
+  let targetRootRealPath: string;
   try {
-    const targetRootRealPath =
-      await fileSystem.resolveTargetRoot(configuredRoot);
+    targetRootRealPath = await fileSystem.resolveTargetRoot(configuredRoot);
+  } catch (error) {
+    return targetRootBlocker(error, configuredRoot);
+  }
+  try {
     const targets: TargetSnapshotEntry[] = [];
     for (const relativePath of relativePaths) {
       const targetPath = resolveContainedTargetPath(
         targetRootRealPath,
         relativePath,
       );
-      if (targetPath === undefined) return blocker(failureCode);
+      if (targetPath === undefined)
+        return planningBlocker(ISSUE_CODES.unsafeTarget, relativePath);
       const stat = await fileSystem.lstat(targetPath);
       if (stat.kind === "absent") {
         targets.push({ relativePath, priorState: { state: "absent" } });
         continue;
       }
-      if (stat.kind !== "regularFile") return blocker(failureCode);
+      if (stat.kind !== "regularFile")
+        return planningBlocker(ISSUE_CODES.unsupportedTarget, relativePath);
       const bytes = await fileSystem.readFile(targetPath);
-      if (bytes.byteLength !== stat.byteLength) return blocker(failureCode);
+      if (bytes.byteLength !== stat.byteLength)
+        return staleBlocker(inconsistencyCode);
       targets.push({
         relativePath,
         priorState: {
@@ -152,7 +218,7 @@ const probeTargets = async (
       },
     });
   } catch {
-    return blocker(failureCode);
+    return staleBlocker(inconsistencyCode);
   }
 };
 
@@ -162,12 +228,11 @@ const referencesFor = (
 ): Promise<MdxRelayResult<MarkdownTransformResult>> => {
   const note = decodeNote(bytes);
   if (note === undefined)
-    return Promise.resolve(blocker(ISSUE_CODES.staleDuringPlanning));
+    return Promise.resolve(planningBlocker(ISSUE_CODES.invalidMdx));
   return transformMarkdown(note, profile.portableProfile).then((result) => {
     if (result.ok) return mdxRelayOk(result.value);
-    return result.error.severity === "blocker"
-      ? mdxRelayErr([result.error])
-      : blocker(ISSUE_CODES.staleDuringPlanning);
+    if (result.error.severity === "blocker") return mdxRelayErr([result.error]);
+    return planningBlocker(ISSUE_CODES.invalidMdx);
   });
 };
 
@@ -257,7 +322,10 @@ export function createLivePreviewCommandDeps(
     if (!initialRoot.ok) return initialRoot;
     const safeNotePath = toSafePathLabel(capture.note.vaultRelativePath);
     if (safeNotePath === undefined)
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return planningBlocker(
+        ISSUE_CODES.unsafePath,
+        capture.note.vaultRelativePath,
+      );
     const requestImages = initialDependencies.value.occurrences.map(
       (occurrence) => {
         const image = initialDependencies.value.images.find(
@@ -301,16 +369,16 @@ export function createLivePreviewCommandDeps(
       clearTimer,
     });
     if (activeClients.get(capture.generationToken) !== "pending")
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return staleBlocker(ISSUE_CODES.staleDuringPlanning);
     activeClients.set(capture.generationToken, client);
     const terminal = await client.process(request, onWorkerEvent);
     if (activeClients.get(capture.generationToken) !== client)
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return staleBlocker(ISSUE_CODES.staleDuringPlanning);
     if (terminal.type === "blocked") return mdxRelayErr(terminal.issues);
     if (terminal.type === "cancelled")
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return staleBlocker(ISSUE_CODES.staleDuringPlanning);
     if (terminal.type !== "completed")
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return planningBlocker(ISSUE_CODES.malformedWorkerResponse);
     if (!terminal.result.ok) return terminal.result;
 
     const sourceImages = sourceImagesFor(
@@ -318,12 +386,12 @@ export function createLivePreviewCommandDeps(
       terminal.result.value.transformedImages,
     );
     if (sourceImages === undefined)
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return planningBlocker(ISSUE_CODES.unsupportedImage);
     if (
       initialTransform.value.images.length !==
       initialDependencies.value.occurrences.length
     )
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return planningBlocker(ISSUE_CODES.unsupportedImage);
     const imageEmbeds = initialTransform.value.images.map((image, index) => ({
       sourceId: initialDependencies.value.occurrences[index]!.sourceId,
       assetFileName: image.destination,
@@ -347,7 +415,7 @@ export function createLivePreviewCommandDeps(
       priorTargets.value.snapshot.targetRootRealPath !==
       initialRoot.value.snapshot.targetRootRealPath
     )
-      return blocker(ISSUE_CODES.staleDuringPlanning);
+      return staleBlocker(ISSUE_CODES.staleDuringPlanning);
 
     const finalProfile = profileFor(options.settings.current());
     if (!finalProfile.ok) return finalProfile;
@@ -360,7 +428,7 @@ export function createLivePreviewCommandDeps(
       recapturedSources.value.note,
       finalProfile.value,
     );
-    if (!finalTransform.ok) return blocker(ISSUE_CODES.staleDuringPlanning);
+    if (!finalTransform.ok) return finalTransform;
     const finalDependencies = await options.host.captureImageDependencies(
       capture.note.vaultRelativePath,
       finalTransform.value.images,
@@ -461,12 +529,12 @@ export function createLivePreviewCommandDeps(
       sourceBytes.value.note,
       liveProfile.value,
     );
-    if (!transformed.ok) return blocker(ISSUE_CODES.staleApproval);
+    if (!transformed.ok) return transformed;
     const dependencies = await options.host.captureImageDependencies(
       plan.sourceNote.vaultRelativePath,
       transformed.value.images,
     );
-    if (!dependencies.ok) return blocker(ISSUE_CODES.staleApproval);
+    if (!dependencies.ok) return dependencies;
     const targets = await probeTargets(
       createFileSystem(),
       liveProfile.value.targetRoot,
@@ -490,7 +558,7 @@ export function createLivePreviewCommandDeps(
           };
     });
     if (sourceImages.some((image) => image === undefined))
-      return blocker(ISSUE_CODES.staleApproval);
+      return staleBlocker(ISSUE_CODES.staleApproval);
     const fingerprint: ApprovalFingerprint = {
       profileSnapshotSha256: liveProfile.value.profileSnapshotSha256,
       sourceNote: {

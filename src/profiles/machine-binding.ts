@@ -78,6 +78,9 @@ const isSafeAbsoluteTargetRoot = (value: unknown): value is string => {
   );
 };
 
+/** True when the binding target root is an absolute local path (`~` is not expanded). */
+export { isSafeAbsoluteTargetRoot };
+
 const cloneAndFreeze = (binding: MachineBindingV1): MachineBindingV1 =>
   Object.freeze(structuredClone(binding));
 

@@ -24,3 +24,8 @@ export {
   createNodeTargetFolderFileSystem,
   writeAllBytes,
 } from "./node-target-folder-fs";
+export {
+  TargetRootResolutionError,
+  isTargetRootResolutionError,
+  type TargetRootFailureKind,
+} from "./target-root-errors";
