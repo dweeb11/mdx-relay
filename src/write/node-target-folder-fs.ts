@@ -118,6 +118,8 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
       } catch (error) {
         if (errorCode(error) === "ENOENT")
           throw new TargetRootResolutionError("missing", configuredRoot);
+        if (errorCode(error) === "ENOTDIR")
+          throw new TargetRootResolutionError("not-directory", configuredRoot);
         throw new TargetRootResolutionError("inaccessible", configuredRoot);
       }
       if (linkStat.isSymbolicLink())

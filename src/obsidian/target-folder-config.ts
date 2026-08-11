@@ -52,6 +52,8 @@ export async function probeTargetFolderConfig(
     return { ok: true };
   } catch (error) {
     if (errorCode(error) === "ENOENT") return { ok: false, problem: "missing" };
+    if (errorCode(error) === "ENOTDIR")
+      return { ok: false, problem: "not-directory" };
     return { ok: false, problem: "inaccessible" };
   }
 }

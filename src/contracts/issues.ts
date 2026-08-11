@@ -578,6 +578,8 @@ export function toIssueDetail(value: unknown): string | undefined {
     const code = value.charCodeAt(index);
     if (code <= 0x1f || code === 0x7f) return undefined;
   }
+  // Protocol-relative URLs can carry credential query strings; refuse them.
+  if (value.startsWith("//")) return undefined;
   if (/^[a-z][a-z0-9+.-]*:\/\/[^/]*@/iu.test(value)) return undefined;
   // Drive-letter absolute paths are local roots, not host:path credentials.
   if (/^[a-z]:[\\/]/iu.test(value)) return value;
@@ -831,6 +833,12 @@ if (import.meta.vitest) {
       expect(toIssueDetail("")).toBeUndefined();
       expect(toIssueDetail("unit\u001fseparator")).toBeUndefined();
       expect(toIssueDetail("host:repo")).toBeUndefined();
+      expect(
+        toIssueDetail("https://cdn.example/image.png?access_token=secret"),
+      ).toBeUndefined();
+      expect(
+        toIssueDetail("//cdn.example/image.png?access_token=secret"),
+      ).toBeUndefined();
       expect(isMdxRelayIssue(withPath)).toBe(true);
       expect(
         isMdxRelayIssue({

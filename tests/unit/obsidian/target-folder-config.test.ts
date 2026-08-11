@@ -63,6 +63,10 @@ describe("target folder config validation", () => {
       ok: false,
       problem: "not-directory",
     });
+    expect(await probeTargetFolderConfig(join(filePath, "child"))).toEqual({
+      ok: false,
+      problem: "not-directory",
+    });
     expect(await probeTargetFolderConfig(linked)).toEqual({
       ok: false,
       problem: "symlink",

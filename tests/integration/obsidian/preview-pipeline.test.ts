@@ -359,6 +359,26 @@ describe("configured preview pipeline", () => {
     expect(result.error[0].displayDetails.detail).toBe(fileRoot);
   }, 15_000);
 
+  it("names a file-ancestor target root as not-directory instead of inaccessible", async () => {
+    const vault = await mutableVault();
+    const parent = await temporaryRoot("file-ancestor-parent");
+    const fileAncestor = join(parent, "somefile");
+    await writeFile(fileAncestor, "file");
+    const fileAncestorRoot = join(fileAncestor, "child");
+    const storeRoot = await temporaryRoot("file-ancestor-store");
+    const settings = await liveSettings(fileAncestorRoot);
+    const deps = await pipeline(vault, settings, storeRoot);
+    const result = await deps.buildPreview(
+      await capture(deps, "generation-file-ancestor-root"),
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error[0].code).toBe(ISSUE_CODES.targetRootNotDirectory);
+    expect(result.error[0].displayDetails.detail).toBe(fileAncestorRoot);
+  }, 15_000);
+
   it("names a symlink target folder instead of reporting staleness", async () => {
     const vault = await mutableVault();
     const realRoot = await temporaryRoot("symlink-real");
