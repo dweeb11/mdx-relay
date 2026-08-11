@@ -118,7 +118,7 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
       } catch (error) {
         if (errorCode(error) === "ENOENT")
           throw new TargetRootResolutionError("missing", configuredRoot);
-        throw error;
+        throw new TargetRootResolutionError("inaccessible", configuredRoot);
       }
       if (linkStat.isSymbolicLink())
         throw new TargetRootResolutionError("symlink", configuredRoot);
@@ -126,7 +126,11 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
         throw new TargetRootResolutionError("not-directory", configuredRoot);
       // realpath after refusing a final symlink collapses intermediate aliases
       // consistently with the sealed targetRootRealPath capture.
-      return realpath(absolute);
+      try {
+        return await realpath(absolute);
+      } catch {
+        throw new TargetRootResolutionError("inaccessible", configuredRoot);
+      }
     },
     async lstat(entryPath) {
       try {

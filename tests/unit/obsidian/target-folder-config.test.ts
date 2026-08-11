@@ -77,6 +77,9 @@ describe("target folder config validation", () => {
     expect(targetFolderConfigMessage({ ok: false, problem: "missing" })).toBe(
       "Target folder does not exist.",
     );
+    expect(
+      targetFolderConfigMessage({ ok: false, problem: "inaccessible" }),
+    ).toBe("Target folder is inaccessible.");
     expect(targetFolderConfigMessage({ ok: true })).toBeUndefined();
   });
 });

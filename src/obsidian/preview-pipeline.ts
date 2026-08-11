@@ -102,7 +102,8 @@ const planningBlocker = (
     | typeof ISSUE_CODES.invalidMdx
     | typeof ISSUE_CODES.targetRootMissing
     | typeof ISSUE_CODES.targetRootNotDirectory
-    | typeof ISSUE_CODES.targetRootSymlink,
+    | typeof ISSUE_CODES.targetRootSymlink
+    | typeof ISSUE_CODES.targetRootInaccessible,
   detail?: string,
 ): MdxRelayResult<never> =>
   mdxRelayErr([
@@ -130,17 +131,22 @@ const targetRootBlocker = (
           ISSUE_CODES.targetRootSymlink,
           error.configuredRoot,
         );
+      case "inaccessible":
+        return planningBlocker(
+          ISSUE_CODES.targetRootInaccessible,
+          error.configuredRoot,
+        );
       default: {
         const _exhaustive: never = error.kind;
         void _exhaustive;
         return planningBlocker(
-          ISSUE_CODES.targetRootMissing,
+          ISSUE_CODES.targetRootInaccessible,
           error.configuredRoot,
         );
       }
     }
   }
-  return planningBlocker(ISSUE_CODES.targetRootMissing, configuredRoot);
+  return planningBlocker(ISSUE_CODES.targetRootInaccessible, configuredRoot);
 };
 
 const profileFor = (

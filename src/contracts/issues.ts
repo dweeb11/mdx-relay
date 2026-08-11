@@ -85,6 +85,7 @@ export const ISSUE_CODES = Object.freeze({
   targetRootMissing: "TARGET_ROOT_MISSING",
   targetRootNotDirectory: "TARGET_ROOT_NOT_DIRECTORY",
   targetRootSymlink: "TARGET_ROOT_SYMLINK",
+  targetRootInaccessible: "TARGET_ROOT_INACCESSIBLE",
   unsafeTarget: "UNSAFE_TARGET",
   unsupportedTarget: "UNSUPPORTED_TARGET",
   targetWriteFailed: "TARGET_WRITE_FAILED",
@@ -409,6 +410,12 @@ export const ISSUE_REGISTRY = defineIssueRegistry({
     recoveryActions: [RECOVERY_ACTIONS.selectProfile],
     summary: "The configured target folder must not be a symlink.",
   },
+  [ISSUE_CODES.targetRootInaccessible]: {
+    severity: "blocker",
+    stage: "planning",
+    recoveryActions: [RECOVERY_ACTIONS.selectProfile],
+    summary: "The configured target folder is inaccessible.",
+  },
   [ISSUE_CODES.unsafeTarget]: {
     severity: "blocker",
     stage: "write",
@@ -571,11 +578,10 @@ export function toIssueDetail(value: unknown): string | undefined {
     const code = value.charCodeAt(index);
     if (code <= 0x1f || code === 0x7f) return undefined;
   }
-  if (
-    /^[a-z][a-z0-9+.-]*:\/\/[^/]*@/iu.test(value) ||
-    /^(?:[^/@:\s]+@)?[^/@:\s]+:.+/u.test(value)
-  )
-    return undefined;
+  if (/^[a-z][a-z0-9+.-]*:\/\/[^/]*@/iu.test(value)) return undefined;
+  // Drive-letter absolute paths are local roots, not host:path credentials.
+  if (/^[a-z]:[\\/]/iu.test(value)) return value;
+  if (/^(?:[^/@:\s]+@)?[^/@:\s]+:.+/u.test(value)) return undefined;
   return value;
 }
 
@@ -751,14 +757,14 @@ if (import.meta.vitest) {
           definition.summary,
         ]);
       expect(snapshotHash([...codes].sort())).toBe(
-        "f5ba19a17134dc8ed20375e90d5310fb8ae01fe5194f9dc7744ed077629b065b",
+        "5df2b8bb2a049a4cd08c8138c8dae5ce052124b97018a295d2a899b390d35c8d",
       );
       expect(snapshotHash(Object.values(RECOVERY_ACTIONS).sort())).toBe(
         "235a3f3eb94625c1087d70b1687d03e3ed54725c88c57a23de77aec4faa36a1d",
       );
       // Intentional approval gate: fixed summaries are part of the exact policy snapshot.
       expect(snapshotHash(policy)).toBe(
-        "58a3551de52903210971fb74c7789f15ac4152dc579986b7aa7b73a3a11b27de",
+        "9455a41d8b3f93bbb9aecaad76d1223cee7577cf3bcb4320e9164609d735a392",
       );
     });
 
@@ -805,6 +811,11 @@ if (import.meta.vitest) {
         summary: ISSUE_REGISTRY.TARGET_ROOT_MISSING.summary,
         detail: "/home/projects/site",
       });
+      const withWindowsPath = createIssue(ISSUE_CODES.targetRootMissing, {
+        detail: "D:\\site",
+      });
+      expect(withWindowsPath.displayDetails.detail).toBe("D:\\site");
+      expect(toIssueDetail("D:/site")).toBe("D:/site");
       const withEmbed = createIssue(ISSUE_CODES.unresolvableImage, {
         detail: "missing-image.png",
       });
@@ -819,6 +830,7 @@ if (import.meta.vitest) {
       expect(JSON.stringify(rejected)).not.toContain(canary);
       expect(toIssueDetail("")).toBeUndefined();
       expect(toIssueDetail("unit\u001fseparator")).toBeUndefined();
+      expect(toIssueDetail("host:repo")).toBeUndefined();
       expect(isMdxRelayIssue(withPath)).toBe(true);
       expect(
         isMdxRelayIssue({

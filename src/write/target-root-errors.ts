@@ -3,7 +3,8 @@
  * map these to distinct blockers so a missing folder is never reported as
  * mid-planning staleness.
  */
-export type TargetRootFailureKind = "missing" | "not-directory" | "symlink";
+export type TargetRootFailureKind =
+  "missing" | "not-directory" | "symlink" | "inaccessible";
 
 export class TargetRootResolutionError extends Error {
   readonly kind: TargetRootFailureKind;

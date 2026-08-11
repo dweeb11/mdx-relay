@@ -8,6 +8,7 @@ export type TargetFolderConfigProblem =
   | "relative"
   | "unsafe"
   | "missing"
+  | "inaccessible"
   | "not-directory"
   | "symlink";
 
@@ -51,7 +52,7 @@ export async function probeTargetFolderConfig(
     return { ok: true };
   } catch (error) {
     if (errorCode(error) === "ENOENT") return { ok: false, problem: "missing" };
-    return { ok: false, problem: "missing" };
+    return { ok: false, problem: "inaccessible" };
   }
 }
 
@@ -70,6 +71,8 @@ export function targetFolderConfigMessage(
       return "Target folder path is not a safe absolute path.";
     case "missing":
       return "Target folder does not exist.";
+    case "inaccessible":
+      return "Target folder is inaccessible.";
     case "not-directory":
       return "Target folder must be a directory.";
     case "symlink":
