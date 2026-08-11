@@ -1343,8 +1343,8 @@ if (import.meta.vitest) {
         "mdxRelayErr",
         "mdxRelayOk",
         "ok",
-        "toSafePathLabel",
         "toIssueDetail",
+        "toSafePathLabel",
       ]);
     });
   });
