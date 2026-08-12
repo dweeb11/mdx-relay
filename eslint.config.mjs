@@ -615,7 +615,7 @@ const freezeContractsRule = {
 
 export default tseslint.config(
   {
-    ignores: ["coverage/**", "dist/**", "node_modules/**"],
+    ignores: ["coverage/**", "dist/**", "node_modules/**", "release/**"],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
