@@ -27,7 +27,7 @@ MDX Relay writes only approved files under one configured local target root. It 
 
 ## Development
 
-Implementation has not started. Read these first:
+Implementation exists for the worker, export planner, Obsidian host shell, settings, preview modal, production bundle gates, and release-archive packaging gates. Read these first:
 
 1. `PITCH.md`
 2. `WORKING_AGREEMENT.md`
@@ -35,7 +35,7 @@ Implementation has not started. Read these first:
 4. `GIT_CONVENTIONS.md`
 5. `AGENTS.md` or the orientation file for your coding tool
 
-Build and test commands will be added by the first approved engineering slice.
+Build, test, package, and verify commands live in `AGENTS.md`. Manual macOS packaged acceptance is documented in `docs/testing/macos-packaged-smoke.md`.
 
 ## License
 

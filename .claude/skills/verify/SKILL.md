@@ -23,7 +23,7 @@ Required: Node 22.x, a lockfile-backed install, and exit code 0.
 npm run verify
 ```
 
-`verify` runs formatting, ESLint contract-boundary enforcement, TypeScript, unit coverage, integration tests, and the production bundle check. Integration lanes that have not landed yet use Vitest's explicit `--passWithNoTests`; the command must still run and report that no tests were found. The bundle check builds `dist/main.js` and fails if any native `.node` artifact exists.
+`verify` runs formatting, ESLint contract-boundary enforcement, TypeScript, unit coverage, integration tests, the production bundle check, and `test:package` (release-archive packaging plus `scripts/inspect-archive.mjs`). Integration lanes that have not landed yet use Vitest's explicit `--passWithNoTests`; the command must still run and report that no tests were found. The bundle check builds `dist/main.js` and fails if any native `.node` artifact exists. The package check builds the three-file Obsidian archive and fails on allowlist, native-binary, or version-alignment violations.
 
 ## Step 3: Direct task gates
 
@@ -46,13 +46,13 @@ Required: every command exits 0 and the direct `.node` search prints nothing.
 
 ## Step 4: Private baseline when available
 
-T7 supplies the external fixture resolver and test. Until then, this command honestly reports Vitest's no-tests-yet result:
+`test:private-baseline` is landed and uses `scripts/resolve-private-baseline.mjs`. When `MDX_RELAY_PRIVATE_FIXTURE_ROOT` is unset or empty, the external fixture comparison is skipped per test and the remaining resolver tests must still pass. When set to the approved machine-local fixture root, require that comparison to pass. `verify` does not run this lane because it needs machine-local data; `test:package` already runs inside `verify`.
 
 ```bash
 npm run test:private-baseline
 ```
 
-Once T7 lands, set `MDX_RELAY_PRIVATE_FIXTURE_ROOT` to the approved machine-local fixture root and require passing tests. Never copy private fixture bytes into the repository, coverage, logs, or reports.
+Never copy private fixture bytes into the repository, coverage, logs, or reports.
 
 ## Step 5: Acceptance evidence
 
