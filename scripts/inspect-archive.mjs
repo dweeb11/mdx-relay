@@ -1,9 +1,12 @@
 // Fail-closed release-archive gate: existence, exact three-file allowlist,
-// no native `.node` binaries, and version alignment across manifest.json,
-// package.json, and versions.json. Prints per-file size and SHA-256 in the
-// same style as scripts/inspect-bundle.mjs. Dependency-free: Node builtins + tar.
+// no native `.node` binaries, non-empty payloads, byte/hash identity with
+// repo-root manifest.json and freshly built dist/*.js, and version alignment
+// across manifest.json, package.json, and versions.json. Prints per-file size
+// and SHA-256 in the same style as scripts/inspect-bundle.mjs.
+// Dependency-free: Node builtins + tar.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -11,6 +14,9 @@ import { fileURLToPath, URL } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const ALLOWLIST = ["main.js", "manifest.json", "processing.worker.js"];
+const DIST_FILES = ["main.js", "processing.worker.js"];
+
+const sha256Hex = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 const readJson = (relativePath) => {
   const absolute = path.join(root, relativePath);
@@ -20,9 +26,15 @@ const readJson = (relativePath) => {
   return JSON.parse(readFileSync(absolute, "utf8"));
 };
 
+const buffersEqual = (left, right) => {
+  if (left.length !== right.length) return false;
+  return left.compare(right) === 0;
+};
+
 const manifest = readJson("manifest.json");
 const packageMetadata = readJson("package.json");
 const versions = readJson("versions.json");
+const rootManifestBytes = readFileSync(path.join(root, "manifest.json"));
 
 const version = manifest.version;
 const minAppVersion = manifest.minAppVersion;
@@ -46,7 +58,9 @@ if (versions[version] !== minAppVersion) {
   );
 }
 
-const archivePath = path.join(root, "release", `mdx-relay-${version}.tar.gz`);
+const archivePath = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(root, "release", `mdx-relay-${version}.tar.gz`);
 if (!existsSync(archivePath)) {
   throw new Error(
     `release archive missing: ${path.relative(root, archivePath)}; run npm run package`,
@@ -90,11 +104,14 @@ const rows = ALLOWLIST.map((name) => {
       `tar extract failed for ${name} (${extracted.status}): ${String(extracted.stderr || "")}`,
     );
   }
-  const bytes = extracted.stdout;
+  const bytes = Buffer.from(extracted.stdout);
+  if (bytes.length === 0) {
+    throw new Error(`archived ${name} is empty (0 bytes)`);
+  }
   return {
     name,
     bytes: bytes.length,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
+    sha256: sha256Hex(bytes),
     content: bytes,
   };
 });
@@ -105,8 +122,29 @@ for (const row of rows) {
   );
 }
 
+const byName = Object.fromEntries(rows.map((row) => [row.name, row]));
+
+if (!buffersEqual(byName["manifest.json"].content, rootManifestBytes)) {
+  throw new Error(
+    "archived manifest.json is not byte-identical to repository-root manifest.json",
+  );
+}
+
+for (const name of DIST_FILES) {
+  const distPath = path.join(root, "dist", name);
+  if (!existsSync(distPath)) {
+    throw new Error(`dist/${name} missing; run npm run package`);
+  }
+  const distSha256 = sha256Hex(readFileSync(distPath));
+  if (byName[name].sha256 !== distSha256) {
+    throw new Error(
+      `archived ${name} sha256 (${byName[name].sha256}) != dist/${name} sha256 (${distSha256})`,
+    );
+  }
+}
+
 const archivedManifest = JSON.parse(
-  rows.find((row) => row.name === "manifest.json").content.toString("utf8"),
+  byName["manifest.json"].content.toString("utf8"),
 );
 if (archivedManifest.version !== version) {
   throw new Error(
