@@ -19,7 +19,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, basename, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -36,6 +36,8 @@ import { createIssue, ISSUE_CODES } from "../../../src/contracts/issues";
 import { mdxRelayErr, mdxRelayOk } from "../../../src/contracts/result";
 import {
   buildExportPlan,
+  MAX_PORTABLE_PATH_SEGMENT_LENGTH,
+  MAX_PORTABLE_TARGET_PATH_LENGTH,
   type ExportPlanBuildInput,
   type PlanSourceBytes,
 } from "../../../src/planning/build-export-plan";
@@ -212,9 +214,9 @@ const injectFault = (
     fail("createDirectoryIn", join(parentPath, name));
     return base.createDirectoryIn(parentPath, parentIdentity, name);
   },
-  createTemporary: async (directoryPath, baseName) => {
-    fail("createTemporary", join(directoryPath, baseName));
-    const owned = await base.createTemporary(directoryPath, baseName);
+  createTemporary: async (directoryPath) => {
+    fail("createTemporary", directoryPath);
+    const owned = await base.createTemporary(directoryPath);
     return {
       ...owned,
       handle: {
@@ -317,6 +319,77 @@ describe("approved target-folder writes", () => {
     await expect(lstat(join(targetRoot, ".git"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("writes a target at the maximum accepted portable path length", async () => {
+    const contentRoot = DPW_MIND_NET_V1.output.contentRoot;
+    const maxSlugForPath =
+      MAX_PORTABLE_TARGET_PATH_LENGTH - contentRoot.length - 1 - ".mdx".length;
+    const maxSafeSlug = "c".repeat(
+      Math.min(
+        maxSlugForPath,
+        MAX_PORTABLE_PATH_SEGMENT_LENGTH - ".mdx".length,
+      ),
+    );
+    const targetPath = `${contentRoot}/${maxSafeSlug}.mdx`;
+    const targetBaseName = `${maxSafeSlug}.mdx`;
+    // Under the old basename-coupled staging scheme this would exceed NAME_MAX.
+    expect(
+      Buffer.byteLength(
+        `${targetBaseName}${TARGET_WRITE_TEMPORARY_SUFFIX}-00000000-0000-0000-0000-000000000000`,
+        "utf8",
+      ),
+    ).toBeGreaterThan(255);
+
+    const targets = [
+      { relativePath: targetPath, priorState: { state: "absent" as const } },
+    ];
+    const envelope = sealedPlan(targetRoot, {
+      documentSlug: maxSafeSlug,
+      imageEmbeds: [],
+      sourceImages: [],
+      transformedImages: [],
+      sourceBytes: { note: NOTE_BYTES, images: new Map() },
+      priorTargets: targets,
+      finalCapture: {
+        ...buildInput(targetRoot).finalCapture,
+        targets,
+        sourceImages: [],
+      },
+    });
+    if (envelope.state !== "ready" || !envelope.sourceBytesVerified)
+      throw new Error("expected verified ready plan");
+
+    const stagedNames: string[] = [];
+    const observed = injectFault(deps.fileSystem, (op, entryPath) => {
+      if (
+        op === "sync" &&
+        basename(entryPath).includes(TARGET_WRITE_TEMPORARY_SUFFIX)
+      )
+        stagedNames.push(basename(entryPath));
+    });
+
+    const result = await applyApprovedWrites(writeInput(envelope, targetRoot), {
+      ...deps,
+      fileSystem: observed,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.report.completed.map((entry) => entry.targetPath)).toEqual([
+      targetPath,
+    ]);
+    expect(
+      new Uint8Array(await readFile(join(targetRoot, targetPath))),
+    ).toEqual(MDX_BYTES);
+    expect(stagedNames).toHaveLength(1);
+    expect(Buffer.byteLength(stagedNames[0]!, "utf8")).toBeLessThanOrEqual(255);
+    expect(
+      stagedNames[0]!.startsWith(`${TARGET_WRITE_TEMPORARY_SUFFIX}-`),
+    ).toBe(true);
+    expect(await readdir(join(targetRoot, contentRoot))).toEqual([
+      targetBaseName,
+    ]);
   });
 
   it("updates existing targets when prior hashes still match", async () => {
@@ -823,7 +896,10 @@ describe("approved target-folder writes", () => {
       entry.includes(TARGET_WRITE_TEMPORARY_SUFFIX),
     );
     expect(leftover).toHaveLength(1);
-    expect(leftover[0]!.startsWith("example.mdx")).toBe(true);
+    expect(leftover[0]!.startsWith(`${TARGET_WRITE_TEMPORARY_SUFFIX}-`)).toBe(
+      true,
+    );
+    expect(Buffer.byteLength(leftover[0]!, "utf8")).toBeLessThanOrEqual(255);
     expect(removalAttempts).toEqual([join(posts, leftover[0]!)]);
     expect(new Uint8Array(await readFile(join(posts, leftover[0]!)))).toEqual(
       MDX_BYTES,
@@ -1225,7 +1301,8 @@ describe("approved target-folder writes", () => {
     const faulty = injectFault(deps.fileSystem, (op, entryPath) => {
       if (
         op !== "sync" ||
-        !entryPath.startsWith(`${mdxPath}${TARGET_WRITE_TEMPORARY_SUFFIX}`) ||
+        dirname(entryPath) !== dirname(mdxPath) ||
+        !basename(entryPath).startsWith(`${TARGET_WRITE_TEMPORARY_SUFFIX}-`) ||
         existsSync(mdxPath)
       )
         return;
@@ -1295,7 +1372,8 @@ describe("approved target-folder writes", () => {
       if (
         op !== "sync" ||
         edited ||
-        !entryPath.startsWith(`${mdxPath}${TARGET_WRITE_TEMPORARY_SUFFIX}`)
+        dirname(entryPath) !== dirname(mdxPath) ||
+        !basename(entryPath).startsWith(`${TARGET_WRITE_TEMPORARY_SUFFIX}-`)
       )
         return;
       edited = true;
@@ -1577,6 +1655,19 @@ describe("approved target-folder writes", () => {
           "content",
         ),
       ).toEqual({ kind: "unsafe" });
+    });
+
+    it("stages under a NAME_MAX-safe basename independent of the target", async () => {
+      const owned = await fileSystem.createTemporary(targetRoot);
+      const name = basename(owned.path);
+      expect(name.startsWith(`${TARGET_WRITE_TEMPORARY_SUFFIX}-`)).toBe(true);
+      expect(Buffer.byteLength(name, "utf8")).toBeLessThanOrEqual(255);
+      // Marker + hyphen + UUID is a fixed 57-byte budget.
+      expect(Buffer.byteLength(name, "utf8")).toBe(
+        Buffer.byteLength(TARGET_WRITE_TEMPORARY_SUFFIX, "utf8") + 1 + 36,
+      );
+      await owned.handle.close();
+      await fileSystem.removeOwnedTemporary(owned.path, owned.identity);
     });
   });
 
