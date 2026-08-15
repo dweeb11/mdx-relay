@@ -10,7 +10,7 @@ Evidence: current BRAT source at [TfTHacker/obsidian42-brat](https://github.com/
 
 - The `ReleaseFiles` interface is exactly `{ mainJs, manifest, styles }`. `getAllReleaseFiles()` fetches release assets **by exact filename**: `main.js`, `manifest.json`, `styles.css`. There is no mechanism for arbitrary extra assets, and BRAT never unpacks archives — a `.tar.gz` asset is ignored.
 - `writeReleaseFilesToPluginFolder()` writes only those three files into `.obsidian/plugins/<id>/` (`styles.css` only if present in the release).
-- Install fails only if `main.js` is missing from the release. A missing `processing.worker.js` would **not** fail install — the plugin would install cleanly and then break at runtime when `plugin-composition.ts` does `new Worker(`${manifest.dir}/processing.worker.js`)`.
+- Install fails only if `main.js` is missing from the release. A missing `processing.worker.js` would **not** fail install — BRAT copies the files it has — but the plugin then fails to **load**: `configureMdxRelayPlugin()` awaits `vault.adapter.readBinary()` on `<plugin dir>/processing.worker.js` during `onload()` (`src/obsidian/plugin-composition.ts`), so enabling the plugin rejects before any command registers. (The `Worker` itself is constructed later from a same-origin Blob URL built from those bytes — Obsidian's per-vault `app://` host makes a direct file URL cross-origin.)
 - Obsidian's official community-plugin installer has the same three-file contract, so fixing this now also removes a future graduation blocker (community listing itself stays out of scope for this map).
 
 ## Release layout BRAT requires
@@ -28,7 +28,7 @@ BRAT's update flow: on launch (or manual command) it fetches the latest release,
 
 ## Required change: eliminate the separate worker file
 
-**Recommended: inline the worker bundle into `main.js` and instantiate it via a Blob URL.** The worker bundle is already fully self-contained (its codec WASM is inlined as bytes per `esbuild.config.mjs`), so this is one more level of inlining: embed the built worker source as text in the main bundle and do `new Worker(URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" })))`. This is the standard technique for worker-using Obsidian plugins. The release then has the canonical two-file layout (`manifest.json` + `main.js`) and works identically under BRAT, manual install, and any future community install.
+**Recommended: inline the worker bundle into `main.js` and instantiate it via a Blob URL.** The worker bundle is already fully self-contained (its codec WASM is inlined as bytes per `esbuild.config.mjs`), so this is one more level of inlining: embed the built worker source as text in the main bundle. The Blob-URL spawn already exists — `plugin-composition.ts` reads the worker file via the vault adapter and constructs the `Worker` from `URL.createObjectURL(new Blob(...))` — so the change is only where the bytes come from: the embedded string instead of `readBinary()` on a loose file. This is the standard technique for worker-using Obsidian plugins. The release then has the canonical two-file layout (`manifest.json` + `main.js`) and works identically under BRAT, manual install, and any future community install.
 
 Rejected alternative: have `main.js` self-extract `processing.worker.js` into the plugin folder on load. It works under BRAT, but adds a write surface outside the approved target folder, plus a stale-file hazard on update (BRAT overwrites `main.js` but never removes or refreshes files it doesn't manage).
 
