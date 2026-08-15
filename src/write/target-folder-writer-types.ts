@@ -117,13 +117,13 @@ export interface TargetFolderFileSystem {
   ): Promise<DirectoryCreationOutcome>;
   /**
    * Exclusively creates an empty temporary file under a unique unguessable name
-   * inside `directoryPath`. Never opens an existing entry and never follows a
-   * final symlink, so the returned file belongs to this invocation alone.
+   * inside `directoryPath`. The staging basename is bounded and independent of
+   * the approved target basename so NAME_MAX cannot reject a path the planner
+   * already accepted as portable. Never opens an existing entry and never
+   * follows a final symlink, so the returned file belongs to this invocation
+   * alone.
    */
-  createTemporary(
-    directoryPath: string,
-    baseName: string,
-  ): Promise<OwnedTemporaryFile>;
+  createTemporary(directoryPath: string): Promise<OwnedTemporaryFile>;
   rename(fromPath: string, toPath: string): Promise<void>;
   /**
    * Hard-links `fromPath` at `toPath` without ever replacing an existing entry.

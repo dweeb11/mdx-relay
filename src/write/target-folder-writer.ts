@@ -1,4 +1,4 @@
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { deepEquals } from "../canonical";
 import {
@@ -527,10 +527,7 @@ const writeOneTarget = async (
 
   let temporary: OwnedTemporaryFile;
   try {
-    temporary = await deps.fileSystem.createTemporary(
-      parent,
-      basename(absolutePath),
-    );
+    temporary = await deps.fileSystem.createTemporary(parent);
   } catch {
     return issueAt(ISSUE_CODES.targetWriteFailed, relativePath);
   }

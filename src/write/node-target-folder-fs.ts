@@ -46,8 +46,14 @@ const errorCode = (error: unknown): string | undefined =>
 /** Number of exclusive-create attempts before a unique name is given up on. */
 const TEMPORARY_NAME_ATTEMPTS = 8;
 
-const uniqueTemporaryName = (baseName: string): string =>
-  `${baseName}${TARGET_WRITE_TEMPORARY_SUFFIX}-${globalThis.crypto.randomUUID()}`;
+/**
+ * Staging basename independent of the approved target. Same-directory staging
+ * is required for the atomic rename; the target basename is not. A fixed
+ * marker plus UUID stays well under the common 255-byte NAME_MAX even when the
+ * planner accepts a near-maximum portable target path.
+ */
+const uniqueTemporaryName = (): string =>
+  `${TARGET_WRITE_TEMPORARY_SUFFIX}-${globalThis.crypto.randomUUID()}`;
 
 /**
  * Writes the whole buffer. `FileHandle.write` may persist fewer bytes than
@@ -184,9 +190,9 @@ export function createNodeTargetFolderFileSystem(): TargetFolderFileSystem {
         identity: identityOf(childStats),
       };
     },
-    async createTemporary(directoryPath, baseName) {
+    async createTemporary(directoryPath) {
       for (let attempt = 0; attempt < TEMPORARY_NAME_ATTEMPTS; attempt += 1) {
-        const filePath = join(directoryPath, uniqueTemporaryName(baseName));
+        const filePath = join(directoryPath, uniqueTemporaryName());
         let handle;
         try {
           handle = await open(
