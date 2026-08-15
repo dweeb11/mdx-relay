@@ -3,6 +3,7 @@
 ## Orientation
 
 Read before acting:
+
 1. `PITCH.md` — the human's design vision (never modify)
 2. `WORKING_AGREEMENT.md` — development process
 3. `WORKING_AGREEMENT.apps.md` — app-specific conventions
@@ -35,18 +36,21 @@ npm run test:unit
 npm run test:coverage
 npm run test:integration
 npm run test:bundle
+npm run package
+npm run test:package
 npm run test:private-baseline
 npm run build
 npm run verify
 ```
 
-Use `test:unit` for focused or scoped development runs. Use `test:coverage` or `verify` for the full unit and JSDOM coverage gate. `test:private-baseline` currently reports Vitest's explicit no-tests-yet result; T7 adds the external fixture resolver and tests. Set `MDX_RELAY_PRIVATE_FIXTURE_ROOT` only when those tests exist. `verify` runs every public T0 gate and excludes the private baseline because it requires machine-local data.
+Use `test:unit` for focused or scoped development runs. Use `test:coverage` or `verify` for the full unit and JSDOM coverage gate. `package` builds the production bundle and stages the three-file Obsidian archive under `release/mdx-relay-VERSION.tar.gz`. `test:package` runs that packaging path plus `scripts/inspect-archive.mjs` (exact three-file allowlist, no `.node` binaries, and version alignment across `manifest.json`, `package.json`, and `versions.json`). `verify` runs every public T0 gate through `test:bundle` and `test:package`, and excludes the private baseline because it requires machine-local data. `test:private-baseline` uses `scripts/resolve-private-baseline.mjs`: when `MDX_RELAY_PRIVATE_FIXTURE_ROOT` is unset or empty, the external fixture comparison is skipped per test; when set to the approved fixture root, that comparison must pass. Never copy private fixture bytes into the repository.
 
 ## Skill routing
 
 When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
 
 Key routing rules:
+
 - Product ideas/brainstorming → invoke /office-hours
 - Strategy/scope → invoke /plan-ceo-review
 - Architecture → invoke /plan-eng-review

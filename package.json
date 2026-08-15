@@ -15,9 +15,11 @@
     "test:coverage": "vitest run --project unit --project jsdom --coverage",
     "test:integration": "vitest run --project integration --passWithNoTests",
     "test:bundle": "npm run build && node esbuild.config.mjs probe-node-builtins && node scripts/inspect-bundle.mjs && node scripts/run-bundle-worker-smoke.mjs",
+    "package": "npm run build && node scripts/package-release.mjs",
+    "test:package": "npm run package && node scripts/inspect-archive.mjs",
     "test:private-baseline": "vitest run --project private-baseline --passWithNoTests",
     "build": "node esbuild.config.mjs production",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run test:integration && npm run test:bundle"
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run test:integration && npm run test:bundle && npm run test:package"
   },
   "dependencies": {
     "@jsquash/jpeg": "1.6.0",
