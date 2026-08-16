@@ -1,12 +1,23 @@
-# astro-blog-v1 — second built-in profile spec
+# astro-blog-v1 — second built-in profile design
 
-Pinned spec for the second built-in portable profile: an Astro
+Pinned design decisions for the second built-in portable profile: an Astro
 content-collections blog, public-assets variant. Produced by the wayfinder
-effort "Second built-in profile candidates" (APP-687); this document is the
-handoff to implementation. Evidence: the
+effort "Second built-in profile candidates" (APP-687).
+
+**Status:** this is the design/decision record, not the implementation spec.
+Per `WORKING_AGREEMENT.md` (Spec Conventions), the task plan — Task N sections
+with exact file paths, complete code, verification commands, acceptance
+criteria, and automated tests — is authored at implementation kickoff, where
+it merges with this design into the one implementation spec. Nothing here is
+implementable without that plan; nothing in that plan may contradict a
+decision pinned here.
+
+Evidence: the
 [content-contract research](https://linear.app/critterhaus/document/astro-blog-v1-content-contract-40cbbac12ef3)
-and the validated scaffold at `~/projects/sandbox/astro-blog-sample`
-(official Astro blog starter; all claims below verified against real builds).
+and real builds of the official Astro blog starter (all claims below verified
+against them; the "Validated sample output" section reproduces the reference
+file and the from-scratch validation steps, so no machine-local state is
+load-bearing).
 
 ## Target contract
 
@@ -65,6 +76,12 @@ export const ASTRO_BLOG_V1 = {
    `emit: "component"`; a markdown-mode profile must not carry the key, and
    `hasExactKeys` is checked per variant. `dpw-mind-net-v1` gains
    `emit: "component"` and keeps its `component` field.
+   **Legacy acceptance:** an `images` object with `component` and **no**
+   `emit` key parses as implicit `emit: "component"` — profiles serialized by
+   the current release stay valid, which is what keeps this v1-compatible
+   growth rather than a v2. New profiles (including both built-ins as
+   shipped) write `emit` explicitly; omission is a compatibility affordance,
+   not the idiom.
 3. **Markdown emission** produces `![{alt}]({assetUrl})`, carrying the source
    image's alt text through (component mode's `alt=""` wart is not inherited).
    The only image source syntax is the Obsidian embed `![[file|suffix]]`, and
@@ -128,11 +145,58 @@ target's `z.coerce.date()` and break the Astro build just the same).
 
 ## Validated sample output
 
-`src/content/blog/getting-started-with-mdx-relay.mdx` in the scaffold is the
-reference output for a representative note (markdown image with alt text,
-blockquote callout, flattened wikilink, list, inline code). `npm run build`
-renders it with the image tag emitted verbatim
-(`<img src="/blog/getting-started-with-mdx-relay/img-1.webp" alt="Diagram of the export pipeline"/>`).
+Reference output for a representative note (markdown image with alt text,
+blockquote callout, flattened wikilink, list, inline code), reproduced here in
+full so the design is self-contained; a checked-in test fixture derived from
+it lands with the implementation's automated tests. The complete expected
+file, `src/content/blog/getting-started-with-mdx-relay.mdx`:
+
+````mdx
+---
+title: Getting started with MDX Relay
+description: How approved notes and their images become exact MDX files under a target folder.
+pubDate: "2026-08-16"
+tags: [tools, publishing]
+---
+
+MDX Relay converts an approved Obsidian note into a profile-specific MDX file,
+previews the exact bytes, and writes only what you approved.
+
+> **Note**: callouts flatten to blockquotes in the astro-blog-v1 preset, so this
+> renders as an ordinary quote.
+
+Here is an inline image that the pipeline resized and converted to webp:
+
+![Diagram of the export pipeline](/blog/getting-started-with-mdx-relay/img-1.webp)
+
+Wikilinks are flattened to plain text or links, like this reference to
+[the sample post](/blog/mdx-relay-sample/).
+
+Some *emphasis*, some `inline code`, and a list:
+
+- sealed plans
+- approval bound to exact bytes
+- a single write surface
+````
+
+To reproduce the validation from scratch (any machine):
+
+```sh
+npm create astro@latest astro-blog-sample -- --template blog --install --no-git --yes
+cd astro-blog-sample
+# save the file above as src/content/blog/getting-started-with-mdx-relay.mdx
+mkdir -p public/blog/getting-started-with-mdx-relay
+# place any webp at public/blog/getting-started-with-mdx-relay/img-1.webp
+npm run build
+```
+
+Expected: the build succeeds against the starter's stock `content.config.ts`
+(the extra `tags` key is stripped, not rejected), and
+`dist/blog/getting-started-with-mdx-relay/index.html` contains the image tag
+verbatim:
+`<img src="/blog/getting-started-with-mdx-relay/img-1.webp" alt="Diagram of the export pipeline"/>`.
+Deleting the `pubDate` line makes the build fail with
+`[InvalidContentEntryDataError]` naming the field.
 
 ## Out of contract (consciously)
 
