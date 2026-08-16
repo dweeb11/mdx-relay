@@ -67,6 +67,18 @@ export const ASTRO_BLOG_V1 = {
    `emit: "component"` and keeps its `component` field.
 3. **Markdown emission** produces `![{alt}]({assetUrl})`, carrying the source
    image's alt text through (component mode's `alt=""` wart is not inherited).
+   The only image source syntax is the Obsidian embed `![[file|suffix]]`, and
+   its pipe suffix is not always alt text — Obsidian also uses it for display
+   sizing. Classification of the suffix (everything after the first `|`,
+   trimmed):
+   - Matches `^\d+$` (width) or `^\d+x\d+$` (width×height) → **resize hint**:
+     ignored for emission (display sizing is the site's concern), and the
+     image counts as having no alt text.
+   - Anything else → **alt text**, escaped with the same MDX-safety rules as
+     wikilink alias text.
+   - No suffix, or an empty/whitespace suffix → no alt text.
+   Images without alt text emit `![]({assetUrl})` and surface the existing
+   missing-alt warning; a resize hint must never be published as alt text.
 4. `wikilinks`/`callouts` stay pinned literals — nothing here unpins them.
 5. Forward-compatibility caveat: `hasExactKeys` means plugin versions predating
    `images.emit` hard-reject profiles that carry it. The stance on that is
