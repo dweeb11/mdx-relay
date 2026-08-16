@@ -75,12 +75,25 @@ export const ASTRO_BLOG_V1 = {
      ignored for emission (display sizing is the site's concern), and the
      image counts as having no alt text.
    - Anything else → **alt text**, escaped with the same MDX-safety rules as
-     wikilink alias text.
+     wikilink alias text, plus markdown image-label escaping: backslash-escape
+     `\`, `[`, and `]` so the label can never terminate or corrupt the
+     `![alt](url)` form (the source matcher accepts these characters in the
+     suffix today).
    - No suffix, or an empty/whitespace suffix → no alt text.
    Images without alt text emit `![]({assetUrl})` and surface the existing
    missing-alt warning; a resize hint must never be published as alt text.
-4. `wikilinks`/`callouts` stay pinned literals — nothing here unpins them.
-5. Forward-compatibility caveat: `hasExactKeys` means plugin versions predating
+4. **Markdown-safe destinations.** Markdown emission uses the resolved asset
+   URL as a raw inline destination, and the current portable-path rules allow
+   characters that break that form (internal spaces; `(`, `)`). So markdown
+   mode tightens profile validation per variant instead of escaping at
+   emission: when `emit: "markdown"`, every literal segment of
+   `assetUrlTemplate` and the whole `filenameTemplate` must contain no
+   whitespace and none of `(`, `)`, `<`, `>`. A profile violating this is
+   rejected at parse time, fail-closed with why. The placeholders are already
+   safe: `slugify` yields only `[a-z0-9-]`, and `{index}` is numeric. The
+   built-in literal above satisfies the rule.
+5. `wikilinks`/`callouts` stay pinned literals — nothing here unpins them.
+6. Forward-compatibility caveat: `hasExactKeys` means plugin versions predating
    `images.emit` hard-reject profiles that carry it. The stance on that is
    owned by the profile-format work on the beta map (APP-680), not this spec.
 
@@ -109,7 +122,9 @@ tags: [tools, publishing]
 ```
 
 Blockers for the frontmatter guidance report under this preset: missing/empty
-`title`, `date`, or `summary` (all three map to Astro build-failing fields).
+`title`, `date`, or `summary` (all three map to Astro build-failing fields),
+and a `date` that is present but unparseable as a date (it would fail the
+target's `z.coerce.date()` and break the Astro build just the same).
 
 ## Validated sample output
 
