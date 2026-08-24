@@ -1,0 +1,53 @@
+name: Claude Review
+
+# Reviews ONLY the delegated-fix lane (Linear triage -> Codex cloud). Herdr ship
+# runs already have the local Claude reviewer pane; reviewing them twice is the
+# review-tail problem this setup replaced. Summon a review anywhere else by
+# commenting "@claude review".
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  review:
+    if: |
+      startsWith(github.event.pull_request.head.ref, 'fix/') ||
+      startsWith(github.event.pull_request.head.ref, 'repro/') ||
+      startsWith(github.event.pull_request.head.ref, 'codex/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the reviewer for a delegated bug-fix PR. Read the repo's
+            AGENTS.md first — especially "Code review", "Bugs and repro (triage
+            protocol)", and "PR contract" — and hold this PR to them.
+
+            Focus on P0/P1 only:
+            - P0: unsafe to ship — data loss, auth/secret exposure, broken build,
+              destructive migration.
+            - P1: must fix before merge — correctness bug on a primary path,
+              missing repro evidence on the linked issue (a fix PR whose issue
+              has no failing test or playtest evidence is a P1), scope beyond
+              the one linked issue, PR body not following the PR contract.
+            P2/P3 (style, refactors, nits): mention at most three, in one line
+            each. They expire with this PR — do not file or request tickets.
+
+            Post exactly one review via `gh pr review` with:
+            - First line: `<!-- REVIEWER: claude-action sha=<head sha> -->`
+            - A verdict: `VERDICT: approve` or `VERDICT: request-changes`
+            - A `FOR DAVE:` line — `Looks Good`, `Needs a Look`, or `Risky` —
+              with one plain-language sentence why.
+            Approve when there are no P0/P1 findings. Never push commits.
+          claude_args: '--allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh issue view:*)"'
